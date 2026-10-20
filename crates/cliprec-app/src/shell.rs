@@ -286,6 +286,11 @@ impl Ui {
                 self.relabel(l);
                 self.hotkeys.video = parse_chord("video", &cfg.hotkeys.video, l);
                 self.hotkeys.audio = parse_chord("audio", &cfg.hotkeys.audio, l);
+                // Il mouse si ascolta solo se serve: la registrazione segue la nuova configurazione.
+                let h = self.app.hwnd.load(Ordering::Relaxed);
+                if let Err(e) = rawinput::register(HWND(h as *mut _), hotkey::needs_mouse(self.hotkeys.video, self.hotkeys.audio)) {
+                    tracing::warn!("registrazione Raw Input: {e}");
+                }
                 for w in hotkey_warnings(&cfg, i18n::current()) {
                     self.app.process_event(&EngineEvent::Warning(w));
                 }
@@ -478,7 +483,7 @@ fn build_ui(app: &Arc<App>, hwnd: HWND) -> anyhow::Result<Ui> {
 
     let cfg = app.config.lock().map(|c| c.clone()).unwrap_or_default();
     let hotkeys = Hotkeys::new(parse_chord("video", &cfg.hotkeys.video, l), parse_chord("audio", &cfg.hotkeys.audio, l));
-    rawinput::register(hwnd).context("registrazione Raw Input")?;
+    rawinput::register(hwnd, hotkey::needs_mouse(hotkeys.video, hotkeys.audio)).context("registrazione Raw Input")?;
     Ok(Ui {
         app: Arc::clone(app),
         hotkeys,
