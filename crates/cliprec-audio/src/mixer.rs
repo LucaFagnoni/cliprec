@@ -74,8 +74,6 @@ struct Lane {
     volume: f32,
     input: Vec<f32>,
     output: Vec<f32>,
-    /// Ultimo scarto misurato in campioni (positivo = sorgente in anticipo).
-    last_error: f64,
     age: Arc<AtomicI64>,
 }
 
@@ -107,17 +105,11 @@ impl Mixer {
                 volume,
                 input: vec![0.0; max_in * CHANNELS],
                 output: vec![0.0; MIX_BLOCK_FRAMES * CHANNELS],
-                last_error: 0.0,
                 age: age.clone(),
             });
             inputs.push(MixInput { samples: sp, timing: tp, pos: 0, dropped_frames: 0, age_peak: 0, last_push: None, age });
         }
         Ok((Self { lanes, mix: vec![0.0; MIX_BLOCK_FRAMES * CHANNELS], limiter: Limiter::default() }, inputs))
-    }
-
-    /// Scarto attuale della corsia `i` in millisecondi (positivo = la sorgente è in anticipo).
-    pub fn lane_error_ms(&self, i: usize) -> f64 {
-        self.lanes.get(i).map_or(0.0, |l| l.last_error * 1000.0 / f64::from(SAMPLE_RATE))
     }
 
     /// Ritardo massimo con cui arrivano i dati degli ingressi (picco recente, in unità da 100 ns):
@@ -156,7 +148,6 @@ impl Lane {
             return false;
         }
         let mut error = self.read as f64 - self.est.predict(start);
-        self.last_error = error;
         if error > HARD_FRAMES {
             // In anticipo (avvio, ripresa): silenzio per esattamente `error` campioni, poi i dati
             // senza resampler. Dopo un blocco così lo scarto è circa zero.

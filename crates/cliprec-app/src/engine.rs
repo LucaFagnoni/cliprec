@@ -18,7 +18,7 @@ use crate::i18n::{K, tr};
 use cliprec_core::config::{Config, TrackMode, default_max_bitrate_kbps};
 use cliprec_core::{
     AppCommand, AudioTrackSink, ClipKind, EncodeError, EngineEvent, EngineStatus, GpuDevice, GpuFrame, QpcTime,
-    SourceState, VideoEncoder, VideoSource,
+    SourceState, VideoSource,
 };
 
 /// Clip mostrate nel menu della tray.
@@ -630,7 +630,7 @@ impl Drop for Session {
 }
 
 /// Esito dell'apertura di un encoder sul thread di apertura.
-type Opened = Result<Box<dyn VideoEncoder>, String>;
+type Opened = Result<cliprec_encode::Encoder, String>;
 
 /// Callback del pacer. L'encoder si apre su un thread a parte (serve la dimensione della sorgente,
 /// e aprirlo e prenotare il buffer dentro il pacer bloccherebbe i tick): finché non è pronto i frame
@@ -651,7 +651,7 @@ fn video_callback(
     let video_cfg = config.video.clone();
     let fps = config.video.fps.max(1);
     let (opened_tx, opened_rx) = std::sync::mpsc::channel::<Opened>();
-    let mut encoder: Option<Box<dyn VideoEncoder>> = None;
+    let mut encoder: Option<cliprec_encode::Encoder> = None;
     let mut opening = false;
     let mut failed: Vec<String> = Vec::new();
     let mut retry_at = Instant::now();

@@ -46,7 +46,7 @@ Rust su Windows x64 con le API native del sistema; FFmpeg 9 solo come libreria p
 - **Fallback software:** SVT-AV1 (licenza BSD) solo se manca un encoder hardware. Niente x264 o x265 (GPL), niente fdk-aac (non libera).
 - **Processo di registrazione:** solo loop di messaggi Win32 più `tray-icon` 0.26 e `muda` 0.21; nessun framework grafico nel processo che cattura e codifica.
 - **Impostazioni:** processo separato `cliprec-settings` in Slint 1.18, lanciato dalla tray e chiuso a fine uso, così tutta la sua memoria torna al sistema. La licenza royalty-free di Slint richiede l'attribuzione (widget `AboutSlint` nella pagina Informazioni). **\[DEFAULT\]**
-- **Integrazione con Windows:** notifiche toast con `tauri-winrt-notification` e un AppUserModelID registrato dal collegamento nel menu Start; istanza unica con mutex nominato; avvio automatico dalla chiave HKCU Run (`auto-launch`).
+- **Integrazione con Windows:** notifiche toast con `tauri-winrt-notification` e un AppUserModelID registrato dal collegamento nel menu Start; istanza unica con mutex nominato; avvio automatico dalla chiave HKCU Run (API del registro, senza crate esterni).
 - **Config, log, errori:** `serde` + `toml` 1.x in `%APPDATA%\ClipRec\config.toml` (modalità portable se il file sta accanto all'exe), `tracing` su file rotante, `thiserror` 2 nelle librerie e `anyhow` solo nei binari.
 - **Distribuzione:** installer Inno Setup 7 oppure Velopack (aggiornamenti delta). Firma con certificato OV, es. Certum: Azure Artifact Signing non è disponibile per i privati in Italia.
 - **Strumenti di misura:** `cargo-nextest`, `divan` per i micro-benchmark, PresentMon 2.4 per l'impatto sugli fps, Windows Performance Recorder/Analyzer e VMMap per CPU e memoria.

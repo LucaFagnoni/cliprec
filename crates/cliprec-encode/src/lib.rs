@@ -26,7 +26,9 @@ mod nal;
 mod yuv;
 
 use cliprec_core::config::{CodecChoice, ColorFormat, EncoderAdvanced, OutputResolution, VideoConfig, default_max_bitrate_kbps};
-use cliprec_core::{EncodeError, GpuDevice, VideoCodec, VideoEncoder};
+use cliprec_core::{EncodeError, GpuDevice, VideoCodec};
+
+pub use ffi::HwEncoder as Encoder;
 
 /// Famiglia di encoder.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -148,7 +150,7 @@ pub fn candidates(choice: CodecChoice) -> Vec<(VideoCodec, String)> {
 /// Errori: [`EncodeError::Unsupported`] se l'encoder non esiste o non può funzionare su questo
 /// device con queste opzioni; [`EncodeError::SessionRejected`] se la sessione è rifiutata (es.
 /// sessioni esaurite); [`EncodeError::Failed`] per argomenti non validi.
-pub fn open(device: &GpuDevice, settings: &EncoderSettings, encoder_name: &str) -> Result<Box<dyn VideoEncoder>, EncodeError> {
+pub fn open(device: &GpuDevice, settings: &EncoderSettings, encoder_name: &str) -> Result<Encoder, EncodeError> {
     let unsupported = || EncodeError::Unsupported(format!("nome di encoder sconosciuto: {encoder_name}"));
     let (codec, vendor) = if encoder_name == SOFTWARE_ENCODER {
         (VideoCodec::Av1, Vendor::Software)
@@ -198,7 +200,7 @@ pub fn open(device: &GpuDevice, settings: &EncoderSettings, encoder_name: &str) 
         colore_444 = settings.chroma444_for(encoder_name),
         "encoder aperto"
     );
-    Ok(Box::new(enc))
+    Ok(enc)
 }
 
 /// B-frame chiesti alla prima apertura di un encoder che li supporta.
@@ -220,13 +222,13 @@ fn with_bframe_fallback<T>(name: &str, b_frames: u32, mut open: impl FnMut(u32) 
 
 /// Apre il primo encoder di [`candidates`]`(settings.codec)` che funziona davvero su `device`.
 /// Se nessuno si apre restituisce l'errore dell'ultimo tentativo.
-pub fn open_best(device: &GpuDevice, settings: &EncoderSettings) -> Result<Box<dyn VideoEncoder>, EncodeError> {
+pub fn open_best(device: &GpuDevice, settings: &EncoderSettings) -> Result<Encoder, EncodeError> {
     open_after(device, settings, &[])
 }
 
 /// Come [`open_best`], ma salta gli encoder in `failed` (nomi FFmpeg, es. `hevc_nvenc`): per il
 /// ripiego a runtime quando un encoder fallisce in modo ripetibile.
-pub fn open_after(device: &GpuDevice, settings: &EncoderSettings, failed: &[String]) -> Result<Box<dyn VideoEncoder>, EncodeError> {
+pub fn open_after(device: &GpuDevice, settings: &EncoderSettings, failed: &[String]) -> Result<Encoder, EncodeError> {
     let mut last = EncodeError::Unsupported("nessun encoder disponibile".into());
     for (_, name) in candidates(settings.codec).into_iter().filter(|(_, n)| !failed.contains(n)) {
         match open(device, settings, &name) {

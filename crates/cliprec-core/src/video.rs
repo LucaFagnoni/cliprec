@@ -143,13 +143,3 @@ pub enum EncodeError {
     Failed(String),
 }
 
-/// Encoder video hardware. La conversione BGRA→NV12 e la scala nella risoluzione d'uscita
-/// (con bande nere) sono responsabilità dell'encoder.
-pub trait VideoEncoder: Send {
-    fn params(&self) -> &VideoStreamParams;
-    /// Codifica un frame; i pacchetti pronti vanno a `sink` in ordine di decodifica.
-    /// Prima di tornare deve aver finito di leggere `frame.texture` (o accodato la copia).
-    fn encode(&mut self, frame: &GpuFrame, sink: &mut dyn FnMut(PacketRef<'_>)) -> Result<(), EncodeError>;
-    /// Svuota l'encoder alla chiusura.
-    fn flush(&mut self, sink: &mut dyn FnMut(PacketRef<'_>)) -> Result<(), EncodeError>;
-}

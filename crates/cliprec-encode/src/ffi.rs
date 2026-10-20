@@ -3,7 +3,7 @@
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::ptr;
 
-use cliprec_core::{EncodeError, GpuDevice, GpuFrame, HNS_PER_SEC, PacketRef, QpcTime, VideoEncoder, VideoStreamParams};
+use cliprec_core::{EncodeError, GpuDevice, GpuFrame, HNS_PER_SEC, PacketRef, QpcTime, VideoStreamParams};
 use ffmpeg_the_third::ffi;
 use windows::Win32::Graphics::Direct3D11::{D3D11_BIND_DECODER, D3D11_BIND_RENDER_TARGET};
 use windows::core::Interface;
@@ -117,8 +117,9 @@ struct QsvSlot {
     index: usize,
 }
 
-/// Encoder FFmpeg su frame D3D11 (NV12) del [`GpuDevice`] di sessione.
-pub(crate) struct HwEncoder {
+/// Encoder FFmpeg su frame D3D11 (NV12) del [`GpuDevice`] di sessione. La conversione BGRA→NV12 e
+/// la scala nella risoluzione d'uscita (con bande nere) le fa lui.
+pub struct HwEncoder {
     ctx: *mut ffi::AVCodecContext,
     device_ref: *mut ffi::AVBufferRef,
     /// Pool NV12 D3D11 in cui il video processor scrive.
@@ -618,12 +619,14 @@ impl HwEncoder {
     }
 }
 
-impl VideoEncoder for HwEncoder {
-    fn params(&self) -> &VideoStreamParams {
+impl HwEncoder {
+    pub fn params(&self) -> &VideoStreamParams {
         &self.params
     }
 
-    fn encode(&mut self, frame: &GpuFrame, sink: &mut dyn FnMut(PacketRef<'_>)) -> Result<(), EncodeError> {
+    /// Codifica un frame; i pacchetti pronti vanno a `sink` in ordine di decodifica. Al ritorno
+    /// `frame.texture` è già stata letta (o la sua conversione accodata sulla GPU).
+    pub fn encode(&mut self, frame: &GpuFrame, sink: &mut dyn FnMut(PacketRef<'_>)) -> Result<(), EncodeError> {
         let (first_index, _) = *self.first.get_or_insert((frame.index, frame.pts));
         let pts = (frame.index.saturating_sub(first_index) as i64).max(self.last_pts + 1);
         self.last_pts = pts;
@@ -687,7 +690,8 @@ impl VideoEncoder for HwEncoder {
         self.queue(send, pts, sink)
     }
 
-    fn flush(&mut self, sink: &mut dyn FnMut(PacketRef<'_>)) -> Result<(), EncodeError> {
+    /// Svuota l'encoder e consegna gli ultimi pacchetti.
+    pub fn flush(&mut self, sink: &mut dyn FnMut(PacketRef<'_>)) -> Result<(), EncodeError> {
         let Some(worker) = self.worker.as_ref() else { return Ok(()) };
         let mut failed = None;
         let flushed = worker.flush(&mut |d| self.deliver(d, sink, &mut failed));

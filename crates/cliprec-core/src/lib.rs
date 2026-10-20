@@ -1,13 +1,13 @@
 //! Contratti condivisi di ClipRec.
 //!
 //! Solo l'agente principale modifica questo crate. Gli altri crate implementano i trait
-//! qui definiti ([`VideoSource`], [`VideoEncoder`], [`AudioSource`], [`AudioTrackSink`]) e si
-//! scambiano solo i tipi qui definiti.
+//! qui definiti ([`VideoSource`], [`AudioSource`], [`AudioTrackSink`]) e si scambiano solo i tipi
+//! qui definiti; l'encoder è il tipo concreto `cliprec_encode::Encoder`.
 //!
 //! Flusso dei dati:
 //!
 //! ```text
-//! VideoSource --GpuFrame (CFR)--> VideoEncoder --PacketRef--> ReplayBuffer (cliprec-buffer)
+//! VideoSource --GpuFrame (CFR)--> Encoder (cliprec-encode) --PacketRef--> ReplayBuffer (cliprec-buffer)
 //! AudioSource --AudioChunk-->  audio engine  --AudioTrackSink--> ReplayBuffer
 //! hotkey --> ReplayBuffer::snapshot --> VideoSnapshot/AudioSnapshot --> cliprec-mux --> file
 //! ```
@@ -31,5 +31,5 @@ pub use status::{AppCommand, EngineEvent, EngineStatus, SourceError, SourceState
 pub use time::{HNS_PER_SEC, QpcTime};
 pub use video::{
     CaptureStats, EncodeError, EncodedPacket, FrameCallback, GpuFrame, PacketData, PacketRef,
-    VideoCodec, VideoEncoder, VideoSource, VideoStreamParams,
+    VideoCodec, VideoSource, VideoStreamParams,
 };

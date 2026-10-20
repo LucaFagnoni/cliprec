@@ -11,7 +11,8 @@ use std::time::Instant;
 
 use cliprec_core::config::CodecChoice;
 use cliprec_core::gpu::luid_to_i64;
-use cliprec_core::{GpuDevice, GpuFrame, HNS_PER_SEC, QpcTime, VideoEncoder};
+use cliprec_core::{GpuDevice, GpuFrame, HNS_PER_SEC, QpcTime};
+use cliprec_encode::Encoder;
 use cliprec_encode::EncoderSettings;
 use windows::Win32::Graphics::Direct3D11::{
     D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE2D_DESC,
@@ -92,7 +93,7 @@ struct Pkt {
 
 /// Codifica `FRAMES` frame; le dimensioni della sorgente cambiano a metà se `sizes` ne ha due.
 /// Con `noise` ruota 4 texture di rumore (caso peggiore per il bitrate), altrimenti colori pieni.
-fn run(gpu: &GpuDevice, enc: &mut dyn VideoEncoder, sizes: &[(u32, u32)], noise: bool) -> (Vec<Pkt>, f64) {
+fn run(gpu: &GpuDevice, enc: &mut Encoder, sizes: &[(u32, u32)], noise: bool) -> (Vec<Pkt>, f64) {
     let targets: Vec<Vec<_>> = sizes
         .iter()
         .map(|&(w, h)| match noise {
@@ -261,7 +262,7 @@ fn svtav1(size: (u32, u32), noise: bool, file: &str) -> Option<(f64, u64, f64)> 
     assert_eq!(params.encoder_name, "libsvtav1");
     assert_eq!(params.codec, cliprec_core::VideoCodec::Av1);
     assert_eq!((params.width, params.height), size);
-    let (pkts, fps) = run(&gpu, enc.as_mut(), &[size], noise);
+    let (pkts, fps) = run(&gpu, &mut enc, &[size], noise);
     check_packets(&pkts, "av1");
     let path = write_ivf(file, size.0, size.1, &params.extradata, &pkts);
     assert_eq!(ffprobe(&path), format!("av1,{},{},{FRAMES}", size.0, size.1));
@@ -345,7 +346,7 @@ fn encode_and_probe(
     let params = enc.params().clone();
     assert!(!params.extradata.is_empty(), "extradata vuoto");
     assert_eq!((params.width, params.height), out);
-    let (pkts, fps) = run(&gpu, enc.as_mut(), sizes, noise);
+    let (pkts, fps) = run(&gpu, &mut enc, sizes, noise);
     check_packets(&pkts, probe_codec);
     let bytes: usize = pkts.iter().map(|p| p.data.len()).sum();
     let bps = bytes as f64 * 8.0 / (FRAMES as f64 / f64::from(FPS));
@@ -470,7 +471,7 @@ fn com_references_are_balanced(vendor_id: u32, name: &str) {
     let before = refcount(&gpu.device);
     for _ in 0..3 {
         let mut enc = cliprec_encode::open(&gpu, &settings, name).unwrap();
-        run(&gpu, enc.as_mut(), &[(1920, 1080), (1280, 1024)], false);
+        run(&gpu, &mut enc, &[(1920, 1080), (1280, 1024)], false);
         assert!(refcount(&gpu.device) > before, "l'encoder deve tenere riferimenti al device");
     }
     assert_eq!(refcount(&gpu.device), before, "riferimenti al device non rilasciati");
@@ -614,7 +615,7 @@ fn hevc_nvenc_444_colors() {
     settings.advanced.color_format = cliprec_core::config::ColorFormat::Yuv444;
     let mut enc = cliprec_encode::open(&gpu, &settings, "hevc_nvenc").unwrap();
     let extradata = enc.params().extradata.clone();
-    let (pkts, fps) = run(&gpu, enc.as_mut(), &[(1920, 1080)], false);
+    let (pkts, fps) = run(&gpu, &mut enc, &[(1920, 1080)], false);
     eprintln!("hevc_nvenc 4:4:4: {fps:.0} fps di encode");
     let path = write_stream("hevc_nvenc_444.hevc", &extradata, &pkts);
     check_colors(&path, 1920, 1080, 0, 8);

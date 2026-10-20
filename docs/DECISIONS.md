@@ -256,3 +256,12 @@ Le voci [DEFAULT] e [PROPOSTA] di SPEC.md valgono come decise; qui ci sono quell
     il thread `cliprec-encode` manda a FFmpeg e raccoglie i pacchetti, che tornano alla chiamata
     successiva; a coda piena il pacer aspetta come prima, dopo 2 s è un errore dell'encoder. Frame
     della coda e buffer dei pacchetti girano tra i due thread (niente allocazioni a regime).
+45. **Tagli dell'audit sull'eccesso di codice** (20 ottobre, richiesta di Luca). Tolta la dipendenza
+    `auto-launch` (e con lei 11 pacchetti nel lock, nessuna versione cambiata): il valore `Run` si
+    legge, scrive e toglie con le API del registro del crate `windows`, con la stessa regola di
+    Gestione attività (`StartupApproved\Run`). Scrive solo in HKCU, come l'installer: `auto-launch`
+    da amministratore scriveva in HKLM, per tutti gli utenti; un vecchio valore in HKLM si toglie
+    quando l'avvio con Windows viene spento. Tolto il trait `VideoEncoder`, che aveva una sola
+    implementazione: l'encoder è il tipo concreto `cliprec_encode::Encoder`. Tolti
+    `Mixer::lane_error_ms` e il campo che leggeva (nessun chiamante) e il worktree abbandonato
+    `confident-ptolemy-67f42c`, già unito.

@@ -75,7 +75,7 @@ Source: "..\target\dist\ClipRec\*"; DestDir: "{app}"; Flags: ignoreversion recur
 Name: "{userprograms}\{#AppName}"; Filename: "{app}\{#AppExe}"; AppUserModelID: "{#AppUserModelID}"
 
 [Registry]
-; Stessa chiave e stesso nome usati da `auto-launch` (autostart.rs); l'app la riallinea
+; Stessa chiave e stesso nome usati da autostart.rs; l'app la riallinea
 ; a config.general.start_with_windows. Argomento --tray come in autostart.rs.
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "ClipRec"; \
   ValueData: """{app}\{#AppExe}"" --tray"; Flags: uninsdeletevalue; Tasks: autostart

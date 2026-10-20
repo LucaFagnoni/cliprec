@@ -60,7 +60,6 @@ progetti originali: vanno verificati sui sorgenti della build indicata.
 | audioadapter | 5.0.0 | MIT OR Apache-2.0 |
 | audioadapter-buffers | 5.2.0 | MIT OR Apache-2.0 |
 | audioadapter-sample | 5.2.0 | MIT OR Apache-2.0 |
-| auto-launch | 0.6.0 | MIT |
 | base64 | 0.23.1 | MIT OR Apache-2.0 |
 | bincode | 2.0.1 | MIT |
 | bit-set | 0.10.0 | Apache-2.0 OR MIT |
@@ -213,7 +212,6 @@ progetti originali: vanno verificati sui sorgenti della build indicata.
 | num_enum_derive | 0.7.6 | BSD-3-Clause OR MIT OR Apache-2.0 |
 | once_cell | 1.21.4 | MIT OR Apache-2.0 |
 | ordered-float | 5.5.0 | MIT |
-| os_info | 3.15.0 | MIT |
 | parking_lot | 0.12.5 | MIT OR Apache-2.0 |
 | parking_lot_core | 0.9.12 | MIT OR Apache-2.0 |
 | parlance | 0.1.1 | Apache-2.0 OR MIT |
@@ -362,7 +360,6 @@ progetti originali: vanno verificati sui sorgenti della build indicata.
 | windows-interface | 0.59.3 | MIT OR Apache-2.0 |
 | windows-link | 0.2.1 | MIT OR Apache-2.0 |
 | windows-numerics | 0.3.1 | MIT OR Apache-2.0 |
-| windows-registry | 0.6.1 | MIT OR Apache-2.0 |
 | windows-result | 0.4.1 | MIT OR Apache-2.0 |
 | windows-strings | 0.5.1 | MIT OR Apache-2.0 |
 | windows-sys | 0.52.0 | MIT OR Apache-2.0 |

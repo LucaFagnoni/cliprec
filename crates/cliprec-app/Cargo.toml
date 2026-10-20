@@ -20,7 +20,6 @@ tracing-subscriber.workspace = true
 tracing-appender.workspace = true
 tray-icon.workspace = true
 tauri-winrt-notification.workspace = true
-auto-launch.workspace = true
 windows = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Globalization",
