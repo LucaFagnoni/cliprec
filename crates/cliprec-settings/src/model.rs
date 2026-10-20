@@ -1,10 +1,10 @@
 //! Logica pura: conversione tra il modello della UI (`Form` + righe audio) e `Config`,
 //! validazione e stima della RAM. Niente Slint a runtime qui, così si testa senza finestra.
 
-use cliprec_core::VideoCodec;
+use cliprec_core::{ClipKind, VideoCodec};
 use cliprec_core::config::{EncoderPreset, RateControl, ColorFormat, 
     AudioClipFormat, AudioSourceConfig, AudioSourceKind, CodecChoice, Config, MAX_AUDIO_SOURCES, OutputResolution,
-    TrackMode, VideoContainer, VideoSourceConfig, default_max_bitrate_kbps,
+    TrackLayout, TrackMode, VideoContainer, VideoSourceConfig, default_max_bitrate_kbps,
 };
 
 use crate::{Form, SourceRow};
@@ -126,6 +126,8 @@ pub fn to_form(c: &Config) -> (Form, Vec<SourceRow>) {
         games: c.video.games.join(", ").into(),
         audio_mode: i32::from(c.audio.mode == TrackMode::Merged),
         add_mix: c.audio.add_mix_track,
+        audio_clip_mode: i32::from(c.audio.layout(ClipKind::Audio).mode == TrackMode::Merged),
+        audio_clip_add_mix: c.audio.layout(ClipKind::Audio).add_mix_track,
         process_events: c.audio.process_events,
         block_exclusive: c.audio.block_exclusive,
         hotkey_video: c.hotkeys.video.clone().into(),
@@ -261,6 +263,16 @@ pub fn build_lenient(form: &Form, rows: &[SourceRow], base: &Config) -> (Config,
     c.audio.mode = if form.audio_mode == 1 { TrackMode::Merged } else { TrackMode::Separate };
     // L'opzione vale solo in modalità separata: in traccia unica la si azzera.
     c.audio.add_mix_track = form.add_mix && c.audio.mode == TrackMode::Separate;
+    let audio_clip_mode = if form.audio_clip_mode == 1 { TrackMode::Merged } else { TrackMode::Separate };
+    let audio_clip = TrackLayout {
+        mode: audio_clip_mode,
+        add_mix_track: form.audio_clip_add_mix && audio_clip_mode == TrackMode::Separate,
+    };
+    // Una configurazione che non l'aveva resta senza finché la clip audio coincide con la video:
+    // salvare senza toccare nulla non cambia il file.
+    if c.audio.audio_clip.is_some() || audio_clip != c.audio.layout(ClipKind::Video) {
+        c.audio.audio_clip = Some(audio_clip);
+    }
     c.audio.process_events = form.process_events;
     c.audio.block_exclusive = form.block_exclusive;
     if rows.len() > MAX_AUDIO_SOURCES {
@@ -565,6 +577,23 @@ mod tests {
         ] {
             assert!(p.contains(&expected), "manca {expected:?} in {p:?}");
         }
+    }
+
+    #[test]
+    fn audio_clip_tracks_are_saved_only_when_they_differ() {
+        let c = Config::default();
+        let (mut f, r) = to_form(&c);
+        // Clip audio in traccia unica: si scrive.
+        f.audio_clip_mode = 1;
+        let saved = build_config(&f, &r, &c).unwrap();
+        assert_eq!(saved.audio.audio_clip, Some(TrackLayout { mode: TrackMode::Merged, add_mix_track: false }));
+        assert_eq!(saved.audio.mode, TrackMode::Separate);
+        // Cambia solo la video: la clip audio resta com'era nella finestra, non segue la video.
+        let (mut f, r) = to_form(&c);
+        f.audio_mode = 1;
+        let saved = build_config(&f, &r, &c).unwrap();
+        assert_eq!(saved.audio.layout(ClipKind::Audio).mode, TrackMode::Separate);
+        assert_eq!(saved.audio.layout(ClipKind::Video).mode, TrackMode::Merged);
     }
 
     #[test]

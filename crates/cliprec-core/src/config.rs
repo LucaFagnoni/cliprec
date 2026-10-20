@@ -196,9 +196,12 @@ pub fn default_max_bitrate_kbps(codec: VideoCodec, height: u32, fps: u32) -> u32
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AudioConfig {
+    /// Tracce delle clip video.
     pub mode: TrackMode,
     /// Solo in modalità separata: aggiunge in testa una traccia «Mix» con la somma di tutto.
     pub add_mix_track: bool,
+    /// Tracce delle clip solo audio; assente (configurazioni precedenti) = come le clip video.
+    pub audio_clip: Option<TrackLayout>,
     /// Fino a 8 sorgenti, nell'ordine delle tracce.
     pub sources: Vec<AudioSourceConfig>,
     /// Eventi di Windows per agganciare subito le app aperte o chiuse (serve ClipRec da
@@ -214,6 +217,7 @@ impl Default for AudioConfig {
         Self {
             mode: TrackMode::Separate,
             add_mix_track: false,
+            audio_clip: None,
             process_events: false,
             block_exclusive: true,
             sources: vec![
@@ -225,6 +229,54 @@ impl Default for AudioConfig {
 }
 
 pub const MAX_AUDIO_SOURCES: usize = 8;
+
+/// Tracce audio di un tipo di clip.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrackLayout {
+    pub mode: TrackMode,
+    /// Solo in modalità separata: traccia «Mix» in testa.
+    #[serde(default)]
+    pub add_mix_track: bool,
+}
+
+impl TrackLayout {
+    /// Contiene la traccia «Mix» (traccia unica, o «Mix» in testa).
+    pub fn mix(self) -> bool {
+        self.mode == TrackMode::Merged || self.add_mix_track
+    }
+
+    /// Contiene una traccia per sorgente.
+    pub fn sources(self) -> bool {
+        self.mode == TrackMode::Separate
+    }
+}
+
+impl AudioConfig {
+    pub fn layout(&self, kind: crate::ClipKind) -> TrackLayout {
+        let video = TrackLayout { mode: self.mode, add_mix_track: self.add_mix_track };
+        match kind {
+            crate::ClipKind::Video => video,
+            crate::ClipKind::Audio => self.audio_clip.unwrap_or(video),
+        }
+    }
+
+    /// Tracce registrate nel buffer: quelle che servono alle clip video e a quelle solo audio.
+    /// Ordine: «Mix» (se serve) e poi una traccia per sorgente (se serve).
+    pub fn recorded(&self) -> TrackLayout {
+        let (v, a) = (self.layout(crate::ClipKind::Video), self.layout(crate::ClipKind::Audio));
+        if v.sources() || a.sources() {
+            TrackLayout { mode: TrackMode::Separate, add_mix_track: v.mix() || a.mix() }
+        } else {
+            TrackLayout { mode: TrackMode::Merged, add_mix_track: false }
+        }
+    }
+
+    /// La traccia `track` del buffer (vedi [`Self::recorded`]) va nelle clip di tipo `kind`.
+    pub fn keeps_track(&self, kind: crate::ClipKind, track: usize) -> bool {
+        let layout = self.layout(kind);
+        if self.recorded().mix() && track == 0 { layout.mix() } else { layout.sources() }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -460,6 +512,29 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn video_and_audio_clips_keep_their_own_tracks() {
+        use crate::ClipKind::{Audio, Video};
+        let layout = |mode, add_mix_track| TrackLayout { mode, add_mix_track };
+        let mut a = AudioConfig { mode: TrackMode::Separate, add_mix_track: false, ..AudioConfig::default() };
+        // Configurazione vecchia: la clip audio segue la video, nessun «Mix» registrato.
+        assert_eq!(a.recorded(), layout(TrackMode::Separate, false));
+        assert!(a.keeps_track(Audio, 0) && a.keeps_track(Video, 1));
+        // Video per sorgente, audio in traccia unica: si registrano Mix + sorgenti.
+        a.audio_clip = Some(layout(TrackMode::Merged, false));
+        assert_eq!(a.recorded(), layout(TrackMode::Separate, true));
+        assert!(!a.keeps_track(Video, 0) && a.keeps_track(Video, 1) && a.keeps_track(Video, 2));
+        assert!(a.keeps_track(Audio, 0) && !a.keeps_track(Audio, 1));
+        // Entrambe in traccia unica: solo il Mix.
+        a.mode = TrackMode::Merged;
+        assert_eq!(a.recorded(), layout(TrackMode::Merged, false));
+        assert!(a.keeps_track(Video, 0) && a.keeps_track(Audio, 0));
+        // Video unica, audio per sorgente con «Mix» in testa: tutto in entrambe tranne le sorgenti nel video.
+        a.audio_clip = Some(layout(TrackMode::Separate, true));
+        assert!(a.keeps_track(Video, 0) && !a.keeps_track(Video, 1));
+        assert!(a.keeps_track(Audio, 0) && a.keeps_track(Audio, 1));
+    }
+
     use super::*;
 
     #[test]

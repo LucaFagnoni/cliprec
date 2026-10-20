@@ -144,6 +144,16 @@ impl AudioRefs {
         self.tracks.len()
     }
 
+    /// Tiene solo le tracce per cui `keep(indice)` è vero (le tracce di un tipo di clip).
+    pub fn retain_tracks(mut self, keep: impl Fn(usize) -> bool) -> Self {
+        let mut i = 0;
+        self.tracks.retain(|_| {
+            i += 1;
+            keep(i - 1)
+        });
+        self
+    }
+
     pub fn track_name(&self, track: usize) -> Option<&str> {
         self.tracks.get(track).map(|t| t.name())
     }

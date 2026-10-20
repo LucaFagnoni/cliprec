@@ -23,6 +23,7 @@ export global T {
     in property <string> sec-quality;
     in property <string> sec-capture;
     in property <string> sec-tracks;
+    in property <string> sec-tracks-audio;
     in property <string> sec-sources;
     in property <string> sec-apps;
     in property <string> sec-keyboard;
@@ -206,6 +207,8 @@ export struct Form {
     games: string,
     audio-mode: int,
     add-mix: bool,
+    audio-clip-mode: int,
+    audio-clip-add-mix: bool,
     process-events: bool,
     block-exclusive: bool,
     hotkey-video: string,
@@ -748,6 +751,21 @@ export component SettingsWindow inherits Window {
                         description: T.add-mix-desc;
                         enabled: root.f.audio-mode == 0;
                         Switch { checked <=> root.f.add-mix; enabled: root.f.audio-mode == 0; }
+                    }
+                }
+                SectionTitle { text: T.sec-tracks-audio; }
+                Card {
+                    SettingRow {
+                        title: T.audio-mode;
+                        description: T.audio-mode-desc;
+                        ComboBox { model: [T.mode-separate, T.mode-merged]; current-index <=> root.f.audio-clip-mode; width: 240px; }
+                    }
+                    Divider { }
+                    SettingRow {
+                        title: T.add-mix;
+                        description: T.add-mix-desc;
+                        enabled: root.f.audio-clip-mode == 0;
+                        Switch { checked <=> root.f.audio-clip-add-mix; enabled: root.f.audio-clip-mode == 0; }
                     }
                 }
                 SectionTitle { text: T.sec-sources; }

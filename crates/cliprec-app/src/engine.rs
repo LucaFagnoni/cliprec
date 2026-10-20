@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use cliprec_buffer::{BufferConfig, ReplayBuffer};
 
 use crate::i18n::{K, tr};
-use cliprec_core::config::{Config, TrackMode, default_max_bitrate_kbps};
+use cliprec_core::config::{Config, default_max_bitrate_kbps};
 use cliprec_core::{
     AppCommand, AudioTrackSink, ClipKind, EncodeError, EngineEvent, EngineStatus, GpuDevice, GpuFrame, QpcTime,
     SourceState, VideoSource,
@@ -199,8 +199,8 @@ impl Session {
                 &[],
                 &[],
                 &[],
-                config.audio.mode,
-                config.audio.add_mix_track && config.audio.mode == TrackMode::Separate,
+                config.audio.recorded().mode,
+                config.audio.recorded().add_mix_track,
                 sink,
             )
             .map(Some),
@@ -423,7 +423,10 @@ impl Session {
         let kind = if self.video.is_some() { ClipKind::Video } else { ClipKind::Audio };
         let end = QpcTime::now();
         let audio_end = audio_snapshot_end(end, &self.config, self.mix_latency());
-        let audio = self.buffer.snapshot_audio_refs(audio_end.add_hns(-5 * cliprec_core::HNS_PER_SEC), audio_end);
+        let audio = self
+            .buffer
+            .snapshot_audio_refs(audio_end.add_hns(-5 * cliprec_core::HNS_PER_SEC), audio_end)
+            .map(|a| a.retain_tracks(|t| self.config.audio.keeps_track(kind, t)));
         let video_ok = self.video.as_ref().map(|v| {
             let st = v.stats();
             let encoder = self.encoder_name.lock().map(|n| n.clone()).unwrap_or_default();
@@ -510,7 +513,10 @@ impl Session {
             None => audio_end.add_hns(-i64::from(seconds) * cliprec_core::HNS_PER_SEC),
         };
         // Sotto lock solo i riferimenti ai blocchi FLAC; la decompressione è nel thread di salvataggio.
-        let audio = self.buffer.snapshot_audio_refs(audio_start, audio_end);
+        let audio = self
+            .buffer
+            .snapshot_audio_refs(audio_start, audio_end)
+            .map(|a| a.retain_tracks(|t| self.config.audio.keeps_track(kind, t)));
         if video.is_none() && audio.is_none() {
             fail(&events, kind, tr(if kind == ClipKind::Video { K::EngVideoEmpty } else { K::EngAudioEmpty }, &[]));
             return None;
@@ -914,7 +920,7 @@ fn status_problem(states: &[(String, SourceState)]) -> Option<String> {
 /// quanto non è ancora scritto, con due blocchi di margine (m3).
 fn audio_snapshot_end(now: QpcTime, config: &Config, mix_latency_hns: i64) -> QpcTime {
     let margin = 2 * cliprec_core::time::frames_to_hns(cliprec_audio::MIX_BLOCK_FRAMES as i64);
-    let mixed = config.audio.mode == TrackMode::Merged || config.audio.add_mix_track;
+    let mixed = config.audio.recorded().mix();
     // Una sorgente con ritardo negativo scrive fino a `adesso − |ritardo|` anche nella sua traccia.
     let early = config.audio.sources.iter().map(|s| -s.delay_ms.clamp(-cliprec_audio::MAX_DELAY_MS, 0)).max().unwrap_or(0);
     let early = i64::from(early) * 10_000;
@@ -1205,6 +1211,7 @@ mod tests {
     use std::thread::JoinHandle;
 
     use super::*;
+    use cliprec_core::config::TrackMode;
 
     /// I test end-to-end aprono sessioni NVENC e lanciano ffmpeg/ffprobe: in fila, così sotto carico
     /// non falliscono per risorse del sistema (avvio di processi, sessioni dell'encoder).
@@ -2063,6 +2070,31 @@ video_seconds = = 30").unwrap();
         assert_eq!(restart_scope(&a, &b), RestartScope::default());
         b.video.fps = 144;
         assert!(restart_scope(&a, &b).video);
+    }
+
+    /// Tracce diverse per tipo di clip dalla stessa sessione: clip video con una traccia per sorgente,
+    /// clip solo audio con la sola traccia «Mix».
+    #[test]
+    fn video_and_audio_clips_have_their_own_tracks() {
+        let _serial = heavy();
+        use cliprec_core::config::TrackLayout;
+        use cliprec_tests::probe::{Expect, check, check_audio_dir};
+        let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/test-output/tracce-per-clip");
+        let _ = std::fs::remove_dir_all(&out);
+        let mut config = Config::default();
+        config.audio.mode = TrackMode::Separate;
+        config.audio.add_mix_track = false;
+        config.audio.audio_clip = Some(TrackLayout { mode: TrackMode::Merged, add_mix_track: false });
+        let clips = run_test_clip(config, 4, true, out).unwrap();
+        let video = clips.iter().find(|c| c.kind == ClipKind::Video).expect("clip video");
+        let audio = clips.iter().find(|c| c.kind == ClipKind::Audio).expect("clip audio");
+        let names = vec!["Bip 1 kHz".to_string(), "Bip 1,5 kHz".to_string()];
+        let expect = Expect { audio_tracks: Some(2), track_names: Some(names), ..Expect::default() };
+        let v = check(&video.path, &expect).unwrap();
+        assert!(v.is_empty(), "clip video: {v:?}");
+        let expect = Expect { audio_tracks: Some(1), ..Expect::default() };
+        let v = if audio.path.is_dir() { check_audio_dir(&audio.path, &expect) } else { check(&audio.path, &expect) }.unwrap();
+        assert!(v.is_empty(), "clip audio: {v:?} ({})", audio.path.display());
     }
 
     /// Catena verticale con sorgenti sintetiche (lampo e bip a ogni secondo QPC): 8 s di

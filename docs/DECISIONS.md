@@ -265,3 +265,11 @@ Le voci [DEFAULT] e [PROPOSTA] di SPEC.md valgono come decise; qui ci sono quell
     implementazione: l'encoder è il tipo concreto `cliprec_encode::Encoder`. Tolti
     `Mixer::lane_error_ms` e il campo che leggeva (nessun chiamante) e il worktree abbandonato
     `confident-ptolemy-67f42c`, già unito.
+46. **Tracce separate per clip video e clip solo audio** (20 ottobre, richiesta di Luca). La scheda
+    Audio ha due gruppi («Tracce delle clip video», «Tracce delle clip solo audio»), ciascuno con
+    traccia per sorgente o unica e «Mix» in testa. Il buffer registra l'unione di ciò che serve ai
+    due tipi (`AudioConfig::recorded`: «Mix» se uno dei due lo vuole, le sorgenti se uno dei due le
+    vuole) e al salvataggio si tengono le tracce del tipo di clip (`keeps_track`). Prezzo: con i due
+    tipi diversi il mixer gira anche se serve a uno solo, e il buffer audio cresce di una traccia.
+    `audio.audio_clip` assente (configurazioni precedenti) = come le clip video; le impostazioni lo
+    scrivono solo quando la clip audio è diversa, così salvare senza toccare nulla non cambia il file.

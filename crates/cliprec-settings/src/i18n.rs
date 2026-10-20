@@ -68,7 +68,8 @@ strings! {
     set_sec_recording: "Registrazione", "Recording";
     set_sec_quality: "Qualità", "Quality";
     set_sec_capture: "Cattura", "Capture";
-    set_sec_tracks: "Tracce", "Tracks";
+    set_sec_tracks: "Tracce delle clip video", "Video clip tracks";
+    set_sec_tracks_audio: "Tracce delle clip solo audio", "Audio-only clip tracks";
     set_sec_sources: "Sorgenti", "Sources";
     set_sec_apps: "App registrate", "Recorded apps";
     set_sec_keyboard: "Tastiera e mouse", "Keyboard and mouse";

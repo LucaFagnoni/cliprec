@@ -102,7 +102,9 @@ impl AudioEngine {
         let volumes: Vec<f32> = specs.iter().map(|s| s.volume).collect();
         let delays: Vec<i32> = specs.iter().map(|s| s.delay_ms).collect();
         let monos: Vec<bool> = specs.iter().map(|s| s.mono).collect();
-        Self::with_sources(sources, &volumes, &delays, &monos, cfg.mode, cfg.add_mix_track, sink)
+        // Le tracce che servono alle clip video e a quelle solo audio; il salvataggio sceglie.
+        let recorded = cfg.recorded();
+        Self::with_sources(sources, &volumes, &delays, &monos, recorded.mode, recorded.add_mix_track, sink)
     }
 
     /// Avvia sorgenti già costruite. `volumes[i]` è il guadagno lineare della sorgente `i` (1.0 se
