@@ -5,6 +5,18 @@ indipendente, analisi della RAM). Il riepilogo della notte segue più sotto, agg
 
 ## Riepilogo per Luca
 
+### Limiti noti ridotti (20 ottobre, pomeriggio, DECISIONS 43)
+
+- Frame ripetuti e riempitivi senza conversione né copie sulla GPU (meno frame persi sotto carico).
+- Fullscreen esclusivo anche col bersaglio monitor; col segnale di Windows il cambio scatta dopo 1 s
+  di frame neri o fermi invece di 3-5.
+- Hotkey con un gioco elevato tramite `RegisterHotKey` (solo tastiera).
+- «Blocca la modalità esclusiva» sui dispositivi registrati; «Aggiungi i canali del router».
+- Da provare dal vivo: un gioco a schermo intero esclusivo (DX9 o con le ottimizzazioni a schermo
+  intero disattivate), la hotkey dentro un gioco avviato come amministratore, osu! in modalità
+  esclusiva (avviso e poi audio registrato dopo il riavvio del gioco), Sonar con i canali, e i
+  frame persi in un gioco pesante rispetto alla 0.1.7.
+
 ### Dopo la revisione del codice (20 ottobre, mattina)
 
 La revisione indipendente (`docs/REVIEW-CODICE.md`, 38 falle) è stata corretta da sette subagenti, uno

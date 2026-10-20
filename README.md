@@ -99,25 +99,30 @@ Per pubblicare una versione: alzare `version` in `Cargo.toml` del workspace, poi
 
 ## Limiti noti
 
-- **Fullscreen esclusivo**: se la finestra del gioco dà frame neri o fermi mentre è a schermo intero
-  in primo piano, ClipRec passa da solo alla Desktop Duplication del monitor e torna alla cattura
-  della finestra quando il gioco esce dallo schermo intero. Nessuna iniezione nel gioco, quindi
-  nessun rischio con gli anti-cheat; resta escluso solo ciò che Windows protegge (contenuti DRM).
-- **Frame persi sotto carico**: mentre un gioco satura la scheda video (caricamenti, scene pesanti)
-  la conversione e l'encoder possono saltare qualche frame, contati in «frame persi». Priorità GPU
-  alta e processo «sopra il normale» li riducono; il colore 4:4:4 li aumenta, perché la conversione
-  la fa la GPU insieme al gioco.
+- **Fullscreen esclusivo**: quando un gioco a schermo intero esclusivo sfugge alla cattura (frame
+  neri o fermi: un secondo se Windows segnala l'esclusivo, altrimenti 3-5) ClipRec passa da solo alla Desktop Duplication
+  del monitor, sia con la cattura del gioco sia con quella del monitor, e torna indietro quando il
+  gioco esce dallo schermo intero. Nessuna iniezione nel gioco, quindi nessun rischio con gli
+  anti-cheat; resta escluso solo ciò che Windows protegge (contenuti DRM).
+- **Frame persi sotto carico**: i frame ripetuti e i riempitivi dei tick persi non costano più
+  lavoro alla scheda video (si rimanda la superficie già convertita), quindi sotto carico se ne
+  perdono meno. Se il gioco satura la GPU qualche tick può ancora saltare, contato in «frame persi»;
+  i buchi fino a 250 ms si riempiono ripetendo il frame, così il file resta a frequenza costante.
+  Il colore 4:4:4 li aumenta.
 - **AMD (AMF)**: scritto e con un ripiego in VBR semplice, ma provato solo senza una Radeon. Se
   l'encoder AMD non compare, il log (`%LOCALAPPDATA%\ClipRec\logs`) dice perché.
-- **Giochi avviati come amministratore**: Windows non consegna le hotkey a un programma non
-  elevato. ClipRec lo segnala; la soluzione è «Avvia come amministratore» (Impostazioni → Avanzate)
-  o «Riavvia come amministratore» dalla tray.
-- **Audio in modalità esclusiva** (WASAPI exclusive, es. osu!): Windows non lo passa dal mixer, quindi
-  nessun programma lo può registrare in loopback. ClipRec segnala quando un'uscita registrata viene
-  presa in esclusiva; nel gioco va scelta la modalità condivisa.
-- **Router audio** (SteelSeries Sonar, Voicemeeter, Wave Link): rifanno il mix su altri dispositivi.
-  Per l'audio del gioco va usata «Uscita» con il loro dispositivo (es. «Sonar - Gaming»); «Tutto
-  tranne un'app» registra i flussi di tutti i programmi e quindi anche il mix del router.
+- **Giochi avviati come amministratore**: mentre un programma elevato è in primo piano le hotkey
+  della tastiera passano a `RegisterHotKey`, che Windows consegna anche da lì. Restano scoperte le
+  hotkey col mouse (o una combinazione già presa da un altro programma): ClipRec lo segnala, e la
+  soluzione è «Avvia come amministratore» (Impostazioni → Avanzate) o «Riavvia come amministratore».
+- **Audio in modalità esclusiva** (WASAPI exclusive, es. osu!): l'audio esclusivo non passa dal
+  mixer e nessun programma lo può registrare. Con «Blocca la modalità esclusiva» (attiva di
+  serie) ClipRec toglie ai dispositivi che registra il permesso di essere presi in esclusiva, così
+  il gioco usa la modalità condivisa; un gioco già aperto va riavviato una volta.
+- **Router audio** (SteelSeries Sonar, Voicemeeter, Wave Link): rifanno il mix su dispositivi
+  virtuali. «Aggiungi i canali del router» (Impostazioni → Audio) registra ogni canale (gioco, chat,
+  media) in una traccia, senza il microfono. «Tutto tranne un'app» registra i flussi di tutti i
+  programmi e quindi anche il mix del router: con un router meglio i canali.
 - **Firma del codice**: gli exe non sono firmati (nessun certificato): al primo avvio SmartScreen
   mostra «Editore sconosciuto».
 

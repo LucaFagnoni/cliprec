@@ -46,6 +46,12 @@ impl Health {
         self.arrived_at = now;
     }
 
+    /// Frame neri all'ultima sonda o nessun frame nuovo da `after`: con il segnale di Windows sullo
+    /// schermo intero esclusivo bastano tempi molto più corti delle soglie degli avvisi.
+    pub fn failing(&self, now: Instant, after: Duration) -> bool {
+        self.black_since.is_some() || now.duration_since(self.arrived_at) >= after
+    }
+
     /// Avviso da mostrare, se c'è. `watch_frozen` va dato solo per una finestra in primo piano: un
     /// desktop fermo non produce frame nuovi da 24H2 ed è normale.
     pub fn check(&mut self, slots: &FrameSlots, arrived: u64, watch_frozen: bool, now: Instant) -> Option<&'static str> {

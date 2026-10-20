@@ -223,3 +223,22 @@ Le voci [DEFAULT] e [PROPOSTA] di SPEC.md valgono come decise; qui ci sono quell
     Corretto comunque il ciclo DDA: `AcquireNextFrame` senza attesa e pausa di 2 ms fuori dal lock
     del contesto, invece di attese fino a 100 ms che potevano tenere fermo l'encoder. La parte 41 sul
     monitor con DDA è superata; restano valide le altre.
+43. **Frame persi, fullscreen esclusivo, amministratore, audio esclusivo, router** (20 ottobre,
+    richiesta di Luca sui limiti noti). Frame persi: un frame `repeated` (pacer senza frame nuovi o
+    riempitivo di un tick perso) rimanda all'encoder l'ultima superficie NV12 invece di rifare la
+    conversione, come i frame duplicati di `ffmpeg -r`; il motore non copia più ogni frame nuovo in
+    una texture propria per i riempitivi (una copia BGRA piena a ogni frame, 1,8 GB/s a 1440p60).
+    Riempitivi fino a 250 ms. Il pacer resta sincrono con l'encoder: separarli con una coda di
+    texture costerebbe di nuovo una copia per frame. Fullscreen esclusivo: il cambio a DDA (39) vale
+    anche per il monitor; con `SHQueryUserNotificationState = QUNS_RUNNING_D3D_FULL_SCREEN` basta un
+    secondo di frame neri o fermi invece di 3-5 (il segnale da solo no: c'è anche per i giochi con le
+    ottimizzazioni a schermo intero, che WGC cattura bene, e DDA in gioco va ancora provato, 42); una finestra che WGC rifiuta e copre il monitor passa a DDA. Amministratore:
+    `RegisterHotKey` mentre un programma elevato è in primo piano (Raw Input lì tace), tolta appena
+    torna un programma normale perché sottrae il tasto al gioco; il mouse resta scoperto. Audio
+    esclusivo: nessuna cattura lo vede, quindi lo si impedisce sui dispositivi registrati con la
+    proprietà `{b3f8fa53-0004-438e-9003-51a46e139bfc},3` dell'endpoint (la casella «Consenti alle
+    applicazioni di assumere il controllo esclusivo», scrivibile senza amministratore), con un avviso
+    per dispositivo; opzione `audio.block_exclusive`, attiva di serie perché è ciò che serve per
+    registrare. Router: una «Uscita» per canale virtuale (Sonar, Voicemeeter, Wave Link), senza i
+    mix «Stream»/«Monitor»; un'unica sorgente che somma più dispositivi avrebbe chiesto il mixer per
+    ogni traccia. Iniezione nel gioco sempre esclusa (27).

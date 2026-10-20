@@ -317,6 +317,8 @@ impl Capture {
 unsafe impl Send for Watch {}
 
 const POLL: Duration = Duration::from_millis(250);
+/// Frame neri o fermi per tanto, con un'app Direct3D a schermo intero esclusivo: si passa a DDA.
+const EXCLUSIVE_AFTER: Duration = Duration::from_secs(1);
 const RETRY: Duration = Duration::from_secs(2);
 
 /// Quanto il pacer aspetta il primo frame vero prima di consegnare il segnaposto.
@@ -502,8 +504,10 @@ impl Watch {
             Resolved::Window(h) => (window_monitor(h), is_foreground(h) && covers_monitor(h), on_dda),
             Resolved::Monitor(m) => (Some(m), fullscreen_on(m), self.exclusive_dda),
         };
-        // Il segnale di Windows arriva subito; i frame neri o fermi dopo qualche secondo.
-        let exclusive = frames_bad || (fullscreen && d3d_fullscreen());
+        // Con il segnale di Windows basta un secondo di frame neri o fermi invece di 3-5: il segnale da
+        // solo non basta, perché c'è anche per i giochi che WGC cattura bene (ottimizzazioni a schermo
+        // intero) e lì conviene restare su WGC.
+        let exclusive = frames_bad || (fullscreen && d3d_fullscreen() && self.health.failing(now, EXCLUSIVE_AFTER));
         let Some(to_dda) = exclusive_switch(switched, exclusive, fullscreen) else { return };
         // Un monitor già su DDA (preferito o ripiego) vede anche lo schermo intero esclusivo.
         if (to_dda && on_dda) || now < self.switch_retry {
