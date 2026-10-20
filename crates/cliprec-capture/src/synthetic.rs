@@ -26,6 +26,13 @@ pub fn is_flash(prev: QpcTime, pts: QpcTime) -> bool {
     pts.0.div_euclid(HNS_PER_SEC) != prev.0.div_euclid(HNS_PER_SEC)
 }
 
+/// Il frame dipinto con il lampo: quello che attraversa un secondo intero *e* cade entro un periodo da
+/// esso. Se il tick del lampo si perde, quel secondo resta senza lampo invece di averlo un frame in
+/// ritardo, che falserebbe la misura della sincronia (m15).
+fn paints_flash(prev: QpcTime, pts: QpcTime, step: i64) -> bool {
+    is_flash(prev, pts) && pts.0.rem_euclid(HNS_PER_SEC) < step
+}
+
 /// Lato in pixel di un blocco del contatore per una texture larga `width`.
 pub fn counter_block(width: u32) -> u32 {
     (width / (COUNTER_BITS as u32 + 8)).max(1)
@@ -139,7 +146,7 @@ impl Painter {
     fn paint(&mut self, slots: &FrameSlots, pts: QpcTime, index: u64) -> windows::core::Result<()> {
         let prev = self.prev.unwrap_or(pts.add_hns(-self.step));
         self.prev = Some(pts);
-        let bg = if is_flash(prev, pts) { &FLASH } else { &BACKGROUND };
+        let bg = if paints_flash(prev, pts, self.step) { &FLASH } else { &BACKGROUND };
         let (mut n1, mut n0) = (0, 0);
         for bit in 0..COUNTER_BITS {
             let r = counter_rect(self.width, bit);
@@ -253,12 +260,24 @@ mod tests {
         let mut prev = frames[0].0.add_hns(-HNS_PER_SEC / 30);
         let mut flashes = 0;
         for &(pts, index, white, counter) in &frames {
-            assert_eq!(white, is_flash(prev, pts), "lampo sbagliato al frame {index}");
+            assert_eq!(white, paints_flash(prev, pts, HNS_PER_SEC / 30), "lampo sbagliato al frame {index}");
             assert_eq!(counter, index, "contatore");
             flashes += usize::from(white);
             prev = pts;
         }
         assert!(flashes >= 2, "{flashes} lampi");
+    }
+
+    /// m15: se il tick del lampo si perde, il frame dopo non porta il lampo in ritardo di un frame
+    /// (falserebbe la misura della sincronia fino a 33 ms a 60 fps).
+    #[test]
+    fn flash_frame_is_skipped_when_its_tick_is_lost() {
+        let s = HNS_PER_SEC;
+        let step = s / 60;
+        // Tick regolare: il primo frame dopo il secondo intero porta il lampo.
+        assert!(paints_flash(QpcTime(s - step + 10), QpcTime(s + 10), step));
+        // Tick del lampo perso: il frame successivo (un periodo dopo) non deve portarlo.
+        assert!(!paints_flash(QpcTime(s - step + 10), QpcTime(s + step + 10), step));
     }
 
     #[test]
