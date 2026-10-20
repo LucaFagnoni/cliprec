@@ -14,7 +14,16 @@ cargo build --workspace --release                    # release (lto fat)
 cargo test --workspace                               # test
 cargo clippy --workspace --all-targets -- -D warnings
 scripts\gate.ps1 -Crate cliprec-xxx                  # clippy + test di un crate
+cargo xtask probe <clip> [--duration 60 --tracks 2 --names "A,B" --fps 60]   # validazione ffprobe
+cargo xtask sync <clip>                              # sincronia lampo/bip (sorgenti sintetiche)
+cargo xtask dist                                     # cartella di distribuzione in target/dist
+target\release\cliprec-app.exe --prova 10 --sintetica --cartella <dir>   # clip video+audio di prova
+target\release\cliprec-app.exe --sessione-lunga <minuti> <dir>          # CSV di memoria e frame
+scripts\pipe.ps1 Status TestClip Quit                # comandi al core sulla named pipe
 ```
+
+Variabili per prove e notte: `CLIPREC_CONFIG` (percorso di config.toml), `CLIPREC_LOG_DIR`,
+`CLIPREC_HEADLESS=1` (niente toast, suoni, registro, menu Start).
 
 `.cargo/config.toml` imposta `FFMPEG_DIR` e `LIBCLANG_PATH` (percorsi assoluti su questo PC).
 I `build.rs` di `cliprec-encode` e `cliprec-mux` copiano le DLL di FFmpeg accanto agli eseguibili.
@@ -52,7 +61,11 @@ I `build.rs` di `cliprec-encode` e `cliprec-mux` copiano le DLL di FFmpeg accant
 
 ## Stato delle fasi
 
-- Fase 0 · Fondamenta: fatta (contratti, workspace, FFmpeg, hook, agenti).
-- Fase 1 · Componenti in parallelo: vedi `docs/PROGRESS.md`.
-- Fase 2 · Integrazione: vedi `docs/PROGRESS.md`.
-- Fase 3 · Robustezza, Fase 4 · Distribuzione: da fare.
+- Fase 0 · Fondamenta: fatta.
+- Fase 1 · Componenti: fatta, tutti i crate uniti su `main`.
+- Fase 2 · Integrazione: catena verticale fatta (`crates/cliprec-app/src/engine.rs`, test end-to-end).
+- Fase 3 · Robustezza: prima revisione avversaria corretta; test di guasto; sessione lunga. Da fare di
+  giorno: misura A/V con cattura reale, hotkey dal vivo, toast, AMF, monitor oltre 60 Hz.
+- Fase 4 · Distribuzione: `xtask dist`, installer Inno Setup (non compilato), README. Da fare: build
+  FFmpeg ridotta (`installer/FFMPEG-RIDOTTA.md`), firma, misure finali.
+- Dettagli e misure in `docs/PROGRESS.md`.
