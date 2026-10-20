@@ -53,7 +53,8 @@ cliprec-app --sessione-lunga 60 C:\temp\soak          # memoria e frame persi ne
 ```
 
 Variabili d'ambiente per i test: `CLIPREC_CONFIG` (percorso di `config.toml`), `CLIPREC_LOG_DIR`
-(cartella dei log), `CLIPREC_HEADLESS` (niente avvio automatico né collegamento nel menu Start).
+(cartella dei log), `CLIPREC_HEADLESS=1` (niente toast, suoni, avvio automatico, collegamento nel
+menu Start né finestra impostazioni al primo avvio).
 
 ## Uso
 
@@ -62,9 +63,13 @@ Variabili d'ambiente per i test: `CLIPREC_CONFIG` (percorso di `config.toml`), `
 | Clip video | Ctrl+Alt+F10 |
 | Clip audio | Ctrl+Alt+F9 |
 
-Le hotkey si cambiano nelle impostazioni (anche con i tasti laterali del mouse). Il menu della
-tray mostra i secondi coperti e la RAM usata, avvia o ferma il buffer, elenca le ultime clip e
-apre le impostazioni.
+Le hotkey si cambiano nelle impostazioni (anche con i tasti laterali del mouse). Facoltativo: le
+stesse azioni da un controller XInput, per esempio `video_pad = "Back+A"` nella sezione `[hotkeys]`
+(tasti A, B, X, Y, LB, RB, LS, RS, Back, Start, DPadUp/Down/Left/Right). Il menu della tray mostra
+i secondi coperti e la RAM usata, avvia o ferma il buffer, elenca le ultime clip e apre le
+impostazioni. Al primo avvio ClipRec scrive la configurazione predefinita (video automatico, audio
+di sistema e microfono, più Discord se è aperto) e apre le impostazioni; il pulsante «Prova» salva
+una clip di 5 s. Interfaccia in italiano e inglese (`language = "it"`, `"en"` o `"auto"`).
 
 ## Dove sono i file
 
