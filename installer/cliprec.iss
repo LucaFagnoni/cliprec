@@ -4,7 +4,10 @@
 ; Installazione per utente, senza amministratore: {localappdata}\Programs\ClipRec.
 
 #define AppName "ClipRec"
-#define AppVersion "0.1.0"
+; Da `ISCC /DAppVersion=x.y.z`; altrimenti questa.
+#ifndef AppVersion
+  #define AppVersion "0.1.0"
+#endif
 #define AppExe "cliprec-app.exe"
 ; Uguale a APP_ID in crates/cliprec-app/src/notify.rs (serve ai toast).
 #define AppUserModelID "ClipRec.App"
@@ -22,7 +25,7 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0.19041
 OutputDir=..\target\dist
-OutputBaseFilename=ClipRec-Setup
+OutputBaseFilename=ClipRec-{#AppVersion}-Setup
 Compression=lzma2/max
 SolidCompression=yes
 UninstallDisplayIcon={app}\{#AppExe}

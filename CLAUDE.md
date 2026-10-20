@@ -60,7 +60,8 @@ I `build.rs` di `cliprec-encode` e `cliprec-mux` copiano le DLL di FFmpeg accant
 - Di notte e nei test automatici: niente audio dagli altoparlanti, niente finestre a schermo
   intero, niente toast, niente scritture fuori dal repository (registro, menu Start, avvio
   automatico). Usare sorgenti sintetiche.
-- Commit frequenti su `main`, nessun push. I subagenti lavorano in worktree separati
+- Commit frequenti su `main`. Push su `origin` (github.com/LucaFagnoni/cliprec) e release solo
+  quando Luca lo chiede; le build vanno nelle release GitHub, mai nel repository. I subagenti lavorano in worktree separati
   (`.claude/worktrees/`); l'agente principale unisce i rami uno alla volta e rilancia tutti i test.
 
 ## Stato delle fasi

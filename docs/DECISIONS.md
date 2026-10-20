@@ -144,3 +144,13 @@ Le voci [DEFAULT] e [PROPOSTA] di SPEC.md valgono come decise; qui ci sono quell
     manca, lo scarica da `aka.ms/vs/17/release/vc_redist.x64.exe` con la pagina di download di
     Inno Setup e lo installa. Senza rete avvisa e prosegue: ClipRec usa le DLL del runtime nella
     sua cartella. Tolto `cargo xtask redist`.
+36. **Aggiornamenti senza reinstallare** (20 ottobre, richiesta di Luca). All'avvio (dopo 15 s) e
+    ogni 24 ore il core legge l'ultima release di `LucaFagnoni/cliprec` su GitHub; se è più nuova
+    apre la finestra di aggiornamento (`cliprec-settings --aggiornamento`, stesso tema delle
+    impostazioni) che chiede se installarla. Installazione: zip portable scaricato con `curl.exe`,
+    SHA-256 confrontato con il file `.sha256` della release (`certutil`), estratto con `tar.exe`;
+    i file in uso si rinominano in `.old` (Windows lo permette anche per exe e DLL caricate), i
+    nuovi prendono il loro posto, ClipRec si riavvia e toglie i `.old` all'avvio seguente. Al
+    primo errore si ripristinano i file vecchi. Niente dipendenze nuove, niente amministratore.
+    Limite: lo SHA-256 garantisce l'integrità dello zip pubblicato, non l'autore; con un
+    certificato di firma si potrà verificare anche la firma degli exe prima di sostituirli.

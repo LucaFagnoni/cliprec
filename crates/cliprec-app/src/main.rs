@@ -15,6 +15,7 @@ mod shell;
 mod startup;
 mod supervisor;
 mod sys;
+mod update;
 
 use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex};

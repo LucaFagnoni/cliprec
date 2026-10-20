@@ -73,6 +73,9 @@ struct App {
     notifier: Mutex<Notifier>,
     error_at: Mutex<Option<Instant>>,
     settings: Mutex<Option<Child>>,
+    /// Finestra di aggiornamento (`cliprec-settings --aggiornamento`).
+    update_dialog: Mutex<Option<Child>>,
+    updater: std::sync::OnceLock<Arc<crate::update::Updater>>,
     hwnd: AtomicIsize,
 }
 
@@ -115,16 +118,25 @@ impl App {
     }
 
     fn launch_settings(&self) {
+        self.launch_settings_exe(&self.settings, &[]);
+    }
+
+    /// Finestra di aggiornamento, nello stile delle impostazioni (stesso eseguibile).
+    fn launch_update_dialog(&self) {
+        self.launch_settings_exe(&self.update_dialog, &["--aggiornamento"]);
+    }
+
+    fn launch_settings_exe(&self, slot: &Mutex<Option<Child>>, args: &[&str]) {
         let exe = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join("cliprec-settings.exe")));
         let Some(exe) = exe.filter(|p| p.exists()) else {
             self.process_event(&EngineEvent::Warning(fmt(i18n::current(), K::SettingsMissing, &[])));
             return;
         };
-        let Ok(mut slot) = self.settings.lock() else { return };
+        let Ok(mut slot) = slot.lock() else { return };
         if slot.as_mut().is_some_and(|c| matches!(c.try_wait(), Ok(None))) {
             return; // già aperta
         }
-        match std::process::Command::new(&exe).spawn() {
+        match std::process::Command::new(&exe).args(args).spawn() {
             Ok(child) => *slot = Some(child),
             Err(e) => tracing::error!("avvio impostazioni: {e}"),
         }
@@ -176,6 +188,9 @@ struct Ui {
     settings_item: MenuItem,
     quit_item: MenuItem,
     restart_item: Option<MenuItem>,
+    update_item: MenuItem,
+    /// Versione nuova mostrata nella voce degli aggiornamenti (`Some(None)` = nessuna).
+    shown_update: Option<Option<String>>,
     recent_menu: Submenu,
     recent_items: Vec<MenuItem>,
     recent_paths: Arc<Mutex<Vec<PathBuf>>>,
@@ -207,6 +222,15 @@ impl Ui {
                 let _ = self.tray.set_icon(Some(i));
             }
             self.shown_state = Some(state);
+        }
+        let available = self.app.updater.get().and_then(|u| u.info().available);
+        if self.shown_update.as_ref() != Some(&available) {
+            let l = i18n::current();
+            self.update_item.set_text(match &available {
+                Some(v) => fmt(l, K::MenuUpdateInstall, &[v]),
+                None => fmt(l, K::MenuUpdateCheck, &[]),
+            });
+            self.shown_update = Some(available);
         }
         if self.shown_running != Some(st.buffer_running) {
             self.toggle_item.set_text(fmt(i18n::current(), if st.buffer_running { K::MenuStop } else { K::MenuStart }, &[]));
@@ -247,6 +271,7 @@ impl Ui {
         }
         self.shown_text.clear();
         self.shown_running = None;
+        self.shown_update = None;
         self.shown_recent = vec![PathBuf::from("\0")];
     }
 
@@ -433,6 +458,7 @@ fn build_ui(app: &Arc<App>, hwnd: HWND) -> anyhow::Result<Ui> {
     let folder_item = MenuItem::with_id("folder", fmt(l, K::MenuFolder, &[]), true, None);
     let settings_item = MenuItem::with_id("settings", fmt(l, K::MenuSettings, &[]), true, None);
     let quit_item = MenuItem::with_id("quit", fmt(l, K::MenuQuit, &[]), true, None);
+    let update_item = MenuItem::with_id("update", fmt(l, K::MenuUpdateCheck, &[]), true, None);
     let restart_item = crate::sys::restart_menu_visible(crate::sys::self_elevated())
         .then(|| MenuItem::with_id("restart", fmt(l, K::MenuRestartAdmin, &[]), true, None));
     let sep = PredefinedMenuItem::separator();
@@ -441,7 +467,7 @@ fn build_ui(app: &Arc<App>, hwnd: HWND) -> anyhow::Result<Ui> {
         items.push(r);
     }
     let sep2 = PredefinedMenuItem::separator();
-    items.extend([&sep2 as &dyn tray_icon::menu::IsMenuItem, &quit_item]);
+    items.extend([&sep2 as &dyn tray_icon::menu::IsMenuItem, &update_item, &quit_item]);
     let menu = Menu::new();
     menu.append_items(&items)?;
     // Senza gestore gli eventi dell'icona (ogni passaggio del mouse) si accumulano in un canale che
@@ -459,6 +485,15 @@ fn build_ui(app: &Arc<App>, hwnd: HWND) -> anyhow::Result<Ui> {
             h_app.send(if running { AppCommand::StopBuffer } else { AppCommand::StartBuffer });
         }
         "folder" => h_app.open_clips_folder(),
+        // La finestra segue il controllo e, se c'è una versione nuova, propone di installarla.
+        "update" => {
+            if let Some(u) = h_app.updater.get()
+                && u.info().available.is_none()
+            {
+                u.check(false);
+            }
+            h_app.launch_update_dialog();
+        }
         "settings" => h_app.launch_settings(),
         "restart" => match crate::sys::restart_elevated() {
             Ok(()) => {
@@ -499,6 +534,8 @@ fn build_ui(app: &Arc<App>, hwnd: HWND) -> anyhow::Result<Ui> {
         settings_item,
         quit_item,
         restart_item,
+        update_item,
+        shown_update: None,
         recent_menu,
         recent_items: Vec::new(),
         recent_paths,
@@ -526,8 +563,28 @@ pub fn run(io: ShellIo) -> anyhow::Result<()> {
         config: Mutex::new(config.clone()),
         error_at: Mutex::new(None),
         settings: Mutex::new(None),
+        update_dialog: Mutex::new(None),
+        updater: std::sync::OnceLock::new(),
         hwnd: AtomicIsize::new(0),
     });
+    // Aggiornamenti: la finestra si apre quando il controllo trova una versione nuova; dopo
+    // l'installazione questa istanza si chiude e lascia il posto a quella aggiornata.
+    let (dialog_app, quit_updated) = (Arc::downgrade(&app), Arc::downgrade(&app));
+    let updater = crate::update::Updater::new(
+        move || {
+            if let Some(a) = dialog_app.upgrade() {
+                a.launch_update_dialog();
+                a.wake(WM_REFRESH);
+            }
+        },
+        move || {
+            if let Some(a) = quit_updated.upgrade() {
+                a.send(AppCommand::Quit);
+                a.wake(WM_QUIT_REQUEST);
+            }
+        },
+    );
+    let _ = app.updater.set(Arc::clone(&updater));
 
     i18n::set_from_config(&config.general.language);
     let hwnd = create_window()?;
@@ -560,6 +617,7 @@ pub fn run(io: ShellIo) -> anyhow::Result<()> {
         commands,
         on_reload: Arc::new(move || reload_app.wake(WM_RELOAD)),
         on_quit: Arc::new(move || quit_app.wake(WM_QUIT_REQUEST)),
+        updater: Arc::clone(&updater),
     };
     if let Err(e) = crate::ipc_server::spawn(pipe_name(), ctx) {
         tracing::error!("server IPC non avviato: {e}");
@@ -569,6 +627,25 @@ pub fn run(io: ShellIo) -> anyhow::Result<()> {
         && let Some(problem) = crate::autostart::apply(&config)
     {
         app.process_event(&EngineEvent::Warning(problem));
+    }
+
+    if !notify::headless() {
+        // I `.old` dell'ultimo aggiornamento non sono più in uso: si tolgono.
+        if let Some(dir) = crate::update::app_dir() {
+            let _ = std::thread::Builder::new().name("pulizia aggiornamento".into()).spawn(move || crate::update::cleanup_old(&dir));
+        }
+        // All'avvio (dopo 15 s, a sistema assestato) e poi ogni giorno: se c'è una versione nuova
+        // si apre la finestra che chiede se installarla.
+        if config.general.check_updates {
+            let u = Arc::clone(&updater);
+            let _ = std::thread::Builder::new().name("controllo aggiornamenti".into()).spawn(move || {
+                std::thread::sleep(Duration::from_secs(15));
+                loop {
+                    u.check(true);
+                    std::thread::sleep(Duration::from_secs(24 * 3600));
+                }
+            });
+        }
     }
 
     // SAFETY: finestra valida; il timer è sul thread corrente e viene tolto all'uscita.

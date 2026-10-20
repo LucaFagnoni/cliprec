@@ -76,6 +76,18 @@ impostazioni. Al primo avvio ClipRec scrive la configurazione predefinita (video
 di sistema e microfono, più Discord se è aperto) e apre le impostazioni; il pulsante «Prova» salva
 una clip di 5 s. Interfaccia in italiano e inglese (`language = "it"`, `"en"` o `"auto"`).
 
+## Aggiornamenti
+
+All'avvio e ogni giorno ClipRec cerca una versione nuova tra le release di
+[github.com/LucaFagnoni/cliprec](https://github.com/LucaFagnoni/cliprec/releases) e chiede se
+installarla: scarica lo zip portable, ne verifica lo SHA-256, sostituisce i propri file e si
+riavvia, senza rilanciare il setup e senza permessi di amministratore. Si disattiva in
+Impostazioni → Informazioni; dalla tray, «Cerca aggiornamenti…».
+
+Per pubblicare una versione: alzare `version` in `Cargo.toml` del workspace, poi
+`cargo build --release`, `cargo xtask dist`, l'installer con `/DAppVersion=x.y.z`, lo zip
+`ClipRec-x.y.z-portable.zip` e il suo `.sha256`, e una release `vx.y.z` con i tre file.
+
 ## Dove sono i file
 
 | Cosa | Percorso |

@@ -2,7 +2,7 @@
 // le sezioni, pagine di schede con righe (titolo, descrizione, controllo a destra). Le stringhe
 // vengono da `global T`, riempito da Rust in italiano o inglese (src/i18n.rs); la logica vive in
 // Rust (src/model.rs), qui solo la vista.
-import { ComboBox, SpinBox, Slider, LineEdit, Button, ScrollView, AboutSlint, Palette, Switch } from "std-widgets.slint";
+import { ComboBox, SpinBox, Slider, LineEdit, Button, ScrollView, AboutSlint, Palette, Switch, Spinner } from "std-widgets.slint";
 
 export global T {
     in property <string> window-title;
@@ -168,6 +168,10 @@ export global T {
     in property <string> lang-auto;
     in property <string> about-text;
     in property <string> version;
+    in property <string> sec-updates;
+    in property <string> check-now;
+    in property <string> check-updates;
+    in property <string> check-updates-desc;
     in property <string> save;
     in property <string> cancel;
     in property <string> test;
@@ -217,6 +221,7 @@ export struct Form {
     start-as-admin: bool,
     sound: bool,
     notifications: bool,
+    check-updates: bool,
 }
 
 export struct SourceRow {
@@ -484,6 +489,8 @@ export component SettingsWindow inherits Window {
     callback codec-picked(int);
     callback hotkey-key(int, string, bool, bool, bool, bool) -> bool;
     callback hotkey-mouse(int, int, bool, bool, bool, bool) -> bool;
+    callback check-updates();
+    in property <string> update-line;
 
     HorizontalLayout {
         // Barra laterale: nome, sezioni, stato del registratore.
@@ -1043,6 +1050,20 @@ export component SettingsWindow inherits Window {
                         Text { text: T.about-text; font-size: 14px; color: Theme.text; wrap: word-wrap; }
                     }
                 }
+                SectionTitle { text: T.sec-updates; }
+                Card {
+                    SettingRow {
+                        title: T.version + " " + root.version;
+                        description: root.update-line;
+                        Button { text: T.check-now; clicked => { root.check-updates(); } }
+                    }
+                    Divider { }
+                    SettingRow {
+                        title: T.check-updates;
+                        description: T.check-updates-desc;
+                        Switch { checked <=> root.f.check-updates; }
+                    }
+                }
                 VerticalLayout {
                     padding-top: 16px;
                     alignment: start;
@@ -1071,6 +1092,85 @@ export component SettingsWindow inherits Window {
                 }
                 Button { text: T.cancel; width: 120px; clicked => { root.cancel(); } }
                 Button { text: T.save; primary: true; width: 120px; clicked => { root.save(); } }
+            }
+        }
+    }
+}
+
+// Finestra di aggiornamento (`cliprec-settings --aggiornamento`): stesso tema delle impostazioni.
+// Testi e stato arrivano da Rust (src/update_window.rs), che segue il core sulla named pipe.
+export component UpdateWindow inherits Window {
+    title: "ClipRec";
+    icon: @image-url("../../../assets/icon/cliprec-256.png");
+    preferred-width: 560px;
+    preferred-height: 480px;
+    min-width: 460px;
+    min-height: 300px;
+    background: Theme.window;
+
+    in property <string> heading;
+    in property <string> subheading;
+    in property <string> notes-title;
+    in property <string> notes;
+    in property <string> status;
+    in property <bool> status-error;
+    in property <bool> busy;
+    in property <bool> can-install;
+    in property <string> install-text;
+    in property <string> close-text;
+    callback install();
+    callback dismiss();
+
+    VerticalLayout {
+        padding: 28px;
+        spacing: 16px;
+        HorizontalLayout {
+            spacing: 16px;
+            Image {
+                source: @image-url("../../../assets/icon/cliprec-128.png");
+                width: 56px;
+                height: 56px;
+            }
+            VerticalLayout {
+                alignment: center;
+                spacing: 4px;
+                Text { text: root.heading; font-size: 20px; font-weight: 600; color: Theme.text; wrap: word-wrap; }
+                Text { text: root.subheading; font-size: 13px; color: Theme.text-secondary; wrap: word-wrap; }
+            }
+        }
+        if root.notes != "": VerticalLayout {
+            vertical-stretch: 1;
+            spacing: 6px;
+            Text { text: root.notes-title; font-size: 14px; font-weight: 600; color: Theme.text; }
+            Card {
+                vertical-stretch: 1;
+                ScrollView {
+                    VerticalLayout {
+                        padding: 14px;
+                        Text { text: root.notes; font-size: 13px; color: Theme.text; wrap: word-wrap; }
+                    }
+                }
+            }
+        }
+        if root.notes == "": Rectangle { vertical-stretch: 1; }
+        HorizontalLayout {
+            spacing: 10px;
+            if root.busy: Spinner { width: 20px; height: 20px; indeterminate: true; }
+            Text {
+                text: root.status;
+                font-size: 13px;
+                color: root.status-error ? Theme.error : Theme.text-secondary;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+                wrap: word-wrap;
+            }
+            Button { text: root.close-text; width: 130px; clicked => { root.dismiss(); } }
+            if root.can-install: Button {
+                text: root.install-text;
+                primary: true;
+                enabled: !root.busy;
+                width: 170px;
+                clicked => { root.install(); }
             }
         }
     }

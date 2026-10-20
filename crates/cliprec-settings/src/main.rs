@@ -11,6 +11,7 @@ mod model;
 mod outcome;
 mod pipe;
 mod sys;
+mod update_window;
 
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -146,6 +147,20 @@ fn with_pick(mut row: SourceRow, lists: &Lists) -> SourceRow {
     row
 }
 
+/// Riga della sezione Aggiornamenti (pagina Informazioni).
+fn update_line(lang: Lang, info: Option<&cliprec_core::ipc::UpdateInfo>) -> String {
+    use cliprec_core::ipc::UpdatePhase;
+    let Some(info) = info else { return String::new() };
+    match (&info.phase, &info.available) {
+        (UpdatePhase::Checking, _) => lang.pick("Controllo in corso…", "Checking…").into(),
+        (UpdatePhase::Downloading | UpdatePhase::Installing | UpdatePhase::Restarting, _) => lang.pick("Aggiornamento in corso…", "Updating…").into(),
+        (_, Some(v)) => format!("{} {v}", lang.pick("Disponibile la versione", "Version available:")),
+        (UpdatePhase::UpToDate, None) => lang.pick("Hai l'ultima versione.", "You have the latest version.").into(),
+        (UpdatePhase::Failed(e), None) => format!("{} {e}", lang.pick("Controllo non riuscito:", "Check failed:")),
+        _ => String::new(),
+    }
+}
+
 fn set_message(ui: &SettingsWindow, text: &str, error: bool) {
     ui.set_message(text.into());
     ui.set_message_error(error);
@@ -199,10 +214,14 @@ fn main() -> anyhow::Result<()> {
         Err(e) => (Config::default(), Some(e.to_string())),
     };
 
-    let ui = SettingsWindow::new()?;
-    ui.set_version(env!("CARGO_PKG_VERSION").into());
     let (form, rows_vec) = model::to_form(&base);
     let lang = Lang::resolve(form.language);
+    // Aperta dal core quando trova una versione nuova, o dalla tray / da «Cerca aggiornamenti».
+    if std::env::args().any(|a| a == "--aggiornamento") {
+        return update_window::run(lang);
+    }
+    let ui = SettingsWindow::new()?;
+    ui.set_version(env!("CARGO_PKG_VERSION").into());
     set_lang(&ui, lang);
     ui.set_f(form);
     refresh_codecs(&ui, lang);
@@ -333,6 +352,15 @@ fn main() -> anyhow::Result<()> {
                 f.source_target = c.value.as_str().into();
                 ui.set_f(f);
             }
+        }
+    });
+    // «Cerca aggiornamenti»: il core controlla, la finestra di aggiornamento mostra l'esito.
+    ui.on_check_updates(|| {
+        std::thread::spawn(|| {
+            let _ = pipe::request(&IpcRequest::CheckUpdate);
+        });
+        if let Ok(exe) = std::env::current_exe() {
+            let _ = std::process::Command::new(exe).arg("--aggiornamento").spawn();
         }
     });
     ui.on_browse_folder({
@@ -475,10 +503,15 @@ fn main() -> anyhow::Result<()> {
     std::thread::spawn(move || {
         loop {
             let res = pipe::request(&IpcRequest::Status);
+            let update = match pipe::request(&IpcRequest::UpdateStatus) {
+                Ok(IpcResponse::Update(u)) => Some(u),
+                _ => None,
+            };
             LAST_POLL_MS.store(now_ms(), Ordering::Relaxed);
             let alive = weak
                 .upgrade_in_event_loop(move |ui| {
                     let lang = current_lang();
+                    ui.set_update_line(update_line(lang, update.as_ref()).into());
                     match res {
                         Ok(IpcResponse::Status(s)) => {
                             AVAILABLE.with(|a| *a.borrow_mut() = s.available_codecs.clone());

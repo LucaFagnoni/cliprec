@@ -25,11 +25,46 @@ pub enum IpcRequest {
     SaveVideoClip,
     /// Salva una clip audio come la hotkey.
     SaveAudioClip,
+    /// Stato degli aggiornamenti ([`IpcResponse::Update`]).
+    UpdateStatus,
+    /// Cerca subito una versione nuova (risposta `Ok`; l'esito arriva in `UpdateStatus`).
+    CheckUpdate,
+    /// Scarica e installa la versione trovata, poi riavvia ClipRec.
+    InstallUpdate,
+}
+
+/// Fase dell'aggiornamento automatico.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum UpdatePhase {
+    #[default]
+    Idle,
+    Checking,
+    /// Nessuna versione più recente.
+    UpToDate,
+    Downloading,
+    Installing,
+    /// File sostituiti: ClipRec si sta riavviando.
+    Restarting,
+    Failed(String),
+}
+
+/// Stato degli aggiornamenti tenuto dal core.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct UpdateInfo {
+    /// Versione in esecuzione.
+    pub current: String,
+    /// Versione più recente disponibile, se più nuova di `current`.
+    pub available: Option<String>,
+    /// Note della release (testo Markdown di GitHub).
+    pub notes: String,
+    pub phase: UpdatePhase,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum IpcResponse {
     Status(EngineStatus),
+    Update(UpdateInfo),
     Ok,
     Error(String),
 }

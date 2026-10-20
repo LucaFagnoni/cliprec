@@ -130,6 +130,7 @@ pub fn to_form(c: &Config) -> (Form, Vec<SourceRow>) {
         start_as_admin: c.general.start_as_admin,
         sound: c.general.sound_on_save,
         notifications: c.general.notifications,
+        check_updates: c.general.check_updates,
     };
     let rows = c
         .audio
@@ -341,6 +342,7 @@ pub fn build_lenient(form: &Form, rows: &[SourceRow], base: &Config) -> (Config,
     c.general.start_as_admin = form.start_as_admin;
     c.general.sound_on_save = form.sound;
     c.general.notifications = form.notifications;
+    c.general.check_updates = form.check_updates;
 
     (c, problems)
 }

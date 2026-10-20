@@ -33,6 +33,8 @@ pub struct Context {
     pub on_reload: Arc<dyn Fn() + Send + Sync>,
     /// Chiamata su `Quit`, dopo aver inoltrato `AppCommand::Quit` al motore: chiude il loop della shell.
     pub on_quit: Arc<dyn Fn() + Send + Sync>,
+    /// Aggiornamenti: stato, controllo, installazione.
+    pub updater: Arc<crate::update::Updater>,
 }
 
 /// Risposta a una richiesta (pura rispetto alla pipe, così si prova senza Win32).
@@ -58,6 +60,15 @@ pub fn handle_request(ctx: &Context, req: IpcRequest) -> IpcResponse {
             let r = sent(AppCommand::Quit);
             (ctx.on_quit)();
             r
+        }
+        IpcRequest::UpdateStatus => IpcResponse::Update(ctx.updater.info()),
+        IpcRequest::CheckUpdate => {
+            ctx.updater.check(false);
+            IpcResponse::Ok
+        }
+        IpcRequest::InstallUpdate => {
+            ctx.updater.install();
+            IpcResponse::Ok
         }
     }
 }
@@ -310,7 +321,8 @@ mod tests {
         let status = Arc::new(Mutex::new(EngineStatus { video_seconds: 42.0, ..Default::default() }));
         let q = reloads.clone();
         let on_quit = Arc::new(move || _ = q.fetch_add(100, Ordering::SeqCst));
-        (Context { status, commands: tx, on_reload: Arc::new(move || _ = r.fetch_add(1, Ordering::SeqCst)), on_quit }, rx, reloads)
+        let updater = crate::update::Updater::new(|| {}, || {});
+        (Context { status, commands: tx, on_reload: Arc::new(move || _ = r.fetch_add(1, Ordering::SeqCst)), on_quit, updater }, rx, reloads)
     }
 
     #[test]

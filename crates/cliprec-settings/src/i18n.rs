@@ -214,6 +214,10 @@ strings! {
     set_lang_auto: "Automatica", "Automatic";
     set_about_text: "Il buffer vive solo in RAM: il disco si usa solo quando salvi una clip. Due scorciatoie, una per la clip video e una per la clip audio, e una traccia separata per ogni sorgente.", "The buffer lives in RAM only: the disk is used only when you save a clip. Two shortcuts, one for the video clip and one for the audio clip, and a separate track for each source.";
     set_version: "Versione", "Version";
+    set_sec_updates: "Aggiornamenti", "Updates";
+    set_check_now: "Cerca aggiornamenti", "Check for updates";
+    set_check_updates: "Controlla automaticamente", "Check automatically";
+    set_check_updates_desc: "All'avvio e ogni giorno ClipRec cerca una versione nuova e ti chiede se installarla.", "At startup and every day ClipRec looks for a new version and asks whether to install it.";
     set_save: "Salva", "Save";
     set_cancel: "Annulla", "Cancel";
     set_test: "Clip di prova", "Test clip";

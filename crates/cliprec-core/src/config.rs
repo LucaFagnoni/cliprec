@@ -387,6 +387,8 @@ pub struct GeneralConfig {
     pub start_as_admin: bool,
     pub sound_on_save: bool,
     pub notifications: bool,
+    /// All'avvio e ogni giorno cerca una versione nuova e chiede se installarla.
+    pub check_updates: bool,
     /// Classe di priorità GPU: "high" (default) o "normal". Mai "realtime".
     pub gpu_priority: String,
 }
@@ -399,6 +401,7 @@ impl Default for GeneralConfig {
             start_as_admin: false,
             sound_on_save: true,
             notifications: true,
+            check_updates: true,
             gpu_priority: "high".into(),
         }
     }
