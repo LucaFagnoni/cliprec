@@ -49,14 +49,16 @@ Le clip vanno in `%USERPROFILE%\Videos\ClipRec`; config in `%APPDATA%\ClipRec\co
 4. Monitor a 144 Hz o più (stanotte lo schermo era a 60 Hz) e un gioco vero con PresentMon
    (`scripts\bench\presentmon.ps1`) per il calo di fps.
 5. Microfono, Discord e un gioco come sorgenti audio; scollegare le cuffie durante la registrazione.
-6. RAM con VMMap (la memoria privata alta sembra del driver NVENC).
+6. Un controller con `video_pad = "Back+A"` in config.toml, e le lingue della tray (`language = "en"`).
+7. RAM con VMMap (la memoria privata alta sembra del driver NVENC).
 
 ### Cosa manca
 
 - Build FFmpeg ridotta (oggi la distribuzione pesa 130 MB contro i 40 della specifica; piano in
   `installer/FFMPEG-RIDOTTA.md`), firma del codice, installer compilato.
-- AMF (GPU AMD) mai provato; controller XInput (opzionale) non fatto; «riavvia come amministratore»
-  per i giochi elevati solo segnalato.
+- AMF (GPU AMD) mai provato; «riavvia come amministratore» per i giochi elevati solo segnalato.
+- Controller XInput (facoltativo): fatto (`hotkeys.video_pad`/`audio_pad`, es. «Back+A»), mai provato
+  con un controller vero.
 
 ### Decisioni da confermare
 
