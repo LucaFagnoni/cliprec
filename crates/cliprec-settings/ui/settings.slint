@@ -183,6 +183,7 @@ export component SettingsWindow inherits Window {
     in property <bool> message-error;
     in property <string> status-text;
     in property <bool> status-online;
+    in property <int> start-tab;
 
     callback save();
     callback cancel();
@@ -203,6 +204,7 @@ export component SettingsWindow inherits Window {
         spacing: 8px;
 
         TabWidget {
+            current-index: root.start-tab;
             Tab {
                 title: T.tab-video;
                 VerticalLayout {
@@ -324,7 +326,7 @@ export component SettingsWindow inherits Window {
                                 Text { text: Math.round(r.volume * 100) + "%"; width: 40px; vertical-alignment: center; }
                                 Button { text: "▲"; width: 34px; enabled: i > 0; clicked => { root.source-move(i, -1); } }
                                 Button { text: "▼"; width: 34px; enabled: i < root.sources.length - 1; clicked => { root.source-move(i, 1); } }
-                                Button { text: "✕"; width: 34px; clicked => { root.source-remove(i); } }
+                                Button { text: "X"; width: 34px; clicked => { root.source-remove(i); } }
                             }
                         }
                     }
@@ -378,12 +380,12 @@ export component SettingsWindow inherits Window {
                     }
                     FormRow {
                         label: T.folder;
-                        LineEdit { text <=> root.f.folder; placeholder-text: T.folder-default; horizontal-stretch: 1; }
+                        LineEdit { text <=> root.f.folder; placeholder-text: T.folder-default; min-width: 420px; }
                         Button { text: T.browse; clicked => { root.browse-folder(); } }
                     }
                     FormRow {
                         label: T.template;
-                        LineEdit { text <=> root.f.template; horizontal-stretch: 1; }
+                        LineEdit { text <=> root.f.template; min-width: 420px; }
                     }
                     FormRow {
                         label: "";
@@ -453,7 +455,7 @@ export component SettingsWindow inherits Window {
                         }
                         FormRow {
                             label: T.games;
-                            LineEdit { text <=> root.f.games; placeholder-text: T.games-hint; horizontal-stretch: 1; }
+                            LineEdit { text <=> root.f.games; placeholder-text: T.games-hint; min-width: 420px; }
                         }
                     }
                 }
@@ -490,7 +492,6 @@ export component SettingsWindow inherits Window {
                 Button {
                     text: T.test;
                     enabled: root.status-online;
-                    y: 4px;
                     clicked => { root.test-clip(); }
                 }
             }

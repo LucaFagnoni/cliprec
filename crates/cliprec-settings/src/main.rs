@@ -1,7 +1,7 @@
 //! Finestra impostazioni di ClipRec (Slint, processo separato lanciato dalla tray).
 //!
 //! Variabili d'ambiente per le prove: `CLIPREC_CONFIG` (percorso di config.toml al posto di
-//! `Config::default_path()`), `CLIPREC_PIPE` (nome della pipe), `CLIPREC_SMOKE_MS` (chiude la
+//! `Config::default_path()`), `CLIPREC_PIPE` (nome della pipe), `CLIPREC_TAB` (scheda iniziale, 0-5), `CLIPREC_SMOKE_MS` (chiude la
 //! finestra da sola dopo N millisecondi).
 #![windows_subsystem = "windows"]
 
@@ -375,6 +375,9 @@ fn main() -> anyhow::Result<()> {
         }
     });
 
+    if let Some(tab) = std::env::var("CLIPREC_TAB").ok().and_then(|v| v.parse::<i32>().ok()) {
+        ui.set_start_tab(tab);
+    }
     let smoke = Timer::default();
     if let Some(ms) = std::env::var("CLIPREC_SMOKE_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
         smoke.start(TimerMode::SingleShot, Duration::from_millis(ms), || {
