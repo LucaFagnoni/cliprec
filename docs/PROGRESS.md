@@ -34,6 +34,8 @@ target\release\cliprec-app.exe
 target\release\cliprec-settings.exe
 # 4. Comandi sulla pipe
 scripts\pipe.ps1 Status TestClip
+# 5. Tutte le prove della notte in un colpo (clip sintetica + app completa sulla finestra di test)
+scripts\prova-completa.ps1
 ```
 
 Le clip vanno in `%USERPROFILE%\Videos\ClipRec`; config in `%APPDATA%\ClipRec\config.toml`; log in
@@ -123,6 +125,15 @@ avviso invece della proposta interattiva (20); spegnimento del PC lasciato alla 
 - Revisione finale della notte (sola lettura) sulle modifiche dopo la seconda revisione.
 
 ## Problemi aperti
+
+- **Incidente alle 05:41 (colpa dello script di prova, non di ClipRec).** La prima versione di
+  `scripts\prova-completa.ps1` scriveva la config di prova con `Set-Content -Encoding utf8NoBOM`, che
+  in Windows PowerShell 5.1 non esiste: l'app è partita con i predefiniti, ha catturato **il monitor
+  principale** per circa 10 s e ha salvato una clip in `C:\Users\Luca\Videos\ClipRec`. Ho spostato
+  quel file (non cancellato) in `target\catturato-per-errore\Desktop_2026-10-20_05-41-28.mp4` e
+  rimosso la cartella `Videos\ClipRec`, vuota e creata dal test. Cancellalo tu se non ti serve. Lo
+  script ora scrive la config con .NET, si ferma se non la trova e chiude l'app senza salvare se la
+  sorgente non è la finestra di test.
 
 - Coordinamento con pokewilds (03:47): le sessioni di pokewilds finiscono entro le 09:00 e nessuna deve
   restare attiva dopo. La sessione «Pokewilds Godot iOS build setup» dice che Luca le ha chiesto lo
