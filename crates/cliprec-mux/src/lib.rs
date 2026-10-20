@@ -230,6 +230,13 @@ mod tests {
     }
 
     #[test]
+    fn disk_space_is_checked() {
+        let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/test-output/mux/space");
+        assert!(ensure_space(&target, 1 << 20).is_ok());
+        assert!(matches!(ensure_space(&target, u64::MAX / 4), Err(MuxError::DiskFull { .. })));
+    }
+
+    #[test]
     fn safe_file_names() {
         assert_eq!(file_name("Mic: 1/2?"), "Mic_ 1_2_");
         assert_eq!(file_name("  ..  "), "Traccia");
