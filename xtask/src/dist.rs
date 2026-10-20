@@ -133,13 +133,17 @@ pub fn verify_sha256(path: &Path, expected: &str) -> Result<()> {
     Ok(())
 }
 
-/// Cartella `Microsoft.VC143.CRT` più recente dei Build Tools / di Visual Studio 2022.
+/// Cartella `Microsoft.VC143.CRT` più recente di Visual Studio 2022: Build Tools in `Program Files
+/// (x86)` (questo PC) o le edizioni complete in `Program Files` (runner di GitHub Actions).
 fn crt_dir() -> Result<PathBuf> {
-    let pf = std::env::var_os("ProgramFiles(x86)").map(PathBuf::from).unwrap_or_else(|| r"C:\Program Files (x86)".into());
-    let vs = pf.join("Microsoft Visual Studio").join("2022");
+    let roots = ["ProgramFiles(x86)", "ProgramFiles"].map(|v| std::env::var_os(v).map(PathBuf::from));
+    let editions = roots
+        .into_iter()
+        .flatten()
+        .flat_map(|pf| std::fs::read_dir(pf.join("Microsoft Visual Studio").join("2022")).into_iter().flatten().flatten());
     let mut found = Vec::new();
-    for edition in std::fs::read_dir(&vs).with_context(|| format!("{} non trovata", vs.display()))? {
-        let msvc = edition?.path().join("VC").join("Redist").join("MSVC");
+    for edition in editions {
+        let msvc = edition.path().join("VC").join("Redist").join("MSVC");
         for ver in std::fs::read_dir(&msvc).into_iter().flatten().flatten() {
             let crt = ver.path().join("x64").join("Microsoft.VC143.CRT");
             if crt.is_dir() {

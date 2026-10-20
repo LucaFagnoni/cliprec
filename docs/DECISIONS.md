@@ -273,3 +273,12 @@ Le voci [DEFAULT] e [PROPOSTA] di SPEC.md valgono come decise; qui ci sono quell
     tipi diversi il mixer gira anche se serve a uno solo, e il buffer audio cresce di una traccia.
     `audio.audio_clip` assente (configurazioni precedenti) = come le clip video; le impostazioni lo
     scrivono solo quando la clip audio è diversa, così salvare senza toccare nulla non cambia il file.
+47. **Release da GitHub Actions** (20 ottobre, richiesta di Luca). `.github/workflows/release.yml`,
+    avviato a mano (`gh workflow run release.yml -f notes="..."`), su `windows-2025`: Rust 1.93,
+    FFmpeg ridotta con `cargo xtask ffmpeg-ridotta` (in cache finché `ridotta.rs` e lo script non
+    cambiano), `cargo xtask dist`, Inno Setup 7.1.0 scaricato da GitHub con SHA-256 verificato, zip
+    con `.sha256`, installer e release `v<versione di Cargo.toml>`; si ferma se la release esiste.
+    Le variabili d'ambiente del workflow sostituiscono i percorsi di questo PC in `.cargo/config.toml`.
+    Niente test (servono GPU ed encoder hardware): si lanciano in locale prima. Così la build non
+    tocca `target\dist`, da cui gira il ClipRec di Luca. `xtask dist` cerca il runtime VC++ anche
+    nelle edizioni di Visual Studio 2022 in `Program Files`.
