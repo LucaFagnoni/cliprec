@@ -79,3 +79,8 @@ Le voci [DEFAULT] e [PROPOSTA] di SPEC.md valgono come decise; qui ci sono quell
     da 5 a 60 s; un device perso o un cambio di GPU ricreano la sessione mantenendo il buffer.
 24. **`{game}` nel nome file** = nome dell'eseguibile catturato, ricavato dalla descrizione della
     sorgente; «Desktop» per i monitor, «Audio» in modalità solo audio.
+25. **Avvisi del motore solo in italiano**: tray, toast e messaggi della shell sono in italiano e
+    inglese; i testi degli avvisi e degli errori che arrivano dal motore e dai crate (`EngineEvent`,
+    errori del muxer) restano in italiano. Tradurli richiede chiavi i18n negli eventi: lavoro da fare.
+26. **Test end-to-end del motore in fila** (mutex nei test): in parallelo, sotto carico, l'avvio di
+    `ffprobe` falliva a volte con `0xc0000142` (risorse di sistema), non per un difetto di ClipRec.
