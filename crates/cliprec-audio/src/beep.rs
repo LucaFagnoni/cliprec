@@ -70,6 +70,7 @@ impl AudioSource for BeepSource {
         let thread = std::thread::Builder::new()
             .name(format!("beep {}", self.name))
             .spawn(move || {
+                let _mmcss = crate::wasapi_source::Mmcss::register();
                 let now = QpcTime::now();
                 // Origine sul secondo intero: i secondi cadono su multipli esatti di 48000 campioni.
                 let origin = QpcTime(now.0 - now.0.rem_euclid(HNS_PER_SEC));

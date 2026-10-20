@@ -178,6 +178,24 @@ enum OpenError {
     Fatal(SourceError),
 }
 
+/// Segnali dei callback di IMMNotificationClient (thread di sistema) al thread di cattura.
+#[derive(Default)]
+struct DeviceFlags {
+    /// Il dispositivo da catturare è cambiato: riaprire anche se la cattura funziona.
+    reopen: AtomicBool,
+    /// Qualcosa è cambiato: chi attende un dispositivo riprova subito.
+    wake: AtomicBool,
+}
+
+impl DeviceFlags {
+    fn signal(&self, reopen: bool) {
+        if reopen {
+            self.reopen.store(true, Ordering::Release);
+        }
+        self.wake.store(true, Ordering::Release);
+    }
+}
+
 /// Motivo della disconnessione della sessione, scritto dal callback di WASAPI.
 const DISC_NONE: u8 = 0;
 const DISC_EXCLUSIVE: u8 = 1;
@@ -225,10 +243,10 @@ impl Capture {
 
     fn capture_loop(&mut self, ready: SyncSender<Result<(), SourceError>>) {
         let mut ready = Some(ready);
-        let changed = Arc::new(AtomicBool::new(false));
+        let flags = Arc::new(DeviceFlags::default());
         // Notifiche dei dispositivi (IMMNotificationClient): solo segnali atomici nei callback.
         let enumerator = DeviceEnumerator::new().ok();
-        let _registration = enumerator.as_ref().and_then(|e| self.register_device_events(e, changed.clone()));
+        let _registration = enumerator.as_ref().and_then(|e| self.register_device_events(e, flags.clone()));
         let mut buffers = Buffers::new();
         self.continuity.anchor(QpcTime::now());
 
@@ -239,14 +257,14 @@ impl Capture {
                         let _ = tx.send(Ok(()));
                     }
                     self.set_state(SourceState::Running);
-                    match self.stream(&session, &mut buffers, &changed) {
+                    match self.stream(&session, &mut buffers, &flags) {
                         Ok(()) => {}
                         Err(OpenError::Wait(msg)) => self.set_state(SourceState::Waiting(msg)),
                         Err(OpenError::Fatal(e)) => self.set_state(SourceState::Error(e.to_string())),
                     }
                     let _ = session.client.stop_stream();
                     if !matches!(self.current_state(), SourceState::Running) {
-                        self.wait_silently(&changed);
+                        self.wait_silently(&flags);
                     }
                 }
                 Err(OpenError::Wait(msg)) => {
@@ -254,7 +272,7 @@ impl Capture {
                         let _ = tx.send(Ok(()));
                     }
                     self.set_state(SourceState::Waiting(msg));
-                    self.wait_silently(&changed);
+                    self.wait_silently(&flags);
                 }
                 Err(OpenError::Fatal(e)) => {
                     if let Some(tx) = ready.take() {
@@ -262,7 +280,7 @@ impl Capture {
                         return;
                     }
                     self.set_state(SourceState::Error(e.to_string()));
-                    self.wait_silently(&changed);
+                    self.wait_silently(&flags);
                 }
             }
         }
@@ -273,15 +291,16 @@ impl Capture {
     }
 
     /// Consegna silenzio fino al prossimo tentativo (3 s o una notifica di dispositivo).
-    fn wait_silently(&mut self, changed: &AtomicBool) {
+    fn wait_silently(&mut self, flags: &DeviceFlags) {
         let until = Instant::now() + RETRY;
-        while Instant::now() < until && !self.stop.load(Ordering::Acquire) && !changed.swap(false, Ordering::AcqRel) {
+        flags.reopen.store(false, Ordering::Release);
+        while Instant::now() < until && !self.stop.load(Ordering::Acquire) && !flags.wake.swap(false, Ordering::AcqRel) {
             std::thread::sleep(Duration::from_millis(u64::from(EVENT_TIMEOUT_MS)));
             self.continuity.idle(QpcTime::now(), &mut *self.on_chunk);
         }
     }
 
-    fn register_device_events(&self, enumerator: &DeviceEnumerator, changed: Arc<AtomicBool>) -> Option<DeviceEventRegistration> {
+    fn register_device_events(&self, enumerator: &DeviceEnumerator, flags: Arc<DeviceFlags>) -> Option<DeviceEventRegistration> {
         let (direction, device) = match &self.kind {
             AudioSourceKind::Input { device } => (Direction::Capture, device.clone()),
             AudioSourceKind::Output { device } => (Direction::Render, device.clone()),
@@ -289,31 +308,19 @@ impl Capture {
         };
         let mut cb = DeviceEventCallbacks::new();
         if device.is_none() {
-            let c = changed.clone();
+            let f = flags.clone();
             cb.set_default_device_callback(move |dir, role, _| {
                 if dir == direction && role == Role::Console {
-                    c.store(true, Ordering::Release);
+                    f.signal(true);
                 }
             });
         }
-        let matches = move |id: &str| device.as_deref().is_none_or(|d| d == id);
-        let (c, m) = (changed.clone(), matches.clone());
-        cb.set_device_state_callback(move |id, _| {
-            if m(&id) {
-                c.store(true, Ordering::Release);
-            }
-        });
-        let (c, m) = (changed.clone(), matches.clone());
-        cb.set_device_added_callback(move |id| {
-            if m(&id) {
-                c.store(true, Ordering::Release);
-            }
-        });
-        cb.set_device_removed_callback(move |id| {
-            if matches(&id) {
-                changed.store(true, Ordering::Release);
-            }
-        });
+        // Un cambiamento del nostro dispositivo fa riaprire; quello di un altro sveglia solo l'attesa.
+        let on_device = move |id: String| flags.signal(device.as_deref() == Some(id.as_str()));
+        let a = on_device.clone();
+        cb.set_device_state_callback(move |id, _| a(id));
+        cb.set_device_added_callback(on_device.clone());
+        cb.set_device_removed_callback(on_device);
         enumerator.register_notification_callback(cb).ok()
     }
 
@@ -369,12 +376,12 @@ impl Capture {
     }
 
     /// Legge i pacchetti finché la sessione è valida. `Ok` = fermata richiesta o riapertura.
-    fn stream(&mut self, s: &Session, b: &mut Buffers, changed: &AtomicBool) -> Result<(), OpenError> {
+    fn stream(&mut self, s: &Session, b: &mut Buffers, flags: &DeviceFlags) -> Result<(), OpenError> {
         let classify = |e: WasapiError| classify(e, &self.kind);
         let block = 4 * s.channels;
         let mut last_check = Instant::now();
         while !self.stop.load(Ordering::Acquire) {
-            if changed.swap(false, Ordering::AcqRel) {
+            if flags.reopen.swap(false, Ordering::AcqRel) {
                 return Ok(());
             }
             match s.disconnect.load(Ordering::Acquire) {
