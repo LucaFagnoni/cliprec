@@ -11,8 +11,9 @@ use crate::dsp::{Limiter, RateEstimator};
 
 /// Campioni per blocco della griglia del mixer (10 ms).
 pub const MIX_BLOCK_FRAMES: usize = 480;
-/// Oltre questo scarto (20 ms) si salta o si attende invece di correggere con il resampler.
-const HARD_FRAMES: f64 = 960.0;
+/// Oltre questo scarto (2 ms) si scartano campioni o si inserisce silenzio invece di correggere
+/// gradualmente con il resampler.
+const HARD_FRAMES: f64 = 96.0;
 /// Frazione dello scarto corretta a ogni blocco (costante di tempo ~1 s).
 const GAIN: f64 = 0.01;
 const QUEUE_FRAMES: usize = 2 * SAMPLE_RATE as usize;
@@ -129,12 +130,22 @@ impl Lane {
         let mut error = self.read as f64 - self.est.predict(start);
         self.last_error = error;
         if error > HARD_FRAMES {
-            // I dati disponibili appartengono al futuro: la corsia tace finché la griglia li raggiunge.
-            return false;
+            // In anticipo (avvio, ripresa): silenzio per esattamente `error` campioni, poi i dati
+            // senza resampler. Dopo un blocco così lo scarto è circa zero.
+            let pad = error.round() as usize;
+            if pad >= MIX_BLOCK_FRAMES {
+                return false;
+            }
+            let take = (MIX_BLOCK_FRAMES - pad).min(self.samples.slots() / CHANNELS);
+            self.output[..pad * CHANNELS].fill(0.0);
+            let _ = self.samples.pop_partial_slice(&mut self.output[pad * CHANNELS..(pad + take) * CHANNELS]);
+            self.output[(pad + take) * CHANNELS..].fill(0.0);
+            self.read += take as u64;
+            return true;
         }
         if error < -HARD_FRAMES {
-            // Indietro (avvio, sorgente bloccata): si scartano i campioni ormai passati.
-            let skip = ((-error) as usize).min(self.samples.slots() / CHANNELS);
+            // In ritardo (avvio, sorgente bloccata): si scartano esattamente i campioni ormai passati.
+            let skip = ((-error).round() as usize).min(self.samples.slots() / CHANNELS);
             if let Ok(chunk) = self.samples.read_chunk(skip * CHANNELS) {
                 chunk.commit_all();
             }
