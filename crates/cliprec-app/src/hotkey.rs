@@ -259,6 +259,19 @@ mod tests {
         InputEvent::Key { vk, e0: false, down }
     }
 
+    /// Un tasto da solo, anche F13-F24 (tasti macro), è una hotkey valida; con un modificatore
+    /// premuto non scatta.
+    #[test]
+    fn single_key_without_modifiers() {
+        let f14 = parse("F14").unwrap();
+        assert_eq!(f14, Chord { mods: Mods::default(), trigger: Trigger::Key(0x7D) });
+        let mut h = Hotkeys::new(Some(f14), None);
+        assert_eq!(h.feed(key(0x7D, true)), Some(AppCommand::SaveVideoClip));
+        h.feed(key(0x7D, false));
+        h.feed(key(VK_CONTROL, true));
+        assert_eq!(h.feed(key(0x7D, true)), None);
+    }
+
     #[test]
     fn parses_strings() {
         let c = parse("Ctrl+Alt+F10").unwrap();

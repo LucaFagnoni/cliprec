@@ -1,6 +1,6 @@
 // Finestra impostazioni di ClipRec. Le stringhe vengono da `global T`, riempito da Rust in
 // italiano o inglese (src/i18n.rs); la logica vive in Rust (src/model.rs), qui solo la vista.
-import { TabWidget, ComboBox, CheckBox, SpinBox, Slider, LineEdit, Button, ScrollView, AboutSlint, VerticalBox, HorizontalBox } from "std-widgets.slint";
+import { TabWidget, ComboBox, CheckBox, SpinBox, Slider, LineEdit, Button, ScrollView, AboutSlint, VerticalBox, HorizontalBox, Palette } from "std-widgets.slint";
 
 export global T {
     in property <string> window-title;
@@ -144,11 +144,12 @@ component FormRow inherits HorizontalLayout {
     }
 }
 
-// Campo che cattura la combinazione premuta mentre ha il focus.
+// Campo che cattura la combinazione premuta mentre ha il focus. Le callback restituiscono `true`
+// quando la combinazione è valida: il campo lascia il focus e mostra il tasto registrato.
 component HotkeyField inherits Rectangle {
     in property <string> value;
-    callback key(string, bool, bool, bool, bool);
-    callback mouse(int, bool, bool, bool, bool);
+    callback key(string, bool, bool, bool, bool) -> bool;
+    callback mouse(int, bool, bool, bool, bool) -> bool;
     callback clear();
     min-width: 220px;
     height: 32px;
@@ -157,7 +158,11 @@ component HotkeyField inherits Rectangle {
     border-radius: 4px;
     fs := FocusScope {
         key-pressed(e) => {
-            root.key(e.text, e.modifiers.control, e.modifiers.alt, e.modifiers.shift, e.modifiers.meta);
+            if (e.text == Key.Escape) {
+                fs.clear-focus();
+            } else if (root.key(e.text, e.modifiers.control, e.modifiers.alt, e.modifiers.shift, e.modifiers.meta)) {
+                fs.clear-focus();
+            }
             accept
         }
         ta := TouchArea {
@@ -165,9 +170,9 @@ component HotkeyField inherits Rectangle {
                 if (e.kind == PointerEventKind.down) {
                     fs.focus();
                     if (e.button == PointerEventButton.back) {
-                        root.mouse(4, e.modifiers.control, e.modifiers.alt, e.modifiers.shift, e.modifiers.meta);
+                        if (root.mouse(4, e.modifiers.control, e.modifiers.alt, e.modifiers.shift, e.modifiers.meta)) { fs.clear-focus(); }
                     } else if (e.button == PointerEventButton.forward) {
-                        root.mouse(5, e.modifiers.control, e.modifiers.alt, e.modifiers.shift, e.modifiers.meta);
+                        if (root.mouse(5, e.modifiers.control, e.modifiers.alt, e.modifiers.shift, e.modifiers.meta)) { fs.clear-focus(); }
                     }
                 }
             }
@@ -176,7 +181,7 @@ component HotkeyField inherits Rectangle {
             x: 8px;
             text: fs.has-focus ? T.hotkey-press : root.value;
             vertical-alignment: center;
-            color: fs.has-focus ? #2f7de1 : (self.text == "" ? #808080 : black);
+            color: fs.has-focus ? #2f7de1 : (self.text == "" ? #808080 : Palette.foreground);
         }
     }
 }
@@ -220,8 +225,8 @@ export component SettingsWindow inherits Window {
     callback source-pick(int, int, int);
     callback video-target-pick(int);
     callback codec-picked(int);
-    callback hotkey-key(int, string, bool, bool, bool, bool);
-    callback hotkey-mouse(int, int, bool, bool, bool, bool);
+    callback hotkey-key(int, string, bool, bool, bool, bool) -> bool;
+    callback hotkey-mouse(int, int, bool, bool, bool, bool) -> bool;
 
     VerticalLayout {
         padding: 12px;
@@ -408,8 +413,8 @@ export component SettingsWindow inherits Window {
                         label: T.hotkey-video;
                         HotkeyField {
                             value: root.f.hotkey-video;
-                            key(t, c, a, s, m) => { root.hotkey-key(0, t, c, a, s, m); }
-                            mouse(b, c, a, s, m) => { root.hotkey-mouse(0, b, c, a, s, m); }
+                            key(t, c, a, s, m) => { root.hotkey-key(0, t, c, a, s, m) }
+                            mouse(b, c, a, s, m) => { root.hotkey-mouse(0, b, c, a, s, m) }
                         }
                         Button { text: T.hotkey-clear; clicked => { root.f.hotkey-video = ""; } }
                     }
@@ -417,8 +422,8 @@ export component SettingsWindow inherits Window {
                         label: T.hotkey-audio;
                         HotkeyField {
                             value: root.f.hotkey-audio;
-                            key(t, c, a, s, m) => { root.hotkey-key(1, t, c, a, s, m); }
-                            mouse(b, c, a, s, m) => { root.hotkey-mouse(1, b, c, a, s, m); }
+                            key(t, c, a, s, m) => { root.hotkey-key(1, t, c, a, s, m) }
+                            mouse(b, c, a, s, m) => { root.hotkey-mouse(1, b, c, a, s, m) }
                         }
                         Button { text: T.hotkey-clear; clicked => { root.f.hotkey-audio = ""; } }
                     }

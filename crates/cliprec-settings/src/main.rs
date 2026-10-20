@@ -345,31 +345,28 @@ fn main() -> anyhow::Result<()> {
         }
     });
 
-    let capture = |which: i32, key: Option<String>, ui: &SettingsWindow| {
-        if let Some(k) = key {
-            let mut f = ui.get_f();
-            if which == 0 {
-                f.hotkey_video = k.into();
-            } else {
-                f.hotkey_audio = k.into();
-            }
-            ui.set_f(f);
+    // `true` se la combinazione è valida e registrata: il campo lascia il focus e la mostra.
+    let capture = |which: i32, key: Option<String>, ui: &SettingsWindow| -> bool {
+        let Some(k) = key else { return false };
+        let mut f = ui.get_f();
+        if which == 0 {
+            f.hotkey_video = k.into();
+        } else {
+            f.hotkey_audio = k.into();
         }
+        ui.set_f(f);
+        true
     };
     ui.on_hotkey_key({
         let w = ui.as_weak();
         move |which, text, ctrl, alt, shift, meta| {
-            if let Some(ui) = w.upgrade() {
-                capture(which, hotkey::from_key(&text, hotkey::Mods { ctrl, alt, shift, meta }), &ui);
-            }
+            w.upgrade().is_some_and(|ui| capture(which, hotkey::from_key(&text, hotkey::Mods { ctrl, alt, shift, meta }), &ui))
         }
     });
     ui.on_hotkey_mouse({
         let w = ui.as_weak();
         move |which, button, ctrl, alt, shift, meta| {
-            if let Some(ui) = w.upgrade() {
-                capture(which, hotkey::from_mouse(button, hotkey::Mods { ctrl, alt, shift, meta }), &ui);
-            }
+            w.upgrade().is_some_and(|ui| capture(which, hotkey::from_mouse(button, hotkey::Mods { ctrl, alt, shift, meta }), &ui))
         }
     });
 

@@ -98,7 +98,7 @@ strings! {
     set_pad_hint: "Tasti separati da +: A B X Y LB RB LS RS Back Start DPadUp DPadDown DPadLeft DPadRight (es. Back+A). Vuoto = nessun controller.", "Buttons separated by +: A B X Y LB RB LS RS Back Start DPadUp DPadDown DPadLeft DPadRight (e.g. Back+A). Empty = no controller.";
     set_hotkey_press: "Premi la combinazione…", "Press the combination…";
     set_hotkey_clear: "Cancella", "Clear";
-    set_hotkey_hint: "Clicca il campo e premi la combinazione (anche i tasti laterali del mouse).", "Click the field and press the combination (side mouse buttons work too).";
+    set_hotkey_hint: "Clicca il campo e premi un tasto, da solo o con Ctrl, Alt, Shift o Win: vanno bene anche F13-F24 e i tasti laterali del mouse. Esc annulla. Un tasto da solo che usi per scrivere salverebbe una clip a ogni pressione.", "Click the field and press a key, alone or with Ctrl, Alt, Shift or Win: F13-F24 and the side mouse buttons work too. Esc cancels. A single key you type with would save a clip on every press.";
     set_clip_video_seconds: "Durata clip video (s)", "Video clip length (s)";
     set_clip_audio_seconds: "Durata clip audio (s)", "Audio clip length (s)";
     set_folder: "Cartella delle clip", "Clips folder";

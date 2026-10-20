@@ -91,6 +91,10 @@ mod tests {
         assert_eq!(from_key("\u{6}", Mods { ctrl: true, ..Mods::default() }).as_deref(), Some("Ctrl+F"));
         assert_eq!(from_key("9", Mods { shift: true, ..Mods::default() }).as_deref(), Some("Shift+9"));
         assert_eq!(from_key("\u{11}", CA), None);
+        // Tasti senza modificatori, anche F13-F24 (tasti macro).
+        assert_eq!(from_key("\u{f711}", Mods::default()).as_deref(), Some("F14"));
+        assert_eq!(from_key("\u{f71b}", Mods::default()).as_deref(), Some("F24"));
+        assert_eq!(from_key("\u{f72c}", Mods::default()).as_deref(), Some("PageUp"));
         assert_eq!(from_mouse(5, Mods { ctrl: true, ..Mods::default() }).as_deref(), Some("Ctrl+Mouse5"));
         assert_eq!(from_mouse(1, CA), None);
     }
