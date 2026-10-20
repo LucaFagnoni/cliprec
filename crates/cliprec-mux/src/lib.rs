@@ -16,6 +16,8 @@ mod ffi;
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use cliprec_core::config::{AudioClipFormat, VideoContainer};
 use cliprec_core::time::hns_to_frames;
@@ -81,15 +83,50 @@ fn ensure_space(target: &Path, needed: u64) -> Result<(), MuxError> {
     }
 }
 
-/// Rinomina `.part` nel nome finale; se il nome esiste già aggiunge « (2)», « (3)»...
-fn finish(part: &Path, base: &Path, suffix: &str) -> Result<PathBuf, MuxError> {
-    let mut target = with_suffix(base, suffix);
-    let mut n = 2;
-    while target.exists() {
-        target = with_suffix(base, &format!(" ({n}){suffix}"));
-        n += 1;
+/// Serializza, nel processo, la riserva dei nomi finali e lo scambio segnaposto → `.part`.
+static NAMES: Mutex<()> = Mutex::new(());
+static PART_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Riserva il primo nome libero tra `base+suffix`, `base (2)+suffix`... creandolo vuoto (file
+/// con `create_new`, o cartella), scrive con `write` su un `.part` unico (PID + contatore) e alla
+/// fine lo rinomina sul nome riservato. Su errore non lascia né il `.part` né il segnaposto.
+fn write_reserved(
+    base: &Path,
+    suffix: &str,
+    dir: bool,
+    write: impl FnOnce(&Path) -> Result<(), MuxError>,
+) -> Result<PathBuf, MuxError> {
+    let mut n = 1u32;
+    let target = loop {
+        let target = if n == 1 { with_suffix(base, suffix) } else { with_suffix(base, &format!(" ({n}){suffix}")) };
+        let _names = NAMES.lock().unwrap_or_else(|e| e.into_inner());
+        let made = if dir {
+            std::fs::create_dir(&target)
+        } else {
+            std::fs::OpenOptions::new().write(true).create_new(true).open(&target).map(drop)
+        };
+        match made {
+            Ok(()) => break target,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && n < 10_000 => n += 1,
+            Err(e) => return Err(io("riserva del nome", &target)(e)),
+        }
+    };
+    let seq = PART_SEQ.fetch_add(1, Ordering::Relaxed);
+    let part = with_suffix(&target, &format!(".{}-{seq}.part", std::process::id()));
+    let remove = |p: &Path| if dir { std::fs::remove_dir_all(p) } else { std::fs::remove_file(p) };
+    let done = write(&part).and_then(|()| {
+        let _names = NAMES.lock().unwrap_or_else(|e| e.into_inner());
+        // Un file sostituisce il segnaposto con la rinomina; una cartella va tolta prima.
+        if dir {
+            std::fs::remove_dir(&target).map_err(io("rinomina", &target))?;
+        }
+        std::fs::rename(&part, &target).map_err(io("rinomina", &part))
+    });
+    if let Err(e) = done {
+        let _ = remove(&part);
+        let _ = remove(&target);
+        return Err(e);
     }
-    std::fs::rename(part, &target).map_err(io("rinomina", part))?;
     Ok(target)
 }
 
@@ -118,11 +155,12 @@ pub fn write_video_clip(
     let duration_hns = end.hns_since(start);
     let frames = usize::try_from(hns_to_frames(duration_hns)).unwrap_or(0);
 
-    let aligned: Vec<(String, Vec<f32>)> = audio
+    // Campioni da saltare (>0) o silenzio da anteporre (<0) per partire dal primo frame: un
+    // offset, senza copiare il PCM.
+    let tracks: Vec<Track<'_>> = audio
         .map(|a| {
-            // Campioni da saltare (>0) o silenzio da anteporre (<0) per partire dal primo frame.
             let skip = hns_to_frames(start.hns_since(a.start));
-            a.tracks.iter().map(|t| (t.name.clone(), align(&t.samples, skip, frames))).collect()
+            a.tracks.iter().map(|t| Track { name: &t.name, samples: &t.samples, skip, frames }).collect()
         })
         .unwrap_or_default();
 
@@ -132,17 +170,12 @@ pub fn write_video_clip(
     };
     let video_bytes: u64 = video.packets.iter().map(|p| p.data.len() as u64).sum();
     let audio_bytes = u64::from(opts.audio_bit_rate) / 8 * (duration_hns / HNS_PER_SEC + 1) as u64;
-    ensure_space(path, video_bytes + audio_bytes * aligned.len() as u64)?;
+    ensure_space(path, video_bytes + audio_bytes * tracks.len() as u64)?;
 
-    let part = with_suffix(path, &format!("{suffix}.part"));
-    let tracks: Vec<Track<'_>> = aligned.iter().map(|(name, s)| Track { name, samples: s }).collect();
     let codec = AudioCodec::Aac { bit_rate: i64::from(opts.audio_bit_rate) };
-    let written = ffi::write(&part, format, Some(VideoIn { snapshot: video, start }), &tracks, codec, faststart);
-    if let Err(e) = written {
-        let _ = std::fs::remove_file(&part);
-        return Err(e);
-    }
-    let path = finish(&part, path, suffix)?;
+    let path = write_reserved(path, suffix, false, |part| {
+        ffi::write(part, format, Some(VideoIn { snapshot: video, start }), &tracks, codec, faststart)
+    })?;
     Ok(SavedClip {
         kind: ClipKind::Video,
         bytes: size_of(&path),
@@ -151,18 +184,13 @@ pub fn write_video_clip(
     })
 }
 
-/// `frames` frame stereo a partire dal frame `skip` di `samples` (negativo = silenzio prima).
-fn align(samples: &[f32], skip: i64, frames: usize) -> Vec<f32> {
-    let mut out = vec![0.0f32; frames * CHANNELS];
-    let src_frames = samples.len() / CHANNELS;
-    for (i, dst) in out.chunks_exact_mut(CHANNELS).enumerate() {
-        let Ok(src) = usize::try_from(i as i64 + skip) else { continue };
-        if src >= src_frames {
-            break;
-        }
-        dst.copy_from_slice(&samples[src * CHANNELS..(src + 1) * CHANNELS]);
-    }
-    out
+/// Frame stereo `i` dell'uscita, cioè il frame `i + skip` di `samples`; silenzio fuori dai dati.
+pub(crate) fn frame_at(samples: &[f32], skip: i64, i: usize) -> [f32; CHANNELS] {
+    usize::try_from(i as i64 + skip)
+        .ok()
+        .and_then(|src| samples.get(src * CHANNELS..(src + 1) * CHANNELS))
+        .and_then(|s| s.try_into().ok())
+        .unwrap_or([0.0; CHANNELS])
 }
 
 /// Nome di file sicuro per Windows a partire dal nome di una traccia.
@@ -189,26 +217,23 @@ pub fn write_audio_clip(path: &Path, audio: &AudioSnapshot, format: AudioClipFor
         AudioClipFormat::WavPerTrack => ("wav", AudioCodec::PcmS24, ".wav"),
         AudioClipFormat::Mka => ("matroska", AudioCodec::Flac, ".mka"),
     };
-    let tracks: Vec<Track<'_>> = audio.tracks.iter().map(|t| Track { name: &t.name, samples: &t.samples }).collect();
+    let tracks: Vec<Track<'_>> = audio
+        .tracks
+        .iter()
+        .map(|t| Track { name: &t.name, samples: &t.samples, skip: 0, frames: t.samples.len() / CHANNELS })
+        .collect();
 
     let saved = if format == AudioClipFormat::Mka || tracks.len() == 1 {
-        let part = with_suffix(path, &format!("{ext}.part"));
-        if let Err(e) = ffi::write(&part, ffmt, None, &tracks, codec, false) {
-            let _ = std::fs::remove_file(&part);
-            return Err(e);
-        }
-        finish(&part, path, ext)?
+        write_reserved(path, ext, false, |part| ffi::write(part, ffmt, None, &tracks, codec, false))?
     } else {
-        let part = with_suffix(path, ".part");
-        std::fs::create_dir_all(&part).map_err(io("creazione della cartella", &part))?;
-        for (i, t) in tracks.iter().enumerate() {
-            let file = part.join(format!("{:02} - {}{ext}", i + 1, file_name(t.name)));
-            if let Err(e) = ffi::write(&file, ffmt, None, std::slice::from_ref(t), codec, false) {
-                let _ = std::fs::remove_dir_all(&part);
-                return Err(e);
+        write_reserved(path, "", true, |part| {
+            std::fs::create_dir(part).map_err(io("creazione della cartella", part))?;
+            for (i, t) in tracks.iter().enumerate() {
+                let file = part.join(format!("{:02} - {}{ext}", i + 1, file_name(t.name)));
+                ffi::write(&file, ffmt, None, std::slice::from_ref(t), codec, false)?;
             }
-        }
-        finish(&part, path, "")?
+            Ok(())
+        })?
     };
     Ok(SavedClip { kind: ClipKind::Audio, bytes: size_of(&saved), path: saved, duration_secs })
 }
@@ -221,12 +246,12 @@ mod tests {
     fn align_trims_or_pads() {
         let s: Vec<f32> = (0..10).flat_map(|i| [i as f32, -(i as f32)]).collect();
         // Audio iniziato 2 frame prima del video: si saltano.
-        assert_eq!(align(&s, 2, 3), vec![2.0, -2.0, 3.0, -3.0, 4.0, -4.0]);
+        assert_eq!(frame_at(&s, 2, 0), [2.0, -2.0]);
+        assert_eq!(frame_at(&s, 2, 2), [4.0, -4.0]);
         // Audio iniziato 2 frame dopo: silenzio davanti, silenzio in coda oltre i dati.
-        let a = align(&s, -2, 13);
-        assert_eq!(&a[..6], &[0.0, 0.0, 0.0, 0.0, 0.0, -0.0]);
-        assert_eq!(a[2 * 11], 9.0);
-        assert_eq!(a[2 * 12], 0.0);
+        assert_eq!(frame_at(&s, -2, 1), [0.0, 0.0]);
+        assert_eq!(frame_at(&s, -2, 11), [9.0, -9.0]);
+        assert_eq!(frame_at(&s, -2, 12), [0.0, 0.0]);
     }
 
     #[test]
