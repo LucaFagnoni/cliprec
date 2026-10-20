@@ -162,7 +162,9 @@ fn on_frame_arrived(
         unsafe { slots.device.context.CopySubresourceRegion(dst, 0, 0, 0, 0, &src, 0, Some(&region)) };
         Ok(())
     })?;
+    // Nessun riferimento alla superficie oltre il rilascio del frame.
     drop(src);
+    drop(access);
     frame.Close()?;
     stats.arrived.fetch_add(1, Ordering::Relaxed);
     if content.Width > 0 && content.Height > 0 && pack(content) != pool_size.load(Ordering::Relaxed) {

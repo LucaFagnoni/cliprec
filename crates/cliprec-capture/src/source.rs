@@ -155,7 +155,7 @@ impl CaptureSource {
         self
     }
 
-    /// Frame consegnati da WGC finora (per diagnostica e test).
+    /// Frame arrivati dalla cattura (WGC o DDA) finora, per diagnostica e test.
     pub fn frames_arrived(&self) -> u64 {
         self.stats.arrived.load(Ordering::Relaxed)
     }
@@ -184,13 +184,15 @@ impl VideoSource for CaptureSource {
         };
         // Primo giro sincrono: un monitor inesistente o una sessione rifiutata sono errori d'avvio.
         watch.poll()?;
-        self.pacer = Some(Pacer::start(fps, slots, self.stats.clone(), None, on_frame)?);
+        let pacer = Pacer::start(fps, slots, self.stats.clone(), None, on_frame)?;
         let running = Arc::new(AtomicBool::new(true));
         let flag = running.clone();
+        // Se lo spawn fallisce, pacer e cattura si fermano nel drop.
         let thread = std::thread::Builder::new()
             .name("cliprec-capture-watch".into())
             .spawn(move || watch.run(&flag))
             .map_err(|e| SourceError::Failed(format!("thread di sorveglianza: {e}")))?;
+        self.pacer = Some(pacer);
         self.watcher = Some((running, thread));
         Ok(())
     }
