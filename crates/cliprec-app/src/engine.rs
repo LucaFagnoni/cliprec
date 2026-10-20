@@ -218,6 +218,7 @@ impl Session {
     /// Prende lo snapshot degli ultimi `seconds` secondi (lock brevissimo) e scrive il file su un
     /// thread a bassa priorità.
     pub fn save(&self, kind: ClipKind, seconds: u32) -> Option<JoinHandle<()>> {
+        let pressed = Instant::now();
         let end = QpcTime::now();
         let folder = self.config.clips.folder();
         let events = self.events.clone();
@@ -265,12 +266,21 @@ impl Session {
                 Box::new(move || cliprec_mux::write_audio_clip(&path, &audio, format).map_err(|e| e.to_string()))
             }
         };
+        let snapshot_ms = pressed.elapsed().as_secs_f64() * 1000.0;
         let shared = self.shared.clone();
         shared.saving.fetch_add(1, Ordering::SeqCst);
         let spawned = std::thread::Builder::new().name("clip-save".into()).spawn(move || {
             lower_thread_priority();
             match job() {
                 Ok(clip) => {
+                    tracing::info!(
+                        snapshot_ms,
+                        file_ms = pressed.elapsed().as_secs_f64() * 1000.0,
+                        secondi = clip.duration_secs,
+                        byte = clip.bytes,
+                        "clip {:?} salvata",
+                        clip.kind
+                    );
                     if let Ok(mut r) = shared.recent.lock() {
                         r.push_front(clip.path.clone());
                         r.truncate(RECENT_MAX);
