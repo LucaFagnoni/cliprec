@@ -720,6 +720,105 @@ mod tests {
         assert_eq!(game_name("Monitor 1 (2560×1440) · WGC"), "Desktop");
     }
 
+    /// Sorgente video che non parte (es. monitor scollegato).
+    struct FailingSource;
+
+    impl VideoSource for FailingSource {
+        fn start(&mut self, _fps: u32, _on_frame: cliprec_core::FrameCallback) -> Result<(), cliprec_core::SourceError> {
+            Err(cliprec_core::SourceError::NotFound("monitor 3".into()))
+        }
+        fn stop(&mut self) {}
+        fn stats(&self) -> cliprec_core::CaptureStats {
+            cliprec_core::CaptureStats::default()
+        }
+        fn describe(&self) -> String {
+            "sorgente che fallisce".into()
+        }
+    }
+
+    fn beeps() -> Vec<Box<dyn cliprec_core::AudioSource>> {
+        vec![
+            Box::new(cliprec_audio::BeepSource::new("Bip 1 kHz", 1000.0)),
+            Box::new(cliprec_audio::BeepSource::new("Bip 1,5 kHz", 1500.0)),
+        ]
+    }
+
+    fn fault_dir(name: &str) -> PathBuf {
+        let d = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/test-output/guasti").join(name);
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// Guasto: il video non parte. L'audio prosegue, un avviso lo dice e la clip audio si salva.
+    #[test]
+    fn video_failure_falls_back_to_audio_only() {
+        let mut config = Config::default();
+        config.clips.folder = Some(fault_dir("solo-audio"));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let overrides = SourceOverrides {
+            video: Some((GpuDevice::create(None).unwrap(), Box::new(FailingSource))),
+            audio: Some(beeps()),
+        };
+        let session = Session::start(&config, new_buffer(&config, &tx), Shared::default(), overrides, tx).unwrap();
+        assert!(session.video.is_none());
+        std::thread::sleep(Duration::from_secs(3));
+        session.save(ClipKind::Audio, 2).unwrap().join().unwrap();
+        let events: Vec<_> = rx.try_iter().collect();
+        assert!(events.iter().any(|e| matches!(e, EngineEvent::Warning(w) if w.contains("video non avviato"))), "{events:?}");
+        assert!(events.iter().any(|e| matches!(e, EngineEvent::ClipSaved(c) if c.kind == ClipKind::Audio)), "{events:?}");
+    }
+
+    /// Guasto: la cartella delle clip non si può creare. `ClipFailed`, nessun crash, nessun file.
+    #[test]
+    fn unwritable_folder_reports_clip_failed() {
+        let dir = fault_dir("cartella");
+        let blocker = dir.join("file.txt");
+        std::fs::write(&blocker, b"non una cartella").unwrap();
+        let mut config = Config::default();
+        config.clips.folder = Some(blocker.join("clip"));
+        config.video.enabled = false;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let overrides = SourceOverrides { video: None, audio: Some(beeps()) };
+        let session = Session::start(&config, new_buffer(&config, &tx), Shared::default(), overrides, tx).unwrap();
+        std::thread::sleep(Duration::from_millis(1500));
+        assert!(session.save(ClipKind::Audio, 1).is_none());
+        let events: Vec<_> = rx.try_iter().collect();
+        assert!(events.iter().any(|e| matches!(e, EngineEvent::ClipFailed { .. })), "{events:?}");
+    }
+
+    /// Due pressioni nello stesso secondo: due clip distinte e valide, mai un errore.
+    #[test]
+    fn two_saves_in_the_same_second_give_two_valid_clips() {
+        use cliprec_tests::probe::{Expect, check};
+        let mut config = Config::default();
+        config.clips.folder = Some(fault_dir("doppia"));
+        config.clips.video_seconds = 2;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let device = GpuDevice::create(None).unwrap();
+        let video = cliprec_capture::SyntheticSource::new(device.clone(), 1280, 720);
+        let overrides = SourceOverrides { video: Some((device, Box::new(video))), audio: Some(beeps()) };
+        let session = Session::start(&config, new_buffer(&config, &tx), Shared::default(), overrides, tx).unwrap();
+        std::thread::sleep(Duration::from_secs(4));
+        let a = session.save(ClipKind::Video, 2).unwrap();
+        let b = session.save(ClipKind::Video, 2).unwrap();
+        a.join().unwrap();
+        b.join().unwrap();
+        let paths: Vec<PathBuf> = rx
+            .try_iter()
+            .filter_map(|e| match e {
+                EngineEvent::ClipSaved(c) => Some(c.path),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(paths.len(), 2, "{paths:?}");
+        assert_ne!(paths[0], paths[1]);
+        for p in &paths {
+            let v = check(p, &Expect { min_duration: Some(2.0), audio_tracks: Some(2), fps: Some(60.0), ..Expect::default() }).unwrap();
+            assert!(v.is_empty(), "{}: {v:?}", p.display());
+        }
+    }
+
     #[test]
     fn reload_restarts_only_for_capture_settings() {
         let a = Config::default();
