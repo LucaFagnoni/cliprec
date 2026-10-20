@@ -6,7 +6,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::thread::JoinHandle;
 
-use cliprec_core::{GpuDevice, SourceError};
+use cliprec_core::time::qpc_frequency;
+use cliprec_core::{GpuDevice, QpcTime, SourceError};
 use windows::Win32::Graphics::Direct3D11::{D3D11_TEXTURE2D_DESC, ID3D11Texture2D};
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Dxgi::{
@@ -50,6 +51,7 @@ pub(crate) struct DdaCapture {
     running: Arc<AtomicBool>,
     closed: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
+    size: (u32, u32),
 }
 
 impl DdaCapture {
@@ -70,16 +72,21 @@ impl DdaCapture {
                         return;
                     }
                 };
-                let _ = tx.send(Ok(()));
+                // SAFETY: interfaccia valida.
+                let mode = unsafe { dup.GetDesc() }.ModeDesc;
+                let _ = tx.send(Ok((mode.Width, mode.Height)));
                 if let Err(e) = pump(&dup, &slots, &stats, &run) {
                     tracing::info!("Desktop Duplication interrotta: {e}");
                 }
                 done.store(true, Ordering::Release);
             })
             .map_err(|e| SourceError::Failed(format!("thread Desktop Duplication: {e}")))?;
-        let this = Self { running, closed, thread: Some(thread) };
+        let mut this = Self { running, closed, thread: Some(thread), size: (0, 0) };
         match rx.recv() {
-            Ok(Ok(())) => Ok(this),
+            Ok(Ok(size)) => {
+                this.size = size;
+                Ok(this)
+            }
             Ok(Err(e)) => Err(SourceError::Failed(format!("Desktop Duplication: {e}"))),
             Err(_) => Err(SourceError::Failed("Desktop Duplication: thread terminato".into())),
         }
@@ -87,6 +94,11 @@ impl DdaCapture {
 
     pub fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Acquire)
+    }
+
+    /// Dimensione della modalità video del monitor (pixel fisici).
+    pub fn size(&self) -> (u32, u32) {
+        self.size
     }
 }
 
@@ -118,7 +130,10 @@ fn pump(dup: &IDXGIOutputDuplication, slots: &FrameSlots, stats: &Stats, running
                 if desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM {
                     return Err(windows::Win32::Graphics::Dxgi::DXGI_ERROR_UNSUPPORTED.into());
                 }
-                slots.publish(desc.Width, desc.Height, |dst| {
+                // LastPresentTime è in tick QPC grezzi.
+                let captured = QpcTime::from_ticks(info.LastPresentTime, qpc_frequency());
+                stats.arrival.record(QpcTime::now().hns_since(captured));
+                slots.publish(desc.Width, desc.Height, captured, |dst| {
                     // SAFETY: stesse dimensioni e formato BGRA; contesto immediato protetto.
                     unsafe { slots.device.context.CopyResource(dst, &src) };
                     Ok(())

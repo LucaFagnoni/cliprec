@@ -4,6 +4,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use cliprec_core::{CaptureStats, FrameCallback, GpuDevice, GpuFrame, HNS_PER_SEC, QpcTime, SourceError, SourceState};
 use windows::Win32::Foundation::{CloseHandle, E_POINTER, HANDLE};
@@ -63,6 +64,9 @@ struct Slot {
     tex: ID3D11Texture2D,
     width: u32,
     height: u32,
+    /// Istante QPC in cui il contenuto è stato prodotto (`SystemRelativeTime` di WGC,
+    /// `LastPresentTime` di DDA, il pts per la sintetica).
+    captured: QpcTime,
 }
 
 #[derive(Default)]
@@ -74,6 +78,17 @@ struct SlotsInner {
     in_use: Option<usize>,
     /// Numero di frame pubblicati: se non cambia tra due tick, il frame è ripetuto.
     seq: u64,
+    /// `true` dopo il primo frame vero (non segnaposto).
+    real: bool,
+}
+
+/// L'ultimo frame preso in prestito dal pacer.
+struct Acquired {
+    tex: ID3D11Texture2D,
+    width: u32,
+    height: u32,
+    seq: u64,
+    captured: QpcTime,
 }
 
 /// Triplo buffer tra cattura e pacer: la cattura scrive sempre in uno slot che non è né l'ultimo
@@ -94,12 +109,30 @@ impl FrameSlots {
         Self { device, inner: Mutex::new(SlotsInner::default()) }
     }
 
-    /// Pubblica un nuovo frame `width`×`height`: `fill` riceve la texture di uno slot libero
-    /// (ricreata solo se la dimensione cambia) e vi accoda la scrittura sul contesto immediato.
+    /// Pubblica un nuovo frame `width`×`height` prodotto all'istante `captured`: `fill` riceve la
+    /// texture di uno slot libero (ricreata solo se la dimensione cambia) e vi accoda la scrittura
+    /// sul contesto immediato.
     pub fn publish(
         &self,
         width: u32,
         height: u32,
+        captured: QpcTime,
+        fill: impl FnOnce(&ID3D11Texture2D) -> windows::core::Result<()>,
+    ) -> windows::core::Result<()> {
+        self.put(width, height, captured, true, fill)
+    }
+
+    /// Frame nero della dimensione del bersaglio, consegnato solo se il primo frame vero tarda.
+    pub fn publish_placeholder(&self, width: u32, height: u32) -> windows::core::Result<()> {
+        self.put(width, height, QpcTime::now(), false, |t| clear_black(&self.device, t))
+    }
+
+    fn put(
+        &self,
+        width: u32,
+        height: u32,
+        captured: QpcTime,
+        real: bool,
         fill: impl FnOnce(&ID3D11Texture2D) -> windows::core::Result<()>,
     ) -> windows::core::Result<()> {
         let mut g = lock(&self.inner);
@@ -108,23 +141,36 @@ impl FrameSlots {
         let i = (0..3).find(|&i| Some(i) != latest && Some(i) != in_use).unwrap_or(0);
         let reuse = matches!(&g.slots[i], Some(s) if s.width == width && s.height == height);
         if !reuse {
-            g.slots[i] = Some(Slot { tex: create_bgra(&self.device, width, height)?, width, height });
+            let tex = create_bgra(&self.device, width, height)?;
+            g.slots[i] = Some(Slot { tex, width, height, captured });
         }
-        if let Some(s) = &g.slots[i] {
+        if let Some(s) = g.slots[i].as_mut() {
             fill(&s.tex)?;
+            s.captured = captured;
         }
         g.latest = Some(i);
         g.seq += 1;
+        g.real |= real;
         Ok(())
     }
 
-    /// Prende in prestito l'ultimo frame fino a [`Self::release`]: (texture, larghezza, altezza, seq).
-    fn acquire(&self) -> Option<(ID3D11Texture2D, u32, u32, u64)> {
+    fn has_real(&self) -> bool {
+        lock(&self.inner).real
+    }
+
+    /// Prende in prestito l'ultimo frame fino a [`Self::release`].
+    fn acquire(&self) -> Option<Acquired> {
         let mut g = lock(&self.inner);
         let i = g.latest?;
         g.in_use = Some(i);
         let seq = g.seq;
-        g.slots[i].as_ref().map(|s| (s.tex.clone(), s.width, s.height, seq))
+        g.slots[i].as_ref().map(|s| Acquired {
+            tex: s.tex.clone(),
+            width: s.width,
+            height: s.height,
+            seq,
+            captured: s.captured,
+        })
     }
 
     fn release(&self) {
@@ -151,9 +197,57 @@ pub(crate) struct Stats {
     width: AtomicU32,
     height: AtomicU32,
     state: Mutex<SourceState>,
+    /// Panic della callback presi e superati.
+    pub panics: AtomicU64,
+    /// `pts − istante di cattura` dei frame nuovi consegnati.
+    pub latency: LatencyLog,
+    /// `arrivo nel gestore − istante di cattura` dei frame della cattura (diagnostica).
+    pub arrival: LatencyLog,
+}
+
+const LATENCY_SAMPLES: usize = 1024;
+
+/// Ultimi 1024 valori (unità da 100 ns) in un anello preallocato.
+pub(crate) struct LatencyLog(Mutex<LatencyRing>);
+
+struct LatencyRing {
+    samples: [i64; LATENCY_SAMPLES],
+    len: usize,
+    next: usize,
+}
+
+impl Default for LatencyLog {
+    fn default() -> Self {
+        Self(Mutex::new(LatencyRing { samples: [0; LATENCY_SAMPLES], len: 0, next: 0 }))
+    }
+}
+
+impl LatencyLog {
+    pub fn record(&self, hns: i64) {
+        let mut g = lock(&self.0);
+        let n = g.next;
+        g.samples[n] = hns;
+        g.next = (n + 1) % LATENCY_SAMPLES;
+        g.len = (g.len + 1).min(LATENCY_SAMPLES);
+    }
+
+    /// Mediana e 95° percentile in ms (alloca: solo diagnostica).
+    pub fn percentiles_ms(&self) -> Option<(f64, f64)> {
+        let mut v = {
+            let g = lock(&self.0);
+            g.samples[..g.len].to_vec()
+        };
+        if v.is_empty() {
+            return None;
+        }
+        v.sort_unstable();
+        let ms = |i: usize| v[i.min(v.len() - 1)] as f64 / 1e4;
+        Some((ms(v.len() / 2), ms(v.len() * 95 / 100)))
+    }
 }
 
 impl Stats {
+
     pub fn snapshot(&self) -> CaptureStats {
         CaptureStats {
             frames_delivered: self.delivered.load(Ordering::Relaxed),
@@ -202,6 +296,22 @@ fn last_due_tick(start: QpcTime, now: QpcTime, fps: u32) -> u64 {
 /// ci disegnano il frame.
 pub(crate) type Prepare = Box<dyn FnMut(&FrameSlots, QpcTime, u64) + Send>;
 
+/// Opzioni del pacer; il default (nessuna attesa, nessuno spostamento) è quello della sintetica.
+#[derive(Default)]
+pub(crate) struct PacerOptions {
+    pub prepare: Option<Prepare>,
+    /// Prima del primo tick aspetta fino a tanto il primo frame vero; scaduto il tempo consegna
+    /// il segnaposto. Il primo tick (e quindi `start`) è l'istante in cui l'attesa finisce.
+    pub first_frame_wait: Duration,
+    /// Spostamento costante della griglia dei pts all'indietro (unità da 100 ns): compensa il
+    /// ritardo medio tra la cattura del contenuto e il tick che lo consegna.
+    pub pts_offset: i64,
+}
+
+/// Dopo tanti panic della callback in [`PANIC_WINDOW`] il pacer si ferma in `Error`.
+pub(crate) const MAX_PANICS: usize = 10;
+pub(crate) const PANIC_WINDOW: Duration = Duration::from_secs(10);
+
 /// Thread che a ogni tick consegna l'ultima texture pubblicata nei [`FrameSlots`].
 pub(crate) struct Pacer {
     running: Arc<AtomicBool>,
@@ -213,7 +323,7 @@ impl Pacer {
         fps: u32,
         slots: Arc<FrameSlots>,
         stats: Arc<Stats>,
-        prepare: Option<Prepare>,
+        options: PacerOptions,
         on_frame: FrameCallback,
     ) -> Result<Self, SourceError> {
         if !SUPPORTED_FPS.contains(&fps) {
@@ -223,7 +333,7 @@ impl Pacer {
         let flag = running.clone();
         let thread = std::thread::Builder::new()
             .name("cliprec-pacer".into())
-            .spawn(move || run(fps, &slots, &stats, prepare, on_frame, &flag))
+            .spawn(move || run(fps, &slots, &stats, options, on_frame, &flag))
             .map_err(|e| SourceError::Failed(format!("thread del pacer: {e}")))?;
         Ok(Self { running, thread: Some(thread) })
     }
@@ -247,18 +357,28 @@ fn run(
     fps: u32,
     slots: &FrameSlots,
     stats: &Stats,
-    mut prepare: Option<Prepare>,
+    options: PacerOptions,
     mut on_frame: FrameCallback,
     running: &AtomicBool,
 ) {
+    let PacerOptions { mut prepare, first_frame_wait, pts_offset } = options;
     // SAFETY: GetCurrentThread restituisce una pseudo-handle sempre valida per il thread corrente.
     if let Err(e) = unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST) } {
         tracing::debug!("priorità del pacer non alzata: {e}");
     }
+    // Il primo frame consegnato decide la dimensione dell'encoder: meglio quello vero del segnaposto.
+    let give_up = Instant::now() + first_frame_wait;
+    while running.load(Ordering::Acquire) && !slots.has_real() && Instant::now() < give_up {
+        std::thread::sleep(Duration::from_millis(1));
+    }
     let timer = Timer::new();
     let start = QpcTime::now();
+    let pts_start = start.add_hns(-pts_offset);
     let mut tick: u64 = 0;
     let mut last_seq = 0u64;
+    // Istanti degli ultimi MAX_PANICS panic, in un anello.
+    let mut panics = [None::<Instant>; MAX_PANICS];
+    let mut panic_count = 0usize;
     while running.load(Ordering::Acquire) {
         timer.wait_until(grid_pts(start, tick, fps));
         if !running.load(Ordering::Acquire) {
@@ -271,26 +391,25 @@ fn run(
             stats.dropped.fetch_add(due - tick, Ordering::Relaxed);
             tick = due;
         }
-        let pts = grid_pts(start, tick, fps);
+        let pts = grid_pts(pts_start, tick, fps);
         if let Some(p) = prepare.as_mut() {
             p(slots, pts, tick);
         }
-        let Some((texture, width, height, seq)) = slots.acquire() else {
+        let Some(a) = slots.acquire() else {
             stats.dropped.fetch_add(1, Ordering::Relaxed);
             tick += 1;
             continue;
         };
-        let repeated = seq == last_seq;
-        last_seq = seq;
-        let frame = GpuFrame { texture, width, height, pts, index: tick, repeated };
+        let repeated = a.seq == last_seq;
+        last_seq = a.seq;
+        if !repeated {
+            stats.latency.record(pts.hns_since(a.captured));
+        }
+        let (width, height) = (a.width, a.height);
+        let frame = GpuFrame { texture: a.tex, width, height, pts, index: tick, repeated };
         let result = catch_unwind(AssertUnwindSafe(|| on_frame(&frame)));
         drop(frame);
         slots.release();
-        if result.is_err() {
-            tracing::error!("panic nella callback dei frame: pacer fermato");
-            stats.set_state(SourceState::Error("panic nella callback dei frame".into()));
-            break;
-        }
         stats.delivered.fetch_add(1, Ordering::Relaxed);
         if repeated {
             stats.repeated.fetch_add(1, Ordering::Relaxed);
@@ -298,6 +417,25 @@ fn run(
         stats.width.store(width, Ordering::Relaxed);
         stats.height.store(height, Ordering::Relaxed);
         tick += 1;
+        if result.is_err() {
+            // Il panic è già stato stampato dall'hook; si prosegue col tick successivo, a meno che
+            // la callback non sia rotta in modo stabile.
+            let now = Instant::now();
+            panics[panic_count % MAX_PANICS] = Some(now);
+            panic_count += 1;
+            stats.panics.fetch_add(1, Ordering::Relaxed);
+            tracing::error!(panics = panic_count, "panic nella callback dei frame");
+            // Il prossimo da sovrascrivere è il più vecchio degli ultimi MAX_PANICS.
+            let oldest = panics[panic_count % MAX_PANICS];
+            if panic_count >= MAX_PANICS && oldest.is_some_and(|t| now.duration_since(t) < PANIC_WINDOW) {
+                tracing::error!("{MAX_PANICS} panic in {PANIC_WINDOW:?}: pacer fermato");
+                stats.set_state(SourceState::Error(format!(
+                    "la callback dei frame è andata in panic {MAX_PANICS} volte in {} s",
+                    PANIC_WINDOW.as_secs()
+                )));
+                break;
+            }
+        }
     }
 }
 
@@ -362,24 +500,80 @@ mod tests {
 
     use super::*;
 
+    fn start(
+        fps: u32,
+        slots: Arc<FrameSlots>,
+        stats: Arc<Stats>,
+        on_frame: impl FnMut(&GpuFrame) + Send + 'static,
+    ) -> Pacer {
+        Pacer::start(fps, slots, stats, PacerOptions::default(), Box::new(on_frame)).unwrap()
+    }
+
     #[test]
     fn slot_in_use_is_never_written() {
         let slots = FrameSlots::new(GpuDevice::create(None).unwrap());
-        slots.publish(64, 64, |_| Ok(())).unwrap();
-        let (held, ..) = slots.acquire().unwrap();
+        slots.publish_placeholder(64, 64).unwrap();
+        assert!(!slots.has_real());
+        let held = slots.acquire().unwrap().tex;
         for _ in 0..5 {
-            slots.publish(64, 64, |t| {
-                assert_ne!(t, &held);
-                Ok(())
-            })
-            .unwrap();
+            slots
+                .publish(64, 64, QpcTime(7), |t| {
+                    assert_ne!(t, &held);
+                    Ok(())
+                })
+                .unwrap();
         }
+        assert!(slots.has_real());
         // Cambio di dimensione: lo slot libero viene ricreato, quello in uso resta intatto.
-        slots.publish(32, 16, |_| Ok(())).unwrap();
-        let (now, w, h, seq) = slots.acquire().unwrap();
-        assert_ne!(now, held);
-        assert_eq!((w, h, seq), (32, 16, 7));
+        slots.publish(32, 16, QpcTime(9), |_| Ok(())).unwrap();
+        let a = slots.acquire().unwrap();
+        assert_ne!(a.tex, held);
+        assert_eq!((a.width, a.height, a.seq, a.captured), (32, 16, 7, QpcTime(9)));
         slots.release();
+    }
+
+    /// Il pacer aspetta il primo frame vero (fino a `first_frame_wait`) invece di consegnare subito
+    /// il segnaposto, e i pts seguono la griglia spostata di `pts_offset`.
+    #[test]
+    fn waits_for_first_real_frame_and_shifts_grid() {
+        let slots = Arc::new(FrameSlots::new(GpuDevice::create(None).unwrap()));
+        slots.publish_placeholder(640, 360).unwrap();
+        let (tx, rx) = mpsc::channel();
+        let options =
+            PacerOptions { first_frame_wait: Duration::from_millis(500), pts_offset: 50_000, ..Default::default() };
+        let t0 = QpcTime::now();
+        let mut pacer = Pacer::start(
+            60,
+            slots.clone(),
+            Arc::default(),
+            options,
+            Box::new(move |f| tx.send((QpcTime::now(), f.pts, f.width, f.repeated)).unwrap()),
+        )
+        .unwrap();
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(rx.try_recv().is_err(), "niente consegne prima del primo frame vero");
+        slots.publish(320, 180, QpcTime::now(), |t| clear_black(&slots.device, t)).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        pacer.stop();
+        let frames: Vec<_> = rx.try_iter().collect();
+        let (at, pts, w, repeated) = frames[0];
+        assert_eq!((w, repeated), (320, false));
+        assert!(at.hns_since(t0) >= 1_400_000, "primo frame troppo presto");
+        // Il primo tick è all'istante `at` (meno il ritardo di consegna): pts = tick − 5 ms.
+        let shift = at.hns_since(pts);
+        assert!((50_000..80_000).contains(&shift), "spostamento {shift}");
+
+        // Senza frame veri il segnaposto arriva dopo l'attesa.
+        let slots = Arc::new(FrameSlots::new(GpuDevice::create(None).unwrap()));
+        slots.publish_placeholder(640, 360).unwrap();
+        let (tx, rx) = mpsc::channel();
+        let options = PacerOptions { first_frame_wait: Duration::from_millis(200), ..Default::default() };
+        let mut pacer =
+            Pacer::start(60, slots, Arc::default(), options, Box::new(move |f| tx.send(f.width).unwrap())).unwrap();
+        std::thread::sleep(Duration::from_millis(400));
+        pacer.stop();
+        let n = rx.try_iter().filter(|&w| w == 640).count();
+        assert!((8..=14).contains(&n), "{n} segnaposto");
     }
 
     #[test]
@@ -392,26 +586,19 @@ mod tests {
             let (slots, feeding) = (slots.clone(), feeding.clone());
             std::thread::spawn(move || {
                 while feeding.load(Ordering::Relaxed) {
-                    slots.publish(64, 64, |t| clear_black(&slots.device, t)).unwrap();
+                    slots.publish(64, 64, QpcTime::now(), |t| clear_black(&slots.device, t)).unwrap();
                     std::thread::sleep(Duration::from_millis(50));
                 }
             })
         };
         let (tx, rx) = mpsc::channel();
-        let mut pacer = Pacer::start(
-            60,
-            slots,
-            stats.clone(),
-            None,
-            Box::new(move |f| {
-                tx.send((f.index, f.repeated)).unwrap();
-                if f.index % 10 == 5 {
-                    // Occupata per ~2,4 periodi: un tick perso, il successivo consegnato in ritardo.
-                    std::thread::sleep(Duration::from_millis(40));
-                }
-            }),
-        )
-        .unwrap();
+        let mut pacer = start(60, slots, stats.clone(), move |f| {
+            tx.send((f.index, f.repeated)).unwrap();
+            if f.index % 10 == 5 {
+                // Occupata per ~2,4 periodi: un tick perso, il successivo consegnato in ritardo.
+                std::thread::sleep(Duration::from_millis(40));
+            }
+        });
         std::thread::sleep(Duration::from_secs(2));
         pacer.stop();
         feeding.store(false, Ordering::Relaxed);
@@ -429,29 +616,38 @@ mod tests {
     }
 
     #[test]
-    fn panic_in_callback_stops_pacer_with_error() {
+    fn panics_in_callback_are_survived_until_ten_in_ten_seconds() {
         let slots = Arc::new(FrameSlots::new(GpuDevice::create(None).unwrap()));
-        slots.publish(16, 16, |_| Ok(())).unwrap();
+        slots.publish(16, 16, QpcTime::now(), |_| Ok(())).unwrap();
+
+        // Qualche panic sparso: il pacer prosegue.
         let stats = Arc::new(Stats::default());
-        let mut pacer = Pacer::start(
-            60,
-            slots,
-            stats.clone(),
-            None,
-            Box::new(|f| assert!(f.index < 3, "panic voluto nel test")),
-        )
-        .unwrap();
-        std::thread::sleep(Duration::from_millis(200));
+        let (tx, rx) = mpsc::channel();
+        let mut pacer = start(60, slots.clone(), stats.clone(), move |f| {
+            tx.send(f.index).unwrap();
+            assert!(!(3..6).contains(&f.index), "panic voluto nel test");
+        });
+        std::thread::sleep(Duration::from_millis(300));
         pacer.stop();
         let s = stats.snapshot();
-        assert_eq!(s.frames_delivered, 3);
+        assert_eq!(stats.panics.load(Ordering::Relaxed), 3);
+        assert!(rx.try_iter().any(|i| i > 6), "il pacer non è andato avanti");
+        assert!(!matches!(s.state, SourceState::Error(_)), "{s:?}");
+
+        // Panic a ogni frame: al decimo il pacer si ferma in Error.
+        let stats = Arc::new(Stats::default());
+        let mut pacer = start(60, slots, stats.clone(), |_| panic!("panic voluto nel test"));
+        std::thread::sleep(Duration::from_millis(400));
+        pacer.stop();
+        let s = stats.snapshot();
+        assert_eq!(s.frames_delivered, MAX_PANICS as u64);
         assert!(matches!(s.state, SourceState::Error(_)), "{s:?}");
     }
 
     #[test]
     fn rejects_unsupported_fps() {
         let slots = Arc::new(FrameSlots::new(GpuDevice::create(None).unwrap()));
-        assert!(Pacer::start(50, slots, Arc::default(), None, Box::new(|_| ())).is_err());
+        assert!(Pacer::start(50, slots, Arc::default(), PacerOptions::default(), Box::new(|_| ())).is_err());
     }
 
     #[test]

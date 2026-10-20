@@ -7,8 +7,8 @@ use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, POINT, RECT};
 use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute};
 use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1};
 use windows::Win32::Graphics::Gdi::{
-    EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITOR_DEFAULTTONULL, MONITOR_DEFAULTTOPRIMARY, MONITORINFO,
-    MonitorFromPoint, MonitorFromWindow,
+    DEVMODEW, ENUM_CURRENT_SETTINGS, EnumDisplayMonitors, EnumDisplaySettingsW, GetMonitorInfoW, HDC, HMONITOR,
+    MONITOR_DEFAULTTONULL, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MONITORINFOEXW, MonitorFromPoint, MonitorFromWindow,
 };
 use windows::Win32::System::Threading::{OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -16,7 +16,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, MONITORINFOF_PRIMARY,
     WS_EX_TOOLWINDOW,
 };
-use windows::core::{BOOL, PWSTR};
+use windows::core::{BOOL, PCWSTR, PWSTR};
 
 /// Monitor attivi: il principale per primo, poi gli altri nell'ordine di Windows.
 pub(crate) fn monitors() -> Vec<HMONITOR> {
@@ -48,12 +48,22 @@ pub(crate) fn monitor_rect(h: HMONITOR) -> Option<RECT> {
     monitor_info(h).map(|mi| mi.rcMonitor)
 }
 
-pub(crate) fn rect_size(r: RECT) -> (u32, u32) {
-    ((r.right - r.left).max(1) as u32, (r.bottom - r.top).max(1) as u32)
+/// Risoluzione fisica della modalità video del monitor (non virtualizzata dal DPI del processo).
+pub(crate) fn monitor_pixels(h: HMONITOR) -> Option<(u32, u32)> {
+    let mut mi = MONITORINFOEXW::default();
+    mi.monitorInfo.cbSize = size_of::<MONITORINFOEXW>() as u32;
+    // SAFETY: MONITORINFOEXW inizia con MONITORINFO e cbSize ne dichiara la dimensione estesa.
+    if !unsafe { GetMonitorInfoW(h, &mut mi as *mut MONITORINFOEXW as *mut MONITORINFO) }.as_bool() {
+        return None;
+    }
+    let mut dm = DEVMODEW { dmSize: size_of::<DEVMODEW>() as u16, ..Default::default() };
+    // SAFETY: nome del dispositivo terminato da zero dentro `mi`; `dm` locale con dmSize impostato.
+    let ok = unsafe { EnumDisplaySettingsW(PCWSTR(mi.szDevice.as_ptr()), ENUM_CURRENT_SETTINGS, &mut dm) };
+    (ok.as_bool() && dm.dmPelsWidth > 0 && dm.dmPelsHeight > 0).then_some((dm.dmPelsWidth, dm.dmPelsHeight))
 }
 
 /// LUID dell'adattatore DXGI che pilota il monitor.
-fn adapter_luid_for_monitor(h: HMONITOR) -> Option<i64> {
+pub(crate) fn adapter_luid_for_monitor(h: HMONITOR) -> Option<i64> {
     // SAFETY: CreateDXGIFactory1 non ha precondizioni.
     let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.ok()?;
     for i in 0.. {
@@ -253,7 +263,7 @@ mod tests {
         let list = monitors();
         assert!(!list.is_empty());
         assert_eq!(list[0], primary_monitor());
-        let (w, h) = rect_size(monitor_rect(list[0]).unwrap());
+        let (w, h) = monitor_pixels(list[0]).unwrap();
         assert!(w >= 640 && h >= 480, "{w}×{h}");
         let dev = device_for_monitor(0).unwrap();
         println!("monitor principale {w}×{h} su {dev:?}");

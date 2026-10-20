@@ -10,7 +10,7 @@ use windows::Win32::Foundation::RECT;
 use windows::Win32::Graphics::Direct3D11::{ID3D11DeviceContext1, ID3D11RenderTargetView, ID3D11Texture2D};
 use windows::core::Interface;
 
-use crate::pacer::{FrameSlots, Pacer, Stats, create_bgra, create_rtv};
+use crate::pacer::{FrameSlots, Pacer, PacerOptions, Stats, create_bgra, create_rtv};
 
 /// Bit del contatore disegnati.
 pub const COUNTER_BITS: usize = 32;
@@ -68,7 +68,9 @@ impl VideoSource for SyntheticSource {
             }
         });
         let slots = Arc::new(FrameSlots::new(self.device.clone()));
-        self.pacer = Some(Pacer::start(fps, slots, self.stats.clone(), Some(prepare), on_frame)?);
+        // Il contenuto è disegnato esattamente per il pts del tick: nessuna attesa né spostamento.
+        let options = PacerOptions { prepare: Some(prepare), ..Default::default() };
+        self.pacer = Some(Pacer::start(fps, slots, self.stats.clone(), options, on_frame)?);
         self.stats.set_state(SourceState::Running);
         Ok(())
     }
@@ -156,7 +158,7 @@ impl Painter {
                 self.ctx.ClearView(&self.rtv, &BIT_OFF, Some(&self.zeros[..n0]));
             }
         }
-        slots.publish(self.width, self.height, |dst| {
+        slots.publish(self.width, self.height, pts, |dst| {
             // SAFETY: stesse dimensioni e formato; contesto immediato protetto.
             unsafe { self.ctx.CopyResource(dst, &self.canvas) };
             Ok(())

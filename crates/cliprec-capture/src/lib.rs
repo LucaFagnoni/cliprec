@@ -27,7 +27,7 @@ mod testutil;
 mod wgc;
 
 pub use pacer::SUPPORTED_FPS;
-pub use source::{CaptureSource, Target, open_source};
+pub use source::{ADAPTER_CHANGED, CaptureSource, FIRST_FRAME_WAIT, Target, open_source};
 pub use synthetic::{
     BACKGROUND, BIT_OFF, BIT_ON, COUNTER_BITS, FLASH, SyntheticSource, counter_block, counter_rect, is_flash,
 };
