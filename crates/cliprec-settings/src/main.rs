@@ -8,6 +8,7 @@
 mod hotkey;
 mod i18n;
 mod model;
+mod outcome;
 mod pipe;
 mod sys;
 
@@ -18,7 +19,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use cliprec_core::Config;
+use cliprec_core::{Config, VideoCodec};
 use cliprec_core::ipc::{IpcRequest, IpcResponse};
 use slint::{ComponentHandle, Model, ModelRc, SharedString, Timer, TimerMode, VecModel};
 
@@ -37,6 +38,64 @@ static LANG_EN: AtomicBool = AtomicBool::new(false);
 /// Millisecondi dall'avvio dell'ultimo tentativo di stato concluso (con o senza risposta).
 static LAST_POLL_MS: AtomicU64 = AtomicU64::new(0);
 static START: OnceLock<Instant> = OnceLock::new();
+
+thread_local! {
+    /// Codec che si aprono davvero sul PC, dall'ultimo stato ricevuto (vuoto = ignoti).
+    static AVAILABLE: RefCell<Vec<VideoCodec>> = const { RefCell::new(Vec::new()) };
+    /// Opzioni e lingua con cui è stato riempito l'elenco dei codec.
+    static CODEC_SHOWN: RefCell<(Vec<i32>, bool)> = const { RefCell::new((Vec::new(), false)) };
+    /// Ultimo `last_test` dello stato.
+    static LAST_TEST: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// «Prova» in attesa: valore di `last_test` al clic e istante del clic.
+    static PENDING_TEST: RefCell<Option<(Option<String>, Instant)>> = const { RefCell::new(None) };
+}
+
+/// Aggiorna il messaggio se una «Prova» è in attesa dell'esito.
+fn check_pending_test(ui: &SettingsWindow) {
+    let lang = current_lang();
+    let outcome = PENDING_TEST.with(|p| {
+        let pending = p.borrow();
+        let (baseline, since) = pending.as_ref()?;
+        let current = LAST_TEST.with(|t| t.borrow().clone());
+        Some(outcome::test_progress(baseline.as_deref(), current.as_deref(), since.elapsed()))
+    });
+    match outcome {
+        Some(outcome::TestOutcome::Done { text, error }) => {
+            PENDING_TEST.with(|p| *p.borrow_mut() = None);
+            set_message(ui, &text, error);
+        }
+        Some(outcome::TestOutcome::TimedOut) => {
+            PENDING_TEST.with(|p| *p.borrow_mut() = None);
+            set_message(ui, lang.pick("Nessun esito dalla prova: controlla che il buffer sia attivo.", "No test result received: check that the buffer is running."), true);
+        }
+        _ => {}
+    }
+}
+
+/// Riempie l'elenco dei codec secondo `AVAILABLE` e segnala un codec salvato non disponibile.
+fn refresh_codecs(ui: &SettingsWindow, lang: Lang) {
+    let available = AVAILABLE.with(|a| a.borrow().clone());
+    let opts = model::codec_options(&available);
+    let key = (opts.clone(), lang == Lang::En);
+    let changed = CODEC_SHOWN.with(|c| *c.borrow() != key);
+    if changed {
+        let names = [lang.pick("Automatico", "Automatic"), "H.264", "HEVC", "AV1"];
+        let labels: Vec<SharedString> = opts.iter().filter_map(|&i| usize::try_from(i).ok().and_then(|i| names.get(i))).map(|n| SharedString::from(*n)).collect();
+        ui.set_codec_labels(ModelRc::new(VecModel::from(labels)));
+        CODEC_SHOWN.with(|c| *c.borrow_mut() = key);
+    }
+    let codec = ui.get_f().codec;
+    let pos = model::codec_position(&opts, codec);
+    if changed || ui.get_codec_pos() != pos {
+        ui.set_codec_pos(pos);
+    }
+    let warn = if model::codec_unavailable(codec, &available) {
+        lang.pick("Il codec salvato non è disponibile su questo PC: ClipRec ne userà un altro.", "The saved codec is not available on this PC: ClipRec will use another one.")
+    } else {
+        ""
+    };
+    ui.set_codec_warning(warn.into());
+}
 
 fn now_ms() -> u64 {
     START.get_or_init(Instant::now).elapsed().as_millis() as u64
@@ -121,6 +180,7 @@ fn main() -> anyhow::Result<()> {
     let lang = Lang::resolve(form.language);
     set_lang(&ui, lang);
     ui.set_f(form);
+    refresh_codecs(&ui, lang);
     let rows = Rc::new(VecModel::from(rows_vec));
     ui.set_sources(ModelRc::from(rows.clone()));
     if let Some(e) = load_error {
@@ -204,6 +264,19 @@ fn main() -> anyhow::Result<()> {
                 row.name = stem.into();
             }
             rows.set_row_data(i, row);
+        }
+    });
+    ui.on_codec_picked({
+        let w = ui.as_weak();
+        move |pos| {
+            let Some(ui) = w.upgrade() else { return };
+            let available = AVAILABLE.with(|a| a.borrow().clone());
+            let opts = model::codec_options(&available);
+            if let Some(&codec) = usize::try_from(pos).ok().and_then(|p| opts.get(p)) {
+                let mut f = ui.get_f();
+                f.codec = codec;
+                ui.set_f(f);
+            }
         }
     });
     ui.on_video_target_pick({
@@ -311,14 +384,26 @@ fn main() -> anyhow::Result<()> {
         let w = ui.as_weak();
         move || {
             let weak = w.clone();
+            if let Some(ui) = w.upgrade() {
+                let baseline = LAST_TEST.with(|t| t.borrow().clone());
+                PENDING_TEST.with(|p| *p.borrow_mut() = Some((baseline, Instant::now())));
+                set_message(&ui, current_lang().pick("Clip di prova richiesta, attendo l'esito…", "Test clip requested, waiting for the result…"), false);
+            }
             std::thread::spawn(move || {
                 let res = pipe::request(&IpcRequest::TestClip);
                 let _ = weak.upgrade_in_event_loop(move |ui| {
                     let lang = current_lang();
                     match res {
-                        Ok(IpcResponse::Error(e)) => set_message(&ui, &e, true),
-                        Ok(_) => set_message(&ui, lang.pick("Clip di prova richiesta.", "Test clip requested."), false),
-                        Err(_) => set_message(&ui, pipe::offline_text(lang), true),
+                        Ok(IpcResponse::Error(e)) => {
+                            PENDING_TEST.with(|p| *p.borrow_mut() = None);
+                            set_message(&ui, &e, true);
+                        }
+                        // L'esito arriva con lo stato (`last_test`): lo mostra check_pending_test.
+                        Ok(_) => {}
+                        Err(_) => {
+                            PENDING_TEST.with(|p| *p.borrow_mut() = None);
+                            set_message(&ui, pipe::offline_text(lang), true);
+                        }
                     }
                 });
             });
@@ -335,6 +420,8 @@ fn main() -> anyhow::Result<()> {
             let Some(ui) = w.upgrade() else { return };
             let lang = current_lang();
             let (c, _) = model::build_lenient(&ui.get_f(), &current_sources(&rows), &base.borrow());
+            refresh_codecs(&ui, lang);
+            check_pending_test(&ui);
             ui.set_ram_estimate(ram_text(lang, &c).into());
             ui.set_hotkey_warning(hotkey_warning(lang, &c).into());
             // Il thread di stato è fermo (core che non risponde): mostra «non in esecuzione».
@@ -358,6 +445,9 @@ fn main() -> anyhow::Result<()> {
                     let lang = current_lang();
                     match res {
                         Ok(IpcResponse::Status(s)) => {
+                            AVAILABLE.with(|a| *a.borrow_mut() = s.available_codecs.clone());
+                            LAST_TEST.with(|t| *t.borrow_mut() = s.last_test.clone());
+                            check_pending_test(&ui);
                             ui.set_status_text(pipe::format_status(lang, &s).into());
                             ui.set_status_online(true);
                         }

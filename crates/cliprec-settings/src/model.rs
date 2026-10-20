@@ -271,6 +271,31 @@ pub fn build_lenient(form: &Form, rows: &[SourceRow], base: &Config) -> (Config,
     (c, problems)
 }
 
+/// Indici di `Form::codec` da offrire (0 = Automatico, 1 = H.264, 2 = HEVC, 3 = AV1).
+/// Lista vuota = nessuna informazione dal core: si offrono tutti.
+pub fn codec_options(available: &[VideoCodec]) -> Vec<i32> {
+    (0..=3).filter(|&i| i == 0 || available.is_empty() || codec_of(i).is_some_and(|c| available.contains(&c))).collect()
+}
+
+fn codec_of(index: i32) -> Option<VideoCodec> {
+    match index {
+        1 => Some(VideoCodec::H264),
+        2 => Some(VideoCodec::Hevc),
+        3 => Some(VideoCodec::Av1),
+        _ => None,
+    }
+}
+
+/// `true` se il codec scelto (indice di `Form::codec`) non si apre su questo PC.
+pub fn codec_unavailable(codec: i32, available: &[VideoCodec]) -> bool {
+    !available.is_empty() && codec_of(codec).is_some_and(|c| !available.contains(&c))
+}
+
+/// Posizione di `codec` nella lista `options`, o -1.
+pub fn codec_position(options: &[i32], codec: i32) -> i32 {
+    options.iter().position(|&c| c == codec).map_or(-1, |p| p as i32)
+}
+
 const PAD_BUTTONS: [&str; 14] =
     ["a", "b", "x", "y", "lb", "rb", "ls", "rs", "back", "start", "dpadup", "dpaddown", "dpadleft", "dpadright"];
 
@@ -429,6 +454,24 @@ mod tests {
         assert!(build_config(&f, &r, &c).unwrap_err().contains(&Problem::SamePad));
         f.pad_audio = "Back+".into();
         assert!(build_config(&f, &r, &c).unwrap_err().contains(&Problem::BadPad(1)));
+    }
+
+    #[test]
+    fn codec_choices_follow_available_codecs() {
+        // Stato senza informazioni (core non raggiungibile o vecchio): tutte le scelte.
+        assert_eq!(codec_options(&[]), vec![0, 1, 2, 3]);
+        // Solo H.264 e HEVC: niente AV1, «Automatico» resta.
+        assert_eq!(codec_options(&[VideoCodec::H264, VideoCodec::Hevc]), vec![0, 1, 2]);
+        assert_eq!(codec_options(&[VideoCodec::Av1]), vec![0, 3]);
+        // Il codec salvato non disponibile viene segnalato; Automatico e lista vuota mai.
+        assert!(codec_unavailable(3, &[VideoCodec::H264, VideoCodec::Hevc]));
+        assert!(!codec_unavailable(2, &[VideoCodec::H264, VideoCodec::Hevc]));
+        assert!(!codec_unavailable(0, &[VideoCodec::H264]));
+        assert!(!codec_unavailable(3, &[]));
+        // Posizione nella lista filtrata (-1 se il codec salvato non c'è più).
+        assert_eq!(codec_position(&[0, 1, 2], 2), 2);
+        assert_eq!(codec_position(&[0, 3], 3), 1);
+        assert_eq!(codec_position(&[0, 1, 2], 3), -1);
     }
 
     #[test]

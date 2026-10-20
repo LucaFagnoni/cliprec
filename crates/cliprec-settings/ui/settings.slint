@@ -189,6 +189,9 @@ export component SettingsWindow inherits Window {
     in property <string> status-text;
     in property <bool> status-online;
     in property <int> start-tab;
+    in property <[string]> codec-labels;
+    in-out property <int> codec-pos;
+    in property <string> codec-warning;
 
     callback save();
     callback cancel();
@@ -201,6 +204,7 @@ export component SettingsWindow inherits Window {
     callback source-move(int, int);
     callback source-pick(int, int, int);
     callback video-target-pick(int);
+    callback codec-picked(int);
     callback hotkey-key(int, string, bool, bool, bool, bool);
     callback hotkey-mouse(int, int, bool, bool, bool, bool);
 
@@ -244,7 +248,8 @@ export component SettingsWindow inherits Window {
                     }
                     FormRow {
                         label: T.video-codec;
-                        ComboBox { model: [T.auto, "H.264", "HEVC", "AV1"]; current-index <=> root.f.codec; width: 200px; }
+                        ComboBox { model: root.codec-labels; current-index <=> root.codec-pos; selected(v) => { root.codec-picked(self.current-index); } width: 200px; }
+                        Text { text: root.codec-warning; color: #d08000; vertical-alignment: center; wrap: word-wrap; }
                     }
                     FormRow {
                         label: T.video-resolution;
