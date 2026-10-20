@@ -121,6 +121,7 @@ dependencies = [
  "cliprec-core",
  "thiserror",
  "tracing",
+ "windows",
 ]
 
 [[package]]
