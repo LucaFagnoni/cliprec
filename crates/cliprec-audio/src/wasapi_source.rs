@@ -632,6 +632,19 @@ mod tests {
         }
     }
 
+    #[test]
+    fn privacy_denial_maps_to_access_denied() {
+        let denied = WasapiError::Windows(windows::core::Error::from_hresult(E_ACCESSDENIED));
+        match classify(denied, &AudioSourceKind::Input { device: None }) {
+            OpenError::Fatal(SourceError::AccessDenied(m)) => assert!(m.contains("Privacy e sicurezza → Microfono")),
+            _ => panic!("E_ACCESSDENIED deve diventare AccessDenied"),
+        }
+        let gone = WasapiError::Windows(windows::core::Error::from_hresult(AUDCLNT_E_DEVICE_INVALIDATED));
+        assert!(matches!(classify(gone, &AudioSourceKind::Output { device: None }), OpenError::Wait(_)));
+        let busy = WasapiError::Windows(windows::core::Error::from_hresult(AUDCLNT_E_DEVICE_IN_USE));
+        assert!(matches!(classify(busy, &AudioSourceKind::Output { device: None }), OpenError::Fatal(SourceError::Unsupported(_))));
+    }
+
     /// Cattura reale dal microfono: solo a mano (`cargo test -- --ignored`), mai di notte.
     #[test]
     #[ignore]

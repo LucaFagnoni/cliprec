@@ -292,6 +292,36 @@ mod tests {
         assert!(loud > 1000, "bip nel mix: {loud} campioni");
     }
 
+    /// Catena reale senza microfono: loopback d'uscita + process loopback di explorer.exe.
+    #[test]
+    fn start_from_config_with_real_sources() {
+        use cliprec_core::config::{AudioSourceConfig, AudioSourceKind};
+        let cfg = AudioConfig {
+            mode: TrackMode::Separate,
+            add_mix_track: true,
+            sources: vec![
+                AudioSourceConfig { name: "Sistema".into(), kind: AudioSourceKind::Output { device: None }, volume: 1.0 },
+                AudioSourceConfig { name: "Explorer".into(), kind: AudioSourceKind::App { exe: "explorer.exe".into() }, volume: 0.8 },
+            ],
+        };
+        let sink = Arc::new(TestSink::default());
+        let mut engine = AudioEngine::start(&cfg, sink.clone()).unwrap();
+        std::thread::sleep(Duration::from_millis(1500));
+        println!("{:?}", engine.states());
+        engine.stop();
+        assert_eq!(*sink.names.lock().unwrap(), ["Mix", "Sistema", "Explorer"]);
+        let blocks = sink.blocks.lock().unwrap();
+        for (t, b) in blocks.iter().enumerate() {
+            let total: usize = b.iter().map(|x| x.1).sum();
+            println!("traccia {t}: {} blocchi, {:.3} s", b.len(), total as f64 / 48_000.0);
+            assert!(total as f64 > 1.0 * 48_000.0, "traccia {t}: {total}");
+            for w in b.windows(2) {
+                let end = w[0].0.add_hns(frames_to_hns(w[0].1 as i64));
+                assert!(w[1].0.hns_since(end).abs() <= 20_000, "traccia {t}: {w:?}");
+            }
+        }
+    }
+
     struct Denied;
     impl AudioSource for Denied {
         fn start(&mut self, _: cliprec_core::ChunkCallback) -> Result<(), SourceError> {
