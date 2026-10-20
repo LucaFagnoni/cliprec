@@ -17,6 +17,18 @@ use windows::Win32::Graphics::Direct3D11::{
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
 
+static CAPTURE: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
+/// I test di cattura vera girano in parallelo tra loro...
+pub fn shared_capture() -> std::sync::RwLockReadGuard<'static, ()> {
+    CAPTURE.read().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// ...tranne quello tra adattatori diversi, che rallenta DWM per tutti e gira da solo.
+pub fn exclusive_capture() -> std::sync::RwLockWriteGuard<'static, ()> {
+    CAPTURE.write().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// Piccola finestra di prova (non a schermo intero, non attivata) disegnata con GDI che cambia
 /// colore ogni 15 ms; si chiude al drop.
 pub struct TestWindow {

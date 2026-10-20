@@ -4,7 +4,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use cliprec_core::{GpuDevice, HNS_PER_SEC};
+use cliprec_core::{GpuDevice, HNS_PER_SEC, QpcTime};
 use windows::Foundation::Metadata::ApiInformation;
 use windows::Foundation::{TimeSpan, TypedEventHandler};
 use windows::Graphics::Capture::{Direct3D11CaptureFramePool, GraphicsCaptureItem, GraphicsCaptureSession};
@@ -20,6 +20,7 @@ use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemIntero
 use windows::core::{HSTRING, IInspectable, Interface};
 
 use crate::pacer::{FrameSlots, Stats};
+use crate::targets::is_minimized;
 
 const FORMAT: DirectXPixelFormat = DirectXPixelFormat::B8G8R8A8UIntNormalized;
 const BUFFERS: i32 = 2;
@@ -71,16 +72,29 @@ pub(crate) struct WgcCapture {
     arrived_token: i64,
     closed_token: i64,
     closed: Arc<AtomicBool>,
+    size: (u32, u32),
+}
+
+/// `MinUpdateInterval` per `fps` in uscita: tre quarti di periodo, almeno 1 ms. Un periodo intero
+/// perde frame quando il monitor va alla stessa frequenza (misurato: a 60 fps su 60 Hz ~50 frame
+/// nuovi/s invece di 60, perché le composizioni di DWM oscillano attorno ai 16,7 ms); con 3/4 si
+/// evitano comunque le catture e le copie doppie su monitor a 120-240 Hz.
+pub(crate) fn min_update_interval(fps: u32) -> i64 {
+    (HNS_PER_SEC * 3 / (4 * i64::from(fps.max(1)))).max(10_000)
 }
 
 impl WgcCapture {
+    /// `window` è la finestra catturata, se l'elemento è una finestra: mentre è minimizzata i suoi
+    /// frame (la sola barra del titolo, ~146×28) vengono scartati e resta l'ultimo frame buono.
     pub fn start(
         item: GraphicsCaptureItem,
+        window: Option<HWND>,
         slots: Arc<FrameSlots>,
         stats: Arc<Stats>,
         fps: u32,
         cursor: bool,
     ) -> windows::core::Result<Self> {
+        let window = window.map(|h| h.0 as isize);
         // Nessun frame nero qui: finché WGC non consegna, il pacer ripete l'ultimo frame (niente
         // lampi neri quando la modalità automatica passa dal monitor al gioco e viceversa).
         let device = winrt_device(&slots.device)?;
@@ -90,7 +104,7 @@ impl WgcCapture {
         let arrived_token = pool.FrameArrived(&TypedEventHandler::<Direct3D11CaptureFramePool, IInspectable>::new(
             move |pool, _| {
                 if let Some(pool) = pool.as_ref()
-                    && let Err(e) = on_frame_arrived(pool, &slots, &stats, &pool_size)
+                    && let Err(e) = on_frame_arrived(pool, window, &slots, &stats, &pool_size)
                 {
                     tracing::debug!("frame WGC scartato: {e}");
                 }
@@ -115,13 +129,19 @@ impl WgcCapture {
         }
         if has_min_update_interval() {
             // Mai il default: su 24H2 a 144 Hz il default può fermarsi intorno ai 50 fps.
-            let interval = (HNS_PER_SEC / (2 * i64::from(fps.max(1)))).max(10_000);
+            let interval = min_update_interval(fps);
             if let Err(e) = session.SetMinUpdateInterval(TimeSpan { Duration: interval }) {
                 tracing::warn!("MinUpdateInterval non impostato: {e}");
             }
         }
         session.StartCapture()?;
-        Ok(Self { item, pool, session, arrived_token, closed_token, closed })
+        let size = (size.Width.max(1) as u32, size.Height.max(1) as u32);
+        Ok(Self { item, pool, session, arrived_token, closed_token, closed, size })
+    }
+
+    /// Dimensione dell'elemento all'avvio (pixel fisici): quella del primo frame atteso.
+    pub fn size(&self) -> (u32, u32) {
+        self.size
     }
 
     /// `true` se l'elemento catturato non esiste più (finestra chiusa, monitor scollegato).
@@ -141,11 +161,18 @@ impl Drop for WgcCapture {
 
 fn on_frame_arrived(
     pool: &Direct3D11CaptureFramePool,
+    window: Option<isize>,
     slots: &FrameSlots,
     stats: &Stats,
     pool_size: &AtomicU64,
 ) -> windows::core::Result<()> {
     let frame = pool.TryGetNextFrame()?;
+    if window.is_some_and(|h| is_minimized(HWND(h as *mut _))) {
+        return frame.Close();
+    }
+    // Stesso orologio e stessa unità di QpcTime (QPC in 100 ns).
+    let captured = QpcTime(frame.SystemRelativeTime()?.Duration);
+    stats.arrival.record(QpcTime::now().hns_since(captured));
     let content = frame.ContentSize()?;
     let access: IDirect3DDxgiInterfaceAccess = frame.Surface()?.cast()?;
     // SAFETY: la superficie di un frame WGC è sempre una ID3D11Texture2D del nostro device.
@@ -156,7 +183,7 @@ fn on_frame_arrived(
     // Dopo un ridimensionamento il contenuto può superare la superficie finché il pool non è ricreato.
     let width = (content.Width.max(1) as u32).min(desc.Width);
     let height = (content.Height.max(1) as u32).min(desc.Height);
-    slots.publish(width, height, |dst| {
+    slots.publish(width, height, captured, |dst| {
         let region = D3D11_BOX { left: 0, top: 0, front: 0, right: width, bottom: height, back: 1 };
         // SAFETY: regione dentro entrambe le texture (stesso formato BGRA); contesto immediato protetto.
         unsafe { slots.device.context.CopySubresourceRegion(dst, 0, 0, 0, 0, &src, 0, Some(&region)) };
