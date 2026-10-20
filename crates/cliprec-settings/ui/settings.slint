@@ -55,6 +55,9 @@ export global T {
     in property <string> fmt-flac;
     in property <string> fmt-wav;
     in property <string> fmt-mka;
+    in property <string> fmt-polywav;
+    in property <string> fmt-opus;
+    in property <string> fmt-aac;
     in property <string> container;
     in property <string> ram-max;
     in property <string> ram-auto;
@@ -117,6 +120,7 @@ export struct SourceRow {
     kind: int,
     target: string,
     volume: float,
+    delay: int,
 }
 
 component FormRow inherits HorizontalLayout {
@@ -170,9 +174,9 @@ component HotkeyField inherits Rectangle {
 
 export component SettingsWindow inherits Window {
     title: T.window-title;
-    preferred-width: 900px;
+    preferred-width: 1040px;
     preferred-height: 680px;
-    min-width: 820px;
+    min-width: 980px;
     min-height: 600px;
 
     in-out property <Form> f;
@@ -301,21 +305,21 @@ export component SettingsWindow inherits Window {
                                     text: r.name;
                                     placeholder-text: T.placeholder-name;
                                     width: 130px;
-                                    edited(t) => { root.source-changed(i, { name: t, kind: r.kind, target: r.target, volume: r.volume }); }
+                                    edited(t) => { root.source-changed(i, { name: t, kind: r.kind, target: r.target, volume: r.volume, delay: r.delay }); }
                                 }
                                 ComboBox {
                                     model: [T.kind-app, T.kind-input, T.kind-output];
                                     current-index: r.kind;
                                     width: 110px;
                                     selected(v) => {
-                                        root.source-changed(i, { name: r.name, kind: self.current-index, target: "", volume: r.volume });
+                                        root.source-changed(i, { name: r.name, kind: self.current-index, target: "", volume: r.volume, delay: r.delay });
                                     }
                                 }
                                 LineEdit {
                                     text: r.target;
                                     placeholder-text: r.kind == 0 ? T.placeholder-app : T.placeholder-device;
                                     horizontal-stretch: 1;
-                                    edited(t) => { root.source-changed(i, { name: r.name, kind: r.kind, target: t, volume: r.volume }); }
+                                    edited(t) => { root.source-changed(i, { name: r.name, kind: r.kind, target: t, volume: r.volume, delay: r.delay }); }
                                 }
                                 ComboBox {
                                     model: r.kind == 0 ? root.apps : (r.kind == 1 ? root.inputs : root.outputs);
@@ -331,9 +335,18 @@ export component SettingsWindow inherits Window {
                                     maximum: 200;
                                     value: r.volume * 100;
                                     width: 90px;
-                                    changed(v) => { root.source-changed(i, { name: r.name, kind: r.kind, target: r.target, volume: Math.round(v) / 100 }); }
+                                    changed(v) => { root.source-changed(i, { name: r.name, kind: r.kind, target: r.target, volume: Math.round(v) / 100, delay: r.delay }); }
                                 }
                                 Text { text: Math.round(r.volume * 100) + "%"; width: 40px; vertical-alignment: center; }
+                                SpinBox {
+                                    minimum: -1000;
+                                    maximum: 1000;
+                                    step-size: 10;
+                                    value: r.delay;
+                                    width: 120px;
+                                    edited(v) => { root.source-changed(i, { name: r.name, kind: r.kind, target: r.target, volume: r.volume, delay: v }); }
+                                }
+                                Text { text: "ms"; vertical-alignment: center; }
                                 Button { text: "▲"; width: 34px; enabled: i > 0; clicked => { root.source-move(i, -1); } }
                                 Button { text: "▼"; width: 34px; enabled: i < root.sources.length - 1; clicked => { root.source-move(i, 1); } }
                                 Button { text: "X"; width: 34px; clicked => { root.source-remove(i); } }
@@ -412,7 +425,7 @@ export component SettingsWindow inherits Window {
                     }
                     FormRow {
                         label: T.audio-format;
-                        ComboBox { model: [T.fmt-flac, T.fmt-wav, T.fmt-mka]; current-index <=> root.f.audio-format; width: 260px; }
+                        ComboBox { model: [T.fmt-flac, T.fmt-wav, T.fmt-mka, T.fmt-polywav, T.fmt-opus, T.fmt-aac]; current-index <=> root.f.audio-format; width: 260px; }
                     }
                     FormRow {
                         label: T.container;

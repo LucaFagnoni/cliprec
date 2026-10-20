@@ -26,6 +26,8 @@ pub enum Problem {
     /// 0 = video, 1 = audio.
     BadPad(u8),
     SamePad,
+    /// Ritardo di una sorgente audio fuori da -1000..=1000 ms (indice della riga).
+    BadDelay(usize),
     BadBitrate,
     BadMaxMb,
     BadMonitor,
@@ -110,7 +112,7 @@ pub fn to_form(c: &Config) -> (Form, Vec<SourceRow>) {
                 AudioSourceKind::Input { device } => (1, device.clone().unwrap_or_default()),
                 AudioSourceKind::Output { device } => (2, device.clone().unwrap_or_default()),
             };
-            SourceRow { name: s.name.clone().into(), kind, target: target.into(), volume: s.volume }
+            SourceRow { name: s.name.clone().into(), kind, target: target.into(), volume: s.volume, delay: s.delay_ms }
         })
         .collect();
     (form, rows)
@@ -197,7 +199,14 @@ pub fn build_lenient(form: &Form, rows: &[SourceRow], base: &Config) -> (Config,
                     AudioSourceKind::App { exe: t }
                 }
             };
-            AudioSourceConfig { volume: r.volume.clamp(0.0, 2.0), ..AudioSourceConfig::new(name, kind) }
+            if !(-1000..=1000).contains(&r.delay) {
+                problems.push(Problem::BadDelay(i));
+            }
+            AudioSourceConfig {
+                volume: r.volume.clamp(0.0, 2.0),
+                delay_ms: r.delay.clamp(-1000, 1000),
+                ..AudioSourceConfig::new(name, kind)
+            }
         })
         .collect();
 
@@ -405,7 +414,7 @@ mod tests {
         f.max_bitrate = "abc".into();
         f.max_mb = "0".into();
         for _ in 0..7 {
-            r.push(SourceRow { name: "x".into(), kind: 1, target: "".into(), volume: 1.0 });
+            r.push(SourceRow { name: "x".into(), kind: 1, target: "".into(), volume: 1.0, delay: 0 });
         }
         let p = build_config(&f, &r, &c).unwrap_err();
         for expected in [
@@ -426,7 +435,7 @@ mod tests {
         let (mut f, mut r) = rows_of(&c);
         f.source_kind = 3;
         f.source_target = "  ".into();
-        r.push(SourceRow { name: " ".into(), kind: 0, target: "".into(), volume: 1.0 });
+        r.push(SourceRow { name: " ".into(), kind: 0, target: "".into(), volume: 1.0, delay: 0 });
         let p = build_config(&f, &r, &c).unwrap_err();
         assert!(p.contains(&Problem::EmptyVideoTarget));
         assert!(p.contains(&Problem::EmptySourceName(2)));
@@ -454,6 +463,38 @@ mod tests {
         assert!(build_config(&f, &r, &c).unwrap_err().contains(&Problem::SamePad));
         f.pad_audio = "Back+".into();
         assert!(build_config(&f, &r, &c).unwrap_err().contains(&Problem::BadPad(1)));
+    }
+
+    #[test]
+    fn audio_delay_round_trips_and_is_validated() {
+        let mut c = Config::default();
+        c.audio.sources[0].delay_ms = -250;
+        c.audio.sources[1].delay_ms = 1000;
+        let (f, mut r) = rows_of(&c);
+        assert_eq!((r[0].delay, r[1].delay), (-250, 1000));
+        assert_eq!(build_config(&f, &r, &c).unwrap(), c);
+        r[0].delay = -1001;
+        assert!(build_config(&f, &r, &c).unwrap_err().contains(&Problem::BadDelay(0)));
+        r[0].delay = 0;
+        r[1].delay = 1001;
+        assert!(build_config(&f, &r, &c).unwrap_err().contains(&Problem::BadDelay(1)));
+    }
+
+    #[test]
+    fn all_audio_formats_round_trip() {
+        for fmt in [
+            AudioClipFormat::FlacPerTrack,
+            AudioClipFormat::WavPerTrack,
+            AudioClipFormat::Mka,
+            AudioClipFormat::PolyWav,
+            AudioClipFormat::Opus,
+            AudioClipFormat::Aac,
+        ] {
+            let mut c = Config::default();
+            c.clips.audio_format = fmt;
+            let (f, r) = rows_of(&c);
+            assert_eq!(build_config(&f, &r, &c).unwrap().clips.audio_format, fmt);
+        }
     }
 
     #[test]
