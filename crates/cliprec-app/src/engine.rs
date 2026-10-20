@@ -654,7 +654,15 @@ fn needs_restart(old: &Config, new: &Config) -> bool {
 
 /// Loop del motore: un thread, comandi dalla shell, stato aggiornato ogni 500 ms.
 /// `commands` è preso per riferimento così il supervisore lo può riavviare dopo un panic.
-pub fn run(config: Config, commands: &Receiver<AppCommand>, events: Sender<EngineEvent>, status: Arc<Mutex<EngineStatus>>) {
+/// Con `start_buffer = false` (es. `config.toml` illeggibile) il buffer resta fermo finché la shell non
+/// manda `StartBuffer` o una configurazione valida con `ReloadConfig`.
+pub fn run(
+    config: Config,
+    start_buffer: bool,
+    commands: &Receiver<AppCommand>,
+    events: Sender<EngineEvent>,
+    status: Arc<Mutex<EngineStatus>>,
+) {
     let config_path = crate::shell::config_path();
     let restored = persist().lock().ok().and_then(|p| p.clone());
     let (mut config, mut buffer, shared) = match restored {
@@ -678,7 +686,7 @@ pub fn run(config: Config, commands: &Receiver<AppCommand>, events: Sender<Engin
     if removed > 0 {
         tracing::info!(removed, "file incompleti rimossi dalla cartella delle clip");
     }
-    let mut session = start(&config, &buffer);
+    let mut session = if start_buffer { start(&config, &buffer) } else { None };
     loop {
         if let Ok(mut p) = persist().lock() {
             *p = Some(Persist { config: config.clone(), buffer: buffer.clone(), shared: shared.clone() });

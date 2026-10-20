@@ -68,7 +68,7 @@ fn main() -> anyhow::Result<()> {
 
     let engine = {
         let (config, status) = (config.clone(), Arc::clone(&status));
-        supervisor::spawn_supervised("motore", move || engine::run(config.clone(), &cmd_rx, event_tx.clone(), Arc::clone(&status)))?
+        supervisor::spawn_supervised("motore", move || engine::run(config.clone(), true, &cmd_rx, event_tx.clone(), Arc::clone(&status)))?
     };
 
     let result = shell::run(shell::ShellIo { commands: cmd_tx, events: event_rx, status, config });
