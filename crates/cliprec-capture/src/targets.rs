@@ -139,6 +139,12 @@ pub(crate) fn is_window(hwnd: HWND) -> bool {
     unsafe { IsWindow(Some(hwnd)) }.as_bool()
 }
 
+pub(crate) fn is_foreground(hwnd: HWND) -> bool {
+    // SAFETY: nessun puntatore.
+    let fg = unsafe { GetForegroundWindow() };
+    fg == hwnd
+}
+
 pub(crate) fn is_minimized(hwnd: HWND) -> bool {
     // SAFETY: nessun puntatore.
     unsafe { IsIconic(hwnd) }.as_bool()

@@ -5,7 +5,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use cliprec_core::config::{VideoConfig, VideoSourceConfig};
 use cliprec_core::{CaptureStats, FrameCallback, GpuDevice, SourceError, SourceState, VideoSource};
@@ -13,10 +13,11 @@ use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Gdi::HMONITOR;
 
 use crate::dda::DdaCapture;
+use crate::health::Health;
 use crate::pacer::{FrameSlots, Pacer, Stats, clear_black};
 use crate::targets::{
-    exe_matches, find_window_by_exe, find_window_by_title, fullscreen_foreground, is_minimized, is_window, monitor_rect,
-    monitors, primary_monitor, rect_size, window_exe, window_monitor, window_title,
+    exe_matches, find_window_by_exe, find_window_by_title, fullscreen_foreground, is_foreground, is_minimized, is_window,
+    monitor_rect, monitors, primary_monitor, rect_size, window_exe, window_monitor, window_title,
 };
 use crate::wgc::{self, WgcCapture};
 
@@ -61,10 +62,9 @@ impl Target {
             )),
             Self::Window(t) => find_window_by_title(t).map(Resolved::Window),
             Self::Process(e) => find_window_by_exe(e).map(Resolved::Window),
-            Self::Auto { games, any_fullscreen } => Some(match fullscreen_foreground() {
-                Some((h, exe)) if *any_fullscreen || games.iter().any(|g| exe_matches(&exe, g)) => Resolved::Window(h),
-                _ => Resolved::Monitor(primary_monitor()),
-            }),
+            Self::Auto { games, any_fullscreen } => {
+                Some(auto_pick(fullscreen_foreground(), games, *any_fullscreen, primary_monitor()))
+            }
         })
     }
 
@@ -75,6 +75,15 @@ impl Target {
             Some(Resolved::Window(w)) => window_monitor(w).unwrap_or_else(primary_monitor),
             None => primary_monitor(),
         })
+    }
+}
+
+/// Modalità automatica: la finestra a schermo intero in primo piano se è un gioco in lista (o
+/// qualsiasi, con `any_fullscreen`), altrimenti il monitor principale.
+fn auto_pick(fullscreen: Option<(HWND, String)>, games: &[String], any_fullscreen: bool, primary: HMONITOR) -> Resolved {
+    match fullscreen {
+        Some((h, exe)) if any_fullscreen || games.iter().any(|g| exe_matches(&exe, g)) => Resolved::Window(h),
+        _ => Resolved::Monitor(primary),
     }
 }
 
@@ -171,6 +180,7 @@ impl VideoSource for CaptureSource {
             stats: self.stats.clone(),
             description: self.description.clone(),
             current: None,
+            health: Health::new(&self.device),
         };
         // Primo giro sincrono: un monitor inesistente o una sessione rifiutata sono errori d'avvio.
         watch.poll()?;
@@ -221,6 +231,7 @@ struct Watch {
     stats: Arc<Stats>,
     description: Arc<Mutex<String>>,
     current: Option<(Resolved, Capture)>,
+    health: Health,
 }
 
 enum Capture {
@@ -299,6 +310,12 @@ impl Watch {
     }
 
     fn poll(&mut self) -> Result<(), SourceError> {
+        // SAFETY: chiamata COM senza argomenti su un device valido.
+        if let Err(e) = unsafe { self.slots.device.device.GetDeviceRemovedReason() } {
+            self.current = None;
+            return Err(SourceError::Failed(format!("device GPU perso: {e}")));
+        }
+        let now = Instant::now();
         let want = self.target.resolve()?;
         let gone = self
             .current
@@ -306,6 +323,7 @@ impl Watch {
             .is_some_and(|(r, c)| c.is_closed() || matches!(r, Resolved::Window(h) if !is_window(*h)));
         if gone || self.current.as_ref().map(|(r, _)| *r) != want {
             self.current = None;
+            self.health.reset(now);
             if let Some(r) = want {
                 let cap = self.open(r)?;
                 let desc = format!("{} · {}", r.describe(), cap.backend());
@@ -314,11 +332,22 @@ impl Watch {
                 self.current = Some((r, cap));
             }
         }
-        self.stats.set_state(match &self.current {
+        let state = match &self.current {
             None => SourceState::Waiting(format!("in attesa di {}", self.target.label())),
-            Some((Resolved::Window(h), _)) if is_minimized(*h) => SourceState::Waiting("finestra minimizzata".into()),
-            Some(_) => SourceState::Running,
-        });
+            Some((Resolved::Window(h), _)) if is_minimized(*h) => {
+                self.health.reset(now);
+                SourceState::Waiting("finestra minimizzata".into())
+            }
+            Some((r, _)) => {
+                let foreground = matches!(r, Resolved::Window(h) if is_foreground(*h));
+                let arrived = self.stats.arrived.load(Ordering::Relaxed);
+                match self.health.check(&self.slots, arrived, foreground, now) {
+                    Some(warning) => SourceState::Waiting(warning.into()),
+                    None => SourceState::Running,
+                }
+            }
+        };
+        self.stats.set_state(state);
         Ok(())
     }
 }
@@ -440,6 +469,54 @@ mod tests {
         let small = sizes.iter().any(|&(w, h)| (200..=330).contains(&w) && h <= 250);
         let big = sizes.iter().any(|&(w, h)| (400..=500).contains(&w) && h >= 300);
         assert!(small && big, "ridimensionamento non visto: {sizes:?}");
+    }
+
+    /// Il «gioco» si chiude e si riapre: la sorgente aspetta e lo ritrova da sola.
+    #[test]
+    fn window_target_waits_and_finds_the_window_again() {
+        let title = format!("cliprec-test-restart-{}", std::process::id());
+        let device = crate::device_for_monitor(0).unwrap();
+        let mut src = CaptureSource::new(device, Target::Window(title.clone()), false);
+        let rx = collect(&mut src, 30);
+        assert!(matches!(src.stats().state, SourceState::Waiting(_)));
+        for _ in 0..2 {
+            let win = TestWindow::open(&title, 240, 180);
+            std::thread::sleep(Duration::from_millis(700));
+            assert_eq!(src.stats().state, SourceState::Running);
+            drop(win);
+            std::thread::sleep(Duration::from_millis(500));
+            assert!(matches!(src.stats().state, SourceState::Waiting(_)), "{:?}", src.stats().state);
+        }
+        src.stop();
+        let frames: Vec<_> = rx.try_iter().collect();
+        assert_on_grid(&frames, 30);
+        assert!(frames.len() >= 65, "{} frame", frames.len());
+    }
+
+    /// Una finestra tutta nera porta allo stato `Waiting` con l'avviso sui frame neri.
+    #[test]
+    fn black_window_is_reported() {
+        let title = format!("cliprec-test-black-{}", std::process::id());
+        let _win = TestWindow::open_with(&title, 320, 240, true);
+        let device = crate::device_for_monitor(0).unwrap();
+        let mut src = CaptureSource::new(device, Target::Window(title), false);
+        let _rx = collect(&mut src, 30);
+        std::thread::sleep(Duration::from_millis(5500));
+        let state = src.stats().state;
+        src.stop();
+        assert_eq!(state, SourceState::Waiting(crate::health::BLACK_MSG.into()));
+    }
+
+    #[test]
+    fn auto_mode_picks_listed_or_any_fullscreen_app() {
+        let primary = primary_monitor();
+        let game = HWND(0x1234 as *mut _);
+        let fs = || Some((game, "Game.exe".to_owned()));
+        let games = vec!["osu!.exe".to_owned(), "game".to_owned()];
+        assert_eq!(auto_pick(fs(), &games, false, primary), Resolved::Window(game));
+        assert_eq!(auto_pick(Some((game, "browser.exe".into())), &games, false, primary), Resolved::Monitor(primary));
+        assert_eq!(auto_pick(Some((game, "browser.exe".into())), &games, true, primary), Resolved::Window(game));
+        assert_eq!(auto_pick(None, &games, true, primary), Resolved::Monitor(primary));
     }
 
     #[test]

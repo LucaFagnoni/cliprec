@@ -130,6 +130,14 @@ impl FrameSlots {
     fn release(&self) {
         lock(&self.inner).in_use = None;
     }
+
+    /// Esegue `f` sull'ultimo frame tenendo il lock: la cattura non può riscriverlo finché `f` non
+    /// ha accodato i suoi comandi sul contesto immediato.
+    pub fn with_latest<R>(&self, f: impl FnOnce(&ID3D11Texture2D, u32, u32) -> R) -> Option<R> {
+        let g = lock(&self.inner);
+        let s = g.slots[g.latest?].as_ref()?;
+        Some(f(&s.tex, s.width, s.height))
+    }
 }
 
 /// Contatori condivisi tra pacer, cattura e chi chiama `stats()`.

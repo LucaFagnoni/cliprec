@@ -8,7 +8,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, MSG, PostMessageW, PostQuitMessage, RegisterClassW,
     SHOW_WINDOW_CMD, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SetTimer, SetWindowPos, ShowWindow,
     ShowWindowAsync, TranslateMessage, WINDOW_EX_STYLE, WM_CLOSE, WM_DESTROY, WM_PAINT, WM_TIMER, WNDCLASSW,
-    WS_OVERLAPPEDWINDOW,
+    WS_OVERLAPPEDWINDOW, WS_POPUP,
 };
 use windows::core::{HSTRING, w};
 use windows::Win32::Graphics::Direct3D11::{
@@ -26,6 +26,11 @@ pub struct TestWindow {
 
 static TICKS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
+thread_local! {
+    /// Ogni finestra ha il suo thread: se vero, la finestra di quel thread resta nera.
+    static BLACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 unsafe extern "system" fn test_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     // SAFETY: chiamate Win32 sulla finestra che riceve il messaggio, dal suo thread.
     unsafe {
@@ -39,7 +44,8 @@ unsafe extern "system" fn test_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
                 let mut ps = PAINTSTRUCT::default();
                 let hdc = BeginPaint(hwnd, &mut ps);
                 let t = TICKS.load(std::sync::atomic::Ordering::Relaxed);
-                let brush = CreateSolidBrush(COLORREF((t * 37 % 256) | ((t * 11 % 256) << 8) | (0x40 << 16)));
+                let color = if BLACK.get() { 0 } else { (t * 37 % 256) | ((t * 11 % 256) << 8) | (0x40 << 16) };
+                let brush = CreateSolidBrush(COLORREF(color));
                 FillRect(hdc, &ps.rcPaint, brush);
                 let _ = DeleteObject(brush.into());
                 let _ = EndPaint(hwnd, &ps);
@@ -56,9 +62,15 @@ unsafe extern "system" fn test_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
 
 impl TestWindow {
     pub fn open(title: &str, width: i32, height: i32) -> Self {
+        Self::open_with(title, width, height, false)
+    }
+
+    /// Come `open`, ma con `black` la finestra è tutta nera.
+    pub fn open_with(title: &str, width: i32, height: i32, black: bool) -> Self {
         let (tx, rx) = std::sync::mpsc::channel();
         let title = HSTRING::from(title);
         let thread = std::thread::spawn(move || {
+            BLACK.set(black);
             // SAFETY: registrazione della classe e creazione della finestra con stringhe che vivono
             // per tutta la chiamata; il ciclo dei messaggi gira sul thread che possiede la finestra.
             unsafe {
@@ -75,7 +87,8 @@ impl TestWindow {
                     WINDOW_EX_STYLE::default(),
                     class,
                     &title,
-                    WS_OVERLAPPEDWINDOW,
+                    // Nera: senza barra del titolo, così tutta l'immagine catturata è nera.
+                    if black { WS_POPUP } else { WS_OVERLAPPEDWINDOW },
                     40,
                     40,
                     width,

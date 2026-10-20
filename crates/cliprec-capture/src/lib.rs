@@ -6,6 +6,7 @@
 //! sorgente descritta da `VideoConfig`; [`SyntheticSource`] serve ai test e alla misura della sincronia.
 
 mod dda;
+mod health;
 mod pacer;
 mod source;
 mod synthetic;
