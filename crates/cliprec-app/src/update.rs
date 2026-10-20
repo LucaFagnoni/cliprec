@@ -152,6 +152,11 @@ fn files_under(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
     Ok(out)
 }
 
+fn same_content(a: &Path, b: &Path) -> bool {
+    let (Ok(ma), Ok(mb)) = (std::fs::metadata(a), std::fs::metadata(b)) else { return false };
+    ma.len() == mb.len() && std::fs::read(a).ok() == std::fs::read(b).ok()
+}
+
 /// Mette i file di `new_dir` in `app_dir`: un file esistente diventa `<nome>.old` (si può anche se
 /// è in uso), poi il nuovo prende il suo posto. Al primo errore rimette tutto com'era.
 pub fn replace_files(new_dir: &Path, app_dir: &Path) -> anyhow::Result<()> {
@@ -159,6 +164,10 @@ pub fn replace_files(new_dir: &Path, app_dir: &Path) -> anyhow::Result<()> {
     let mut step = || -> anyhow::Result<()> {
         for src in files_under(new_dir)? {
             let dst = app_dir.join(src.strip_prefix(new_dir)?);
+            // File identici (licenze, DLL non cambiate): nessuna copia e nessun `.old`.
+            if same_content(&src, &dst) {
+                continue;
+            }
             if let Some(parent) = dst.parent() {
                 std::fs::create_dir_all(parent).with_context(|| format!("{}", parent.display()))?;
             }
@@ -288,7 +297,11 @@ impl Updater {
                     tracing::info!(versione = %release.version, "aggiornamento installato, riavvio");
                     me.set_phase(UpdatePhase::Restarting);
                     // La nuova istanza aspetta che questa liberi il mutex dell'istanza unica.
-                    let started = Command::new(dir.join("cliprec-app.exe")).arg(crate::sys::RESTART_ARG).arg("--tray").spawn();
+                    let started = Command::new(dir.join("cliprec-app.exe"))
+                        .arg(crate::sys::RESTART_ARG)
+                        .arg("--tray")
+                        .env_remove("CLIPREC_UPDATE_AS")
+                        .spawn();
                     match started {
                         Ok(_) => (me.quit)(),
                         Err(e) => me.set_phase(UpdatePhase::Failed(format!("riavvio: {e}"))),
@@ -358,7 +371,10 @@ mod tests {
         std::fs::write(new.join("a.txt"), "nuovo").unwrap();
         std::fs::create_dir_all(new.join("licenses")).unwrap();
         std::fs::write(new.join("licenses").join("b.txt"), "b").unwrap();
+        std::fs::write(app.join("uguale.txt"), "uguale").unwrap();
+        std::fs::write(new.join("uguale.txt"), "uguale").unwrap();
         replace_files(&new, &app).unwrap();
+        assert!(!app.join("uguale.txt.old").exists(), "un file identico non si tocca");
         assert_eq!(std::fs::read_to_string(app.join("a.txt")).unwrap(), "nuovo");
         assert_eq!(std::fs::read_to_string(app.join("a.txt.old")).unwrap(), "vecchio");
         assert_eq!(std::fs::read_to_string(app.join("licenses").join("b.txt")).unwrap(), "b");

@@ -30,6 +30,24 @@ pub struct Tracker {
     pub target: Option<String>,
 }
 
+/// Note di GitHub (Markdown) in testo semplice: niente `**`, apici inversi né `#`, elenchi con «•».
+pub fn plain_notes(md: &str) -> String {
+    md.lines()
+        .map(|l| {
+            let t = l.trim_start();
+            let t = t.trim_start_matches('#').trim_start();
+            let t = match t.strip_prefix("- ").or_else(|| t.strip_prefix("* ")) {
+                Some(rest) => format!("•  {rest}"),
+                None => t.to_string(),
+            };
+            t.replace("**", "").replace('`', "")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
+}
+
 /// Vista per lo stato `info` del core (`None` = core non raggiungibile).
 pub fn view(lang: Lang, info: Option<&UpdateInfo>, tracker: &mut Tracker) -> View {
     let t = |it: &str, en: &str| lang.pick(it, en).to_string();
@@ -103,7 +121,7 @@ fn show(ui: &UpdateWindow, v: View, lang: Lang) {
     ui.set_heading(v.heading.into());
     ui.set_subheading(v.subheading.into());
     ui.set_notes_title(lang.pick("Novità", "What's new").into());
-    ui.set_notes(v.notes.into());
+    ui.set_notes(plain_notes(&v.notes).into());
     ui.set_status(v.status.into());
     ui.set_status_error(v.error);
     ui.set_busy(v.busy);
@@ -168,6 +186,12 @@ mod tests {
         new.current = "0.2.0".into();
         let v = view(Lang::It, Some(&new), &mut tr);
         assert!(v.heading.contains("aggiornato") && v.heading.contains("0.2.0") && !v.busy);
+    }
+
+    #[test]
+    fn release_notes_become_plain_text() {
+        let md = "## Novità\n\n- **Colore 4:4:4**\n* `mono`\nTesto";
+        assert_eq!(plain_notes(md), "Novità\n\n•  Colore 4:4:4\n•  mono\nTesto");
     }
 
     #[test]
