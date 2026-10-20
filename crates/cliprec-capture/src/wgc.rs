@@ -19,7 +19,7 @@ use windows::Win32::System::WinRT::Direct3D11::{CreateDirect3D11DeviceFromDXGIDe
 use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
 use windows::core::{HSTRING, IInspectable, Interface};
 
-use crate::pacer::{FrameSlots, Stats, clear_black};
+use crate::pacer::{FrameSlots, Stats};
 
 const FORMAT: DirectXPixelFormat = DirectXPixelFormat::B8G8R8A8UIntNormalized;
 const BUFFERS: i32 = 2;
@@ -81,10 +81,10 @@ impl WgcCapture {
         fps: u32,
         cursor: bool,
     ) -> windows::core::Result<Self> {
+        // Nessun frame nero qui: finché WGC non consegna, il pacer ripete l'ultimo frame (niente
+        // lampi neri quando la modalità automatica passa dal monitor al gioco e viceversa).
         let device = winrt_device(&slots.device)?;
         let size = item.Size()?;
-        // Primo frame nero della dimensione giusta, finché WGC non consegna il primo vero.
-        slots.publish(size.Width.max(1) as u32, size.Height.max(1) as u32, |t| clear_black(&slots.device, t))?;
         let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(&device, FORMAT, BUFFERS, size)?;
         let pool_size = AtomicU64::new(pack(size));
         let arrived_token = pool.FrameArrived(&TypedEventHandler::<Direct3D11CaptureFramePool, IInspectable>::new(

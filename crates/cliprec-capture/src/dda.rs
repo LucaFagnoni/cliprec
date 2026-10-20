@@ -15,7 +15,7 @@ use windows::Win32::Graphics::Dxgi::{
 use windows::Win32::Graphics::Gdi::HMONITOR;
 use windows::core::Interface;
 
-use crate::pacer::{FrameSlots, Stats, clear_black};
+use crate::pacer::{FrameSlots, Stats};
 
 /// Duplicazione dell'uscita che mostra `monitor`, sull'adattatore del device (deve essere quello).
 fn duplicate(device: &GpuDevice, monitor: HMONITOR) -> windows::core::Result<IDXGIOutputDuplication> {
@@ -70,10 +70,7 @@ impl DdaCapture {
                         return;
                     }
                 };
-                // SAFETY: interfaccia valida.
-                let mode = unsafe { dup.GetDesc() }.ModeDesc;
-                let first = slots.publish(mode.Width, mode.Height, |t| clear_black(&slots.device, t));
-                let _ = tx.send(first);
+                let _ = tx.send(Ok(()));
                 if let Err(e) = pump(&dup, &slots, &stats, &run) {
                     tracing::info!("Desktop Duplication interrotta: {e}");
                 }

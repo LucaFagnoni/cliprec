@@ -223,7 +223,8 @@ pub(crate) fn find_window_by_exe(exe: &str) -> Option<HWND> {
         .max_by_key(|&h| area(h))
 }
 
-/// Finestra in primo piano se copre tutto il suo monitor (e non è il desktop), con il suo eseguibile.
+/// Finestra in primo piano se copre tutto il suo monitor (e non è il desktop), con il suo eseguibile
+/// (vuoto se il processo è protetto e non si lascia interrogare).
 pub(crate) fn fullscreen_foreground() -> Option<(HWND, String)> {
     // SAFETY: nessun puntatore.
     let hwnd = unsafe { GetForegroundWindow() };
@@ -240,7 +241,7 @@ pub(crate) fn fullscreen_foreground() -> Option<(HWND, String)> {
     if !covers {
         return None;
     }
-    Some((hwnd, window_exe(hwnd)?))
+    Some((hwnd, window_exe(hwnd).unwrap_or_default()))
 }
 
 #[cfg(test)]
@@ -255,6 +256,7 @@ mod tests {
         let (w, h) = rect_size(monitor_rect(list[0]).unwrap());
         assert!(w >= 640 && h >= 480, "{w}×{h}");
         let dev = device_for_monitor(0).unwrap();
+        println!("monitor principale {w}×{h} su {dev:?}");
         assert_ne!(dev.adapter_luid, 0);
         assert!(device_for_monitor(99).is_err());
     }

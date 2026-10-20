@@ -256,7 +256,8 @@ impl Capture {
 }
 
 // SAFETY: HWND/HMONITOR sono identificatori di sistema validi da qualunque thread; le sessioni WGC
-// sono oggetti agili. Watch passa al thread di sorveglianza e da lì non esce.
+// sono oggetti agili; le risorse D3D11 della sonda sono free-threaded e il contesto immediato è
+// protetto da SetMultithreadProtected. Watch passa al thread di sorveglianza e da lì non esce.
 unsafe impl Send for Watch {}
 
 const POLL: Duration = Duration::from_millis(250);
