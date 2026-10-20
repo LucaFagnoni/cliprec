@@ -133,26 +133,23 @@ pub fn verify_sha256(path: &Path, expected: &str) -> Result<()> {
     Ok(())
 }
 
-/// Cartella `Microsoft.VC143.CRT` più recente di Visual Studio 2022: Build Tools in `Program Files
-/// (x86)` (questo PC) o le edizioni complete in `Program Files` (runner di GitHub Actions).
+/// Cartella `Microsoft.VC14x.CRT` (runtime VC++ x64) più recente di Visual Studio: Build Tools in
+/// `Program Files (x86)` (questo PC) o edizioni complete in `Program Files` (runner di GitHub
+/// Actions), di qualunque versione (2022, 18…). Le DLL hanno sempre i nomi `*140*.dll`.
 fn crt_dir() -> Result<PathBuf> {
+    let ls = |p: PathBuf| std::fs::read_dir(p).into_iter().flatten().flatten().map(|e| e.path());
     let roots = ["ProgramFiles(x86)", "ProgramFiles"].map(|v| std::env::var_os(v).map(PathBuf::from));
-    let editions = roots
+    let mut found: Vec<PathBuf> = roots
         .into_iter()
         .flatten()
-        .flat_map(|pf| std::fs::read_dir(pf.join("Microsoft Visual Studio").join("2022")).into_iter().flatten().flatten());
-    let mut found = Vec::new();
-    for edition in editions {
-        let msvc = edition.path().join("VC").join("Redist").join("MSVC");
-        for ver in std::fs::read_dir(&msvc).into_iter().flatten().flatten() {
-            let crt = ver.path().join("x64").join("Microsoft.VC143.CRT");
-            if crt.is_dir() {
-                found.push(crt);
-            }
-        }
-    }
+        .flat_map(|pf| ls(pf.join("Microsoft Visual Studio")))
+        .flat_map(ls)
+        .flat_map(|edition| ls(edition.join("VC").join("Redist").join("MSVC")))
+        .flat_map(|ver| ls(ver.join("x64")))
+        .filter(|d| d.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("Microsoft.VC14") && n.ends_with(".CRT")))
+        .collect();
     found.sort();
-    found.pop().context("Microsoft.VC143.CRT non trovata nei Build Tools di Visual Studio 2022")
+    found.pop().context("Microsoft.VC14x.CRT non trovata in nessuna Visual Studio")
 }
 
 /// Copia accanto agli exe le DLL del runtime VC++ importate (distribuzione app-local, consentita
@@ -249,6 +246,13 @@ mod tests {
 
     /// Regressione M1: l'installer scarica il redistributable e lo lancia solo se manca.
     const SAMPLE: &str = include_str!("../../installer/ffmpeg-version.txt");
+
+    #[test]
+    fn vc_runtime_is_found() {
+        let crt = crt_dir().unwrap();
+        println!("{}", crt.display());
+        assert!(crt.join("vcruntime140.dll").exists());
+    }
 
     #[test]
     fn sha256_is_verified() {

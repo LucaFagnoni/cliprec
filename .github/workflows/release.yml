@@ -47,7 +47,7 @@ jobs:
 
       - name: Cache della FFmpeg ridotta
         id: ffmpeg
-        uses: actions/cache@v6
+        uses: actions/cache/restore@v6
         with:
           path: third_party/ffmpeg-ridotta
           key: ffmpeg-ridotta-${{ hashFiles('xtask/src/ridotta.rs', 'scripts/ffmpeg-ridotta.sh') }}
@@ -55,6 +55,14 @@ jobs:
       - name: FFmpeg ridotta (circa 10 minuti)
         if: steps.ffmpeg.outputs.cache-hit != 'true'
         run: cargo xtask ffmpeg-ridotta
+
+      # Salvata subito: un errore nei passi dopo non costringe a ricompilarla.
+      - name: Salva la FFmpeg ridotta
+        if: steps.ffmpeg.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: third_party/ffmpeg-ridotta
+          key: ${{ steps.ffmpeg.outputs.cache-primary-key }}
 
       - name: Distribuzione
         run: cargo xtask dist
