@@ -1,0 +1,512 @@
+// Finestra impostazioni di ClipRec. Le stringhe vengono da `global T`, riempito da Rust in
+// italiano o inglese (src/i18n.rs); la logica vive in Rust (src/model.rs), qui solo la vista.
+import { TabWidget, ComboBox, CheckBox, SpinBox, Slider, LineEdit, Button, ScrollView, AboutSlint, VerticalBox, HorizontalBox } from "std-widgets.slint";
+
+export global T {
+    in property <string> window-title;
+    in property <string> tab-video;
+    in property <string> tab-audio;
+    in property <string> tab-hotkeys;
+    in property <string> tab-saving;
+    in property <string> tab-advanced;
+    in property <string> tab-about;
+    in property <string> video-enabled;
+    in property <string> video-source;
+    in property <string> video-target;
+    in property <string> video-codec;
+    in property <string> video-resolution;
+    in property <string> video-fps;
+    in property <string> video-quality;
+    in property <string> video-max-bitrate;
+    in property <string> auto;
+    in property <string> native;
+    in property <string> src-monitor;
+    in property <string> src-window;
+    in property <string> src-game;
+    in property <string> pick;
+    in property <string> audio-mode;
+    in property <string> mode-separate;
+    in property <string> mode-merged;
+    in property <string> add-mix;
+    in property <string> add-source;
+    in property <string> sources-hint;
+    in property <string> kind-app;
+    in property <string> kind-input;
+    in property <string> kind-output;
+    in property <string> placeholder-name;
+    in property <string> placeholder-app;
+    in property <string> placeholder-device;
+    in property <string> hotkey-video;
+    in property <string> hotkey-audio;
+    in property <string> hotkey-press;
+    in property <string> hotkey-clear;
+    in property <string> hotkey-hint;
+    in property <string> clip-video-seconds;
+    in property <string> clip-audio-seconds;
+    in property <string> folder;
+    in property <string> folder-default;
+    in property <string> browse;
+    in property <string> template;
+    in property <string> template-hint;
+    in property <string> audio-format;
+    in property <string> fmt-flac;
+    in property <string> fmt-wav;
+    in property <string> fmt-mka;
+    in property <string> container;
+    in property <string> ram-max;
+    in property <string> ram-auto;
+    in property <string> ram-estimate;
+    in property <string> lock-pages;
+    in property <string> gpu-priority;
+    in property <string> prio-high;
+    in property <string> prio-normal;
+    in property <string> language;
+    in property <string> lang-auto;
+    in property <string> start-windows;
+    in property <string> sound;
+    in property <string> notifications;
+    in property <string> capture-cursor;
+    in property <string> any-fullscreen;
+    in property <string> games;
+    in property <string> games-hint;
+    in property <string> about-text;
+    in property <string> save;
+    in property <string> cancel;
+    in property <string> test;
+    in property <string> status-title;
+}
+
+export struct Form {
+    video-enabled: bool,
+    source-kind: int,
+    source-target: string,
+    codec: int,
+    resolution: int,
+    fps: int,
+    quality: int,
+    max-bitrate: string,
+    capture-cursor: bool,
+    any-fullscreen: bool,
+    games: string,
+    audio-mode: int,
+    add-mix: bool,
+    hotkey-video: string,
+    hotkey-audio: string,
+    video-seconds: int,
+    audio-seconds: int,
+    folder: string,
+    template: string,
+    audio-format: int,
+    container: int,
+    max-mb: string,
+    lock-pages: bool,
+    gpu-priority: int,
+    language: int,
+    start-with-windows: bool,
+    sound: bool,
+    notifications: bool,
+}
+
+export struct SourceRow {
+    name: string,
+    kind: int,
+    target: string,
+    volume: float,
+}
+
+component FormRow inherits HorizontalLayout {
+    in property <string> label;
+    spacing: 12px;
+    alignment: start;
+    Text {
+        text: root.label;
+        width: 190px;
+        vertical-alignment: center;
+        wrap: word-wrap;
+    }
+}
+
+// Campo che cattura la combinazione premuta mentre ha il focus.
+component HotkeyField inherits Rectangle {
+    in property <string> value;
+    callback key(string, bool, bool, bool, bool);
+    callback mouse(int, bool, bool, bool, bool);
+    callback clear();
+    min-width: 220px;
+    height: 32px;
+    border-width: fs.has-focus ? 2px : 1px;
+    border-color: fs.has-focus ? #2f7de1 : #808080;
+    border-radius: 4px;
+    fs := FocusScope {
+        key-pressed(e) => {
+            root.key(e.text, e.modifiers.control, e.modifiers.alt, e.modifiers.shift, e.modifiers.meta);
+            accept
+        }
+        ta := TouchArea {
+            pointer-event(e) => {
+                if (e.kind == PointerEventKind.down) {
+                    fs.focus();
+                    if (e.button == PointerEventButton.back) {
+                        root.mouse(4, e.modifiers.control, e.modifiers.alt, e.modifiers.shift, e.modifiers.meta);
+                    } else if (e.button == PointerEventButton.forward) {
+                        root.mouse(5, e.modifiers.control, e.modifiers.alt, e.modifiers.shift, e.modifiers.meta);
+                    }
+                }
+            }
+        }
+        Text {
+            x: 8px;
+            text: fs.has-focus ? T.hotkey-press : root.value;
+            vertical-alignment: center;
+            color: fs.has-focus ? #2f7de1 : (self.text == "" ? #808080 : black);
+        }
+    }
+}
+
+export component SettingsWindow inherits Window {
+    title: T.window-title;
+    preferred-width: 900px;
+    preferred-height: 680px;
+    min-width: 820px;
+    min-height: 600px;
+
+    in-out property <Form> f;
+    in-out property <[SourceRow]> sources;
+    in property <[string]> monitors;
+    in property <[string]> windows-list;
+    in property <[string]> apps;
+    in property <[string]> inputs;
+    in property <[string]> outputs;
+    in property <string> ram-estimate;
+    in property <string> hotkey-warning;
+    in property <string> message;
+    in property <bool> message-error;
+    in property <string> status-text;
+    in property <bool> status-online;
+
+    callback save();
+    callback cancel();
+    callback test-clip();
+    callback browse-folder();
+    callback language-changed();
+    callback source-changed(int, SourceRow);
+    callback source-add();
+    callback source-remove(int);
+    callback source-move(int, int);
+    callback source-pick(int, int, int);
+    callback video-target-pick(int);
+    callback hotkey-key(int, string, bool, bool, bool, bool);
+    callback hotkey-mouse(int, int, bool, bool, bool, bool);
+
+    VerticalLayout {
+        padding: 12px;
+        spacing: 8px;
+
+        TabWidget {
+            Tab {
+                title: T.tab-video;
+                VerticalLayout {
+                    padding-top: 12px;
+                    spacing: 10px;
+                    alignment: start;
+                    FormRow {
+                        label: "";
+                        CheckBox { text: T.video-enabled; checked <=> root.f.video-enabled; }
+                    }
+                    FormRow {
+                        label: T.video-source;
+                        ComboBox {
+                            model: [T.auto, T.src-monitor, T.src-window, T.src-game];
+                            current-index <=> root.f.source-kind;
+                            width: 200px;
+                        }
+                    }
+                    FormRow {
+                        label: T.video-target;
+                        visible: root.f.source-kind > 0;
+                        LineEdit { text <=> root.f.source-target; width: 280px; enabled: root.f.video-enabled; }
+                        ComboBox {
+                            model: root.f.source-kind == 1 ? root.monitors : (root.f.source-kind == 2 ? root.windows-list : root.apps);
+                            current-index: -1;
+                            width: 200px;
+                            selected(v) => {
+                                root.video-target-pick(self.current-index);
+                                self.current-index = -1;
+                            }
+                        }
+                    }
+                    FormRow {
+                        label: T.video-codec;
+                        ComboBox { model: [T.auto, "H.264", "HEVC", "AV1"]; current-index <=> root.f.codec; width: 200px; }
+                    }
+                    FormRow {
+                        label: T.video-resolution;
+                        ComboBox { model: [T.native, "1440p", "1080p", "720p"]; current-index <=> root.f.resolution; width: 200px; }
+                    }
+                    FormRow {
+                        label: T.video-fps;
+                        ComboBox { model: ["30", "60", "120", "144"]; current-index <=> root.f.fps; width: 200px; }
+                    }
+                    FormRow {
+                        label: T.video-quality;
+                        Slider {
+                            minimum: 10;
+                            maximum: 40;
+                            value: root.f.quality;
+                            changed(v) => { root.f.quality = Math.round(v); }
+                            width: 280px;
+                        }
+                        Text { text: root.f.quality; vertical-alignment: center; }
+                    }
+                    FormRow {
+                        label: T.video-max-bitrate;
+                        LineEdit { text <=> root.f.max-bitrate; placeholder-text: T.auto; width: 200px; }
+                    }
+                }
+            }
+            Tab {
+                title: T.tab-audio;
+                VerticalLayout {
+                    padding-top: 12px;
+                    spacing: 8px;
+                    FormRow {
+                        label: T.audio-mode;
+                        ComboBox { model: [T.mode-separate, T.mode-merged]; current-index <=> root.f.audio-mode; width: 260px; }
+                        CheckBox {
+                            text: T.add-mix;
+                            checked <=> root.f.add-mix;
+                            enabled: root.f.audio-mode == 0;
+                        }
+                    }
+                    Text { text: T.sources-hint; color: #808080; wrap: word-wrap; }
+                    ScrollView {
+                        VerticalLayout {
+                            spacing: 6px;
+                            alignment: start;
+                            for r[i] in root.sources: HorizontalLayout {
+                                spacing: 6px;
+                                LineEdit {
+                                    text: r.name;
+                                    placeholder-text: T.placeholder-name;
+                                    width: 130px;
+                                    edited(t) => { root.source-changed(i, { name: t, kind: r.kind, target: r.target, volume: r.volume }); }
+                                }
+                                ComboBox {
+                                    model: [T.kind-app, T.kind-input, T.kind-output];
+                                    current-index: r.kind;
+                                    width: 110px;
+                                    selected(v) => {
+                                        root.source-changed(i, { name: r.name, kind: self.current-index, target: "", volume: r.volume });
+                                    }
+                                }
+                                LineEdit {
+                                    text: r.target;
+                                    placeholder-text: r.kind == 0 ? T.placeholder-app : T.placeholder-device;
+                                    horizontal-stretch: 1;
+                                    edited(t) => { root.source-changed(i, { name: r.name, kind: r.kind, target: t, volume: r.volume }); }
+                                }
+                                ComboBox {
+                                    model: r.kind == 0 ? root.apps : (r.kind == 1 ? root.inputs : root.outputs);
+                                    current-index: -1;
+                                    width: 120px;
+                                    selected(v) => {
+                                        root.source-pick(i, r.kind, self.current-index);
+                                        self.current-index = -1;
+                                    }
+                                }
+                                Slider {
+                                    minimum: 0;
+                                    maximum: 200;
+                                    value: r.volume * 100;
+                                    width: 90px;
+                                    changed(v) => { root.source-changed(i, { name: r.name, kind: r.kind, target: r.target, volume: Math.round(v) / 100 }); }
+                                }
+                                Text { text: Math.round(r.volume * 100) + "%"; width: 40px; vertical-alignment: center; }
+                                Button { text: "▲"; width: 34px; enabled: i > 0; clicked => { root.source-move(i, -1); } }
+                                Button { text: "▼"; width: 34px; enabled: i < root.sources.length - 1; clicked => { root.source-move(i, 1); } }
+                                Button { text: "✕"; width: 34px; clicked => { root.source-remove(i); } }
+                            }
+                        }
+                    }
+                    HorizontalLayout {
+                        alignment: start;
+                        Button { text: T.add-source; enabled: root.sources.length < 8; clicked => { root.source-add(); } }
+                    }
+                }
+            }
+            Tab {
+                title: T.tab-hotkeys;
+                VerticalLayout {
+                    padding-top: 12px;
+                    spacing: 12px;
+                    alignment: start;
+                    FormRow {
+                        label: T.hotkey-video;
+                        HotkeyField {
+                            value: root.f.hotkey-video;
+                            key(t, c, a, s, m) => { root.hotkey-key(0, t, c, a, s, m); }
+                            mouse(b, c, a, s, m) => { root.hotkey-mouse(0, b, c, a, s, m); }
+                        }
+                        Button { text: T.hotkey-clear; clicked => { root.f.hotkey-video = ""; } }
+                    }
+                    FormRow {
+                        label: T.hotkey-audio;
+                        HotkeyField {
+                            value: root.f.hotkey-audio;
+                            key(t, c, a, s, m) => { root.hotkey-key(1, t, c, a, s, m); }
+                            mouse(b, c, a, s, m) => { root.hotkey-mouse(1, b, c, a, s, m); }
+                        }
+                        Button { text: T.hotkey-clear; clicked => { root.f.hotkey-audio = ""; } }
+                    }
+                    Text { text: T.hotkey-hint; color: #808080; wrap: word-wrap; }
+                    Text { text: root.hotkey-warning; color: #d08000; wrap: word-wrap; visible: root.hotkey-warning != ""; }
+                }
+            }
+            Tab {
+                title: T.tab-saving;
+                VerticalLayout {
+                    padding-top: 12px;
+                    spacing: 10px;
+                    alignment: start;
+                    FormRow {
+                        label: T.clip-video-seconds;
+                        SpinBox { minimum: 1; maximum: 3600; value <=> root.f.video-seconds; width: 140px; }
+                    }
+                    FormRow {
+                        label: T.clip-audio-seconds;
+                        SpinBox { minimum: 1; maximum: 7200; value <=> root.f.audio-seconds; width: 140px; }
+                    }
+                    FormRow {
+                        label: T.folder;
+                        LineEdit { text <=> root.f.folder; placeholder-text: T.folder-default; horizontal-stretch: 1; }
+                        Button { text: T.browse; clicked => { root.browse-folder(); } }
+                    }
+                    FormRow {
+                        label: T.template;
+                        LineEdit { text <=> root.f.template; horizontal-stretch: 1; }
+                    }
+                    FormRow {
+                        label: "";
+                        Text { text: T.template-hint; color: #808080; wrap: word-wrap; }
+                    }
+                    FormRow {
+                        label: T.audio-format;
+                        ComboBox { model: [T.fmt-flac, T.fmt-wav, T.fmt-mka]; current-index <=> root.f.audio-format; width: 260px; }
+                    }
+                    FormRow {
+                        label: T.container;
+                        ComboBox { model: ["MP4", "MKV"]; current-index <=> root.f.container; width: 140px; }
+                    }
+                }
+            }
+            Tab {
+                title: T.tab-advanced;
+                ScrollView {
+                    VerticalLayout {
+                        padding-top: 12px;
+                        spacing: 10px;
+                        alignment: start;
+                        FormRow {
+                            label: T.ram-max;
+                            LineEdit { text <=> root.f.max-mb; placeholder-text: T.ram-auto; width: 200px; }
+                        }
+                        FormRow {
+                            label: T.ram-estimate;
+                            Text { text: root.ram-estimate; vertical-alignment: center; font-weight: 700; }
+                        }
+                        FormRow {
+                            label: "";
+                            CheckBox { text: T.lock-pages; checked <=> root.f.lock-pages; }
+                        }
+                        FormRow {
+                            label: T.gpu-priority;
+                            ComboBox { model: [T.prio-high, T.prio-normal]; current-index <=> root.f.gpu-priority; width: 200px; }
+                        }
+                        FormRow {
+                            label: T.language;
+                            ComboBox {
+                                model: [T.lang-auto, "Italiano", "English"];
+                                current-index <=> root.f.language;
+                                width: 200px;
+                                selected(v) => { root.language-changed(); }
+                            }
+                        }
+                        FormRow {
+                            label: "";
+                            CheckBox { text: T.start-windows; checked <=> root.f.start-with-windows; }
+                        }
+                        FormRow {
+                            label: "";
+                            CheckBox { text: T.sound; checked <=> root.f.sound; }
+                        }
+                        FormRow {
+                            label: "";
+                            CheckBox { text: T.notifications; checked <=> root.f.notifications; }
+                        }
+                        FormRow {
+                            label: "";
+                            CheckBox { text: T.capture-cursor; checked <=> root.f.capture-cursor; }
+                        }
+                        FormRow {
+                            label: "";
+                            CheckBox { text: T.any-fullscreen; checked <=> root.f.any-fullscreen; }
+                        }
+                        FormRow {
+                            label: T.games;
+                            LineEdit { text <=> root.f.games; placeholder-text: T.games-hint; horizontal-stretch: 1; }
+                        }
+                    }
+                }
+            }
+            Tab {
+                title: T.tab-about;
+                VerticalLayout {
+                    padding-top: 12px;
+                    spacing: 12px;
+                    alignment: start;
+                    Text { text: T.about-text; wrap: word-wrap; }
+                    AboutSlint { preferred-height: 220px; }
+                }
+            }
+        }
+
+        // Pannello di stato dal vivo (named pipe verso il core).
+        Rectangle {
+            height: 40px;
+            border-width: 1px;
+            border-color: #80808080;
+            border-radius: 4px;
+            HorizontalLayout {
+                padding-left: 10px;
+                padding-right: 10px;
+                spacing: 10px;
+                Text {
+                    text: root.status-text;
+                    vertical-alignment: center;
+                    color: root.status-online ? #2e9e4f : #808080;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                }
+                Button {
+                    text: T.test;
+                    enabled: root.status-online;
+                    y: 4px;
+                    clicked => { root.test-clip(); }
+                }
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 10px;
+            Text {
+                text: root.message;
+                color: root.message-error ? #d03030 : #2e9e4f;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+                wrap: word-wrap;
+            }
+            Button { text: T.save; primary: true; clicked => { root.save(); } }
+            Button { text: T.cancel; clicked => { root.cancel(); } }
+        }
+    }
+}
