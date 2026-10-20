@@ -623,8 +623,8 @@ mod tests {
         let mut src = CaptureSource::new(device, Target::Window(title.clone()), false);
         let rx = collect(&mut src, 30);
         assert!(matches!(src.stats().state, SourceState::Waiting(_)));
-        // Attese sullo stato fino a 3 s invece di tempi fissi: sotto carico (altri test GPU in parallelo)
-        // la sorveglianza trova la finestra più tardi.
+        // Permanenze minime fisse (la soglia dei frame sotto le conta), poi attese sullo stato fino a 3 s:
+        // sotto carico (altri test GPU in parallelo) la sorveglianza trova la finestra più tardi.
         let wait_for = |src: &CaptureSource, ok: &dyn Fn(&SourceState) -> bool| {
             let deadline = std::time::Instant::now() + Duration::from_secs(3);
             while !ok(&src.stats().state) && std::time::Instant::now() < deadline {
@@ -634,9 +634,11 @@ mod tests {
         };
         for _ in 0..2 {
             let win = TestWindow::open(&title, 240, 180);
+            std::thread::sleep(Duration::from_millis(700));
             let state = wait_for(&src, &|s| *s == SourceState::Running);
             assert_eq!(state, SourceState::Running);
             drop(win);
+            std::thread::sleep(Duration::from_millis(500));
             let state = wait_for(&src, &|s| matches!(s, SourceState::Waiting(_)));
             assert!(matches!(state, SourceState::Waiting(_)), "{state:?}");
         }
