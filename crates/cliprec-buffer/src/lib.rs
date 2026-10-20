@@ -29,6 +29,10 @@ use crate::arena::ChunkRing;
 use crate::audio::Track;
 
 const VIDEO_CHUNK: usize = 4 << 20;
+/// Video conservato oltre `video_seconds`, oltre al GOP in corso.
+const RETAIN_MARGIN_SECS: f64 = 0.5;
+/// Frazione della stima dal tetto di bitrate preallocata subito.
+const PREALLOC_DIVISOR: usize = 4;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct BufferConfig {
@@ -104,6 +108,22 @@ impl Video {
     }
 }
 
+/// Audio di una clip non ancora decompresso: riferimenti ai blocchi FLAC di ogni traccia.
+pub struct AudioRefs {
+    start: QpcTime,
+    frames: usize,
+    tracks: Vec<audio::TrackCopy>,
+}
+
+impl AudioRefs {
+    /// Decomprime e taglia tutte le tracce allo stesso campione e alla stessa lunghezza, con
+    /// silenzio dove mancano dati.
+    pub fn render(self) -> AudioSnapshot {
+        let (start, frames) = (self.start, self.frames);
+        AudioSnapshot { start, tracks: self.tracks.into_iter().map(|c| c.render(start, frames)).collect() }
+    }
+}
+
 /// Buffer di replay condiviso (`Arc<ReplayBuffer>`) tra encoder, motore audio e salvataggio.
 pub struct ReplayBuffer {
     config: BufferConfig,
@@ -138,7 +158,9 @@ impl ReplayBuffer {
     }
 
     /// Imposta i parametri dello stream video. Se cambiano, i pacchetti vecchi (non più
-    /// compatibili) vengono scartati. Prealloca l'arena stimata dal bitrate.
+    /// compatibili) vengono scartati. Prealloca un quarto della stima dal tetto di bitrate (con
+    /// qualità costante il flusso reale sta di solito molto sotto il tetto); oltre, l'arena cresce a
+    /// blocchi da 4 MiB, bloccati e poi riciclati, fino a `max_bytes`.
     pub fn set_video_params(&self, params: VideoStreamParams) {
         let mut v = lock(&self.video);
         if v.params.as_ref() == Some(&params) {
@@ -148,7 +170,7 @@ impl ReplayBuffer {
         v.keyframes.clear();
         v.memory_limited = false;
         let estimate = BufferConfig::estimate_bytes(params.bit_rate, self.config.video_seconds, 0.0, 0);
-        v.ring.reserve(estimate.min(self.config.max_bytes));
+        v.ring.reserve((estimate / PREALLOC_DIVISOR).min(self.config.max_bytes));
         v.params = Some(params);
     }
 
@@ -170,8 +192,10 @@ impl ReplayBuffer {
             v.keyframes.push_back(seq);
         }
         v.newest_end = v.newest_end.max(p.pts.add_hns(p.duration.max(0)));
-        // Durata: scarta il GOP più vecchio se il successivo copre già i secondi richiesti.
-        let oldest = v.newest_end.add_hns(-secs_to_hns(self.config.video_seconds));
+        // Durata: scarta il GOP più vecchio se il successivo copre già i secondi richiesti più
+        // mezzo secondo di margine (la clip si misura dall'ultimo frame completo, che può essere
+        // qualche frame prima di `newest_end`).
+        let oldest = v.newest_end.add_hns(-secs_to_hns(self.config.video_seconds + RETAIN_MARGIN_SECS));
         while v.keyframes.len() > 2 && v.keyframes.get(1).and_then(|&k| v.pts(k)).is_some_and(|t| t <= oldest) {
             v.evict_gop();
             v.memory_limited = false;
@@ -241,22 +265,25 @@ impl ReplayBuffer {
         (!packets.is_empty()).then_some(VideoSnapshot { params, packets })
     }
 
-    /// Tracce audio da `start` a `end`, tagliate tutte allo stesso campione e lunghe uguali,
-    /// silenzio dove mancano dati. Se nessuna traccia ha dati così vecchi, `start` avanza al
-    /// primo campione disponibile (lo dice `AudioSnapshot::start`). `None` senza tracce o dati.
+    /// Tracce audio da `start` a `end`: scorciatoia per `snapshot_audio_refs(..)?.render()`.
     pub fn snapshot_audio(&self, start: QpcTime, end: QpcTime) -> Option<AudioSnapshot> {
+        Some(self.snapshot_audio_refs(start, end)?.render())
+    }
+
+    /// Riferimenti ai blocchi FLAC da `start` a `end`, presi sotto lock senza copiare né
+    /// decomprimere (da chiamare sul thread del motore); la decompressione la fa
+    /// [`AudioRefs::render`] sul thread di salvataggio. Se nessuna traccia ha dati così vecchi,
+    /// `start` avanza al primo campione disponibile. `None` senza tracce o dati.
+    pub fn snapshot_audio_refs(&self, start: QpcTime, end: QpcTime) -> Option<AudioRefs> {
         let tracks = self.tracks.read().unwrap_or_else(|e| e.into_inner());
         let earliest = tracks.iter().filter_map(|t| lock(t).first()).min()?;
         let start = start.max(earliest);
         if end <= start {
             return None;
         }
-        // Sotto lock solo i riferimenti ai blocchi compressi, una traccia alla volta.
-        let copies: Vec<_> = tracks.iter().map(|t| lock(t).copy(start, end)).collect();
-        drop(tracks);
         let frames = usize::try_from(hns_to_frames(end.hns_since(start))).ok()?;
-        let tracks = copies.into_iter().map(|c| c.render(start, frames)).collect();
-        Some(AudioSnapshot { start, tracks })
+        let tracks = tracks.iter().map(|t| lock(t).copy(start, end)).collect();
+        Some(AudioRefs { start, frames, tracks })
     }
 
     pub fn stats(&self) -> BufferStats {

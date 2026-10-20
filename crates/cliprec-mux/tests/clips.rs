@@ -301,6 +301,36 @@ fn video_clip_mp4_and_mkv() {
     assert_eq!(ffprobe(&saved.path, &[])["streams"].as_array().unwrap().len(), 1);
 }
 
+/// Due clip nello stesso istante con lo stesso nome: due file distinti e validi, nessun `.part` comune.
+#[test]
+fn parallel_clips_with_the_same_name() {
+    let b = filled_buffer();
+    let end = pts(6 * FPS);
+    let video = b.snapshot_video(3.0, end).unwrap();
+    let audio = b.snapshot_audio(video.start().unwrap(), end).unwrap();
+    let base = out_dir().join("parallel");
+    clean(&base);
+    let _ = std::fs::remove_file(PathBuf::from(format!("{} (2).mp4", base.display())));
+    let saved: Vec<_> = std::thread::scope(|s| {
+        let handles: Vec<_> = (0..2)
+            .map(|_| s.spawn(|| write_video_clip(&base, &video, Some(&audio), &VideoClipOptions::default()).unwrap()))
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    assert_ne!(saved[0].path, saved[1].path);
+    for c in &saved {
+        check_video_file(&c.path, 3.0, "h264");
+    }
+    let leftovers = std::fs::read_dir(out_dir()).unwrap().filter_map(|e| e.ok()).any(|e| {
+        let n = e.file_name().to_string_lossy().into_owned();
+        n.starts_with("parallel") && n.ends_with(".part")
+    });
+    assert!(!leftovers, "nessun .part rimasto");
+    for c in saved {
+        let _ = std::fs::remove_file(c.path);
+    }
+}
+
 /// HEVC con frame riordinati: dopo aver portato a zero il primo pts, i primi dts sono negativi.
 #[test]
 fn video_clip_with_reordered_frames() {

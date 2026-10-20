@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 8e28a9dcf291ec7ceb19c5b42dac7422409eb28aa02ac98e277bfd471acc5919 # shrinks to gops = [(1, 1), (17, 1), (16, 1), (5, 1), (32, 1), (34, 1), (2, 1), (22, 1)], video_seconds = 3.994866661847433, cap_mb = 8, cut = 2.5602762809242323

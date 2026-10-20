@@ -14,7 +14,16 @@ use std::sync::Arc;
 
 use cliprec_core::PacketData;
 
-struct Chunk(Box<[u8]>);
+/// Byte del blocco e se le sue pagine sono bloccate in RAM (da sbloccare alla distruzione).
+struct Chunk(Box<[u8]>, bool);
+
+impl Drop for Chunk {
+    fn drop(&mut self) {
+        if self.1 {
+            crate::lock::unlock(&self.0);
+        }
+    }
+}
 
 /// Una fetta di un blocco condivisa con uno snapshot.
 struct Slice {
@@ -133,12 +142,13 @@ impl<M> ChunkRing<M> {
 
     fn alloc(&mut self, size: usize) -> Arc<Chunk> {
         let buf = vec![0u8; size].into_boxed_slice();
-        if self.lock_pages && !self.lock_failed && !crate::lock::lock(&buf) {
+        let locked = self.lock_pages && !self.lock_failed && crate::lock::lock(&buf);
+        if self.lock_pages && !locked && !self.lock_failed {
             self.lock_failed = true;
             tracing::warn!("VirtualLock non riuscito: il buffer può finire nel file di paging");
         }
         self.allocated += size;
-        Arc::new(Chunk(buf))
+        Arc::new(Chunk(buf, locked))
     }
 
     /// Accoda `data` come nuova voce.

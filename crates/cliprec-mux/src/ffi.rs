@@ -42,8 +42,12 @@ pub(crate) enum AudioCodec {
 
 pub(crate) struct Track<'a> {
     pub name: &'a str,
-    /// f32 stereo interleaved a 48 kHz, già allineati all'inizio del file.
+    /// f32 stereo interleaved a 48 kHz.
     pub samples: &'a [f32],
+    /// Il frame `i` del file è il frame `i + skip` di `samples` (silenzio fuori dai dati).
+    pub skip: i64,
+    /// Lunghezza della traccia nel file, in frame.
+    pub frames: usize,
 }
 
 /// Video da copiare senza ricodifica; `start` diventa il tempo zero del file.
@@ -207,7 +211,7 @@ pub(crate) fn write(
         let handles: Vec<_> = jobs
             .into_iter()
             .zip(tracks)
-            .map(|((enc, tb, index), t)| scope.spawn(move || encode_track(enc, tb, index, codec, t.samples)))
+            .map(|((enc, tb, index), t)| scope.spawn(move || encode_track(enc, tb, index, codec, t)))
             .collect();
         handles
             .into_iter()
@@ -386,7 +390,7 @@ fn encode_track(
     st_tb: AVRational,
     index: c_int,
     codec: AudioCodec,
-    samples: &[f32],
+    track: &Track<'_>,
 ) -> Result<Vec<Pending>, MuxError> {
     let ctx = enc.0;
     // SAFETY: encoder aperto.
@@ -428,26 +432,27 @@ fn encode_track(
             packets.push(Pending { packet: pkt, secs: secs(dts, st_tb) });
         }
     };
-    for (n, chunk) in samples.chunks(frame_size * CHANNELS).enumerate() {
-        let count = chunk.len() / CHANNELS;
+    for pos in (0..track.frames).step_by(frame_size) {
+        let count = frame_size.min(track.frames - pos);
+        let input = (pos..pos + count).map(|i| crate::frame_at(track.samples, track.skip, i));
         // SAFETY: frame con buffer di `frame_size` campioni per canale (count ≤ frame_size);
         // make_writable garantisce che l'encoder non ne tenga più un riferimento.
         unsafe {
             check("av_frame_make_writable", av_frame_make_writable(frame.0))?;
             (*frame.0).nb_samples = count as c_int;
-            (*frame.0).pts = (n * frame_size) as i64;
+            (*frame.0).pts = pos as i64;
             match codec {
                 AudioCodec::Aac { .. } => {
                     let l = std::slice::from_raw_parts_mut((*frame.0).data[0].cast::<f32>(), count);
                     let r = std::slice::from_raw_parts_mut((*frame.0).data[1].cast::<f32>(), count);
-                    for (i, s) in chunk.chunks_exact(CHANNELS).enumerate() {
-                        l[i] = s[0];
-                        r[i] = s[1];
+                    for ((l, r), [a, b]) in l.iter_mut().zip(r.iter_mut()).zip(input) {
+                        *l = a;
+                        *r = b;
                     }
                 }
                 AudioCodec::Flac | AudioCodec::PcmS24 => {
                     let d = std::slice::from_raw_parts_mut((*frame.0).data[0].cast::<i32>(), count * CHANNELS);
-                    for (dst, &x) in d.iter_mut().zip(chunk) {
+                    for (dst, x) in d.iter_mut().zip(input.flatten()) {
                         *dst = ((x.clamp(-1.0, 1.0) * S24_MAX).round() as i32) << 8;
                     }
                 }
