@@ -17,6 +17,7 @@ scripts\gate.ps1 -Crate cliprec-xxx                  # clippy + test di un crate
 cargo xtask probe <clip> [--duration 60 --tracks 2 --names "A,B" --fps 60]   # validazione ffprobe
 cargo xtask sync <clip>                              # sincronia lampo/bip (sorgenti sintetiche)
 cargo xtask dist                                     # cartella di distribuzione in target/dist
+python -I scripts/icone.py                           # icone (PNG, ICO, .res, tray) da assets/cliprec.png
 target\release\cliprec-app.exe --prova 10 --sintetica --cartella <dir>   # clip video+audio di prova
 target\release\cliprec-app.exe --sessione-lunga <minuti> <dir>          # CSV di memoria e frame (config da CLIPREC_CONFIG)
 cargo xtask mem <pid|cliprec-app.exe>                # memoria per categoria (immagini, heap, stack, privata, bloccata)

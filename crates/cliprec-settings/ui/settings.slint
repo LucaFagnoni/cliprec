@@ -438,6 +438,7 @@ component HotkeyField inherits Rectangle {
 
 export component SettingsWindow inherits Window {
     title: T.window-title;
+    icon: @image-url("../../../assets/icon/cliprec-256.png");
     preferred-width: 1060px;
     preferred-height: 720px;
     min-width: 920px;
@@ -492,12 +493,10 @@ export component SettingsWindow inherits Window {
                 padding-left: 12px;
                 padding-bottom: 18px;
                 spacing: 12px;
-                Rectangle {
-                    width: 28px;
-                    height: 28px;
-                    border-radius: 7px;
-                    background: #e5484d;
-                    Rectangle { width: 10px; height: 10px; border-radius: 5px; background: white; }
+                Image {
+                    source: @image-url("../../../assets/icon/cliprec-64.png");
+                    width: 32px;
+                    height: 32px;
                 }
                 VerticalLayout {
                     alignment: center;

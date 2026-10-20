@@ -13,7 +13,7 @@
 AppId={{B6E1B0A4-5C1D-4E55-9E43-0C11C1EC0001}
 AppName={#AppName}
 AppVersion={#AppVersion}
-AppPublisher=Luca
+AppPublisher=ClipRec
 DefaultDirName={localappdata}\Programs\{#AppName}
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
@@ -26,6 +26,7 @@ OutputBaseFilename=ClipRec-Setup
 Compression=lzma2/max
 SolidCompression=yes
 UninstallDisplayIcon={app}\{#AppExe}
+SetupIconFile=..\assets\icon\cliprec.ico
 ; Chiude cliprec-app.exe prima di sostituire i file (aggiornamenti).
 CloseApplications=force
 RestartApplications=no
