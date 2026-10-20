@@ -905,6 +905,7 @@ dependencies = [
  "cliprec-encode",
  "cliprec-mux",
  "cliprec-tests",
+ "serde_json",
  "tauri-winrt-notification",
  "tracing",
  "tracing-appender",
