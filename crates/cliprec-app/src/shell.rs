@@ -394,6 +394,16 @@ fn create_window() -> anyhow::Result<HWND> {
     let hwnd = unsafe {
         CreateWindowExW(WINDOW_EX_STYLE(0), class, w!("ClipRec"), WS_OVERLAPPED, 0, 0, 0, 0, Some(HWND_MESSAGE), None, Some(hinst.into()), None)
     }?;
+    // Se ClipRec gira come amministratore, UIPI scarterebbe l'avviso di una seconda istanza normale.
+    // SAFETY: finestra appena creata da questo thread; messaggio registrato valido.
+    let _ = unsafe {
+        windows::Win32::UI::WindowsAndMessaging::ChangeWindowMessageFilterEx(
+            hwnd,
+            crate::sys::second_instance_msg(),
+            windows::Win32::UI::WindowsAndMessaging::MSGFLT_ALLOW,
+            None,
+        )
+    };
     Ok(hwnd)
 }
 

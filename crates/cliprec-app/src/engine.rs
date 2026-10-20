@@ -30,11 +30,13 @@ pub struct SourceOverrides {
     pub audio: Option<Vec<Box<dyn cliprec_core::AudioSource>>>,
 }
 
-/// Stato che dura più di una sessione: ultime clip, salvataggi in corso.
+/// Stato che dura più di una sessione: ultime clip, salvataggi in corso, encoder in uso (per avvisare
+/// quando un cambio di encoder svuota il buffer anche dopo un riavvio della sessione).
 #[derive(Clone, Default)]
 pub struct Shared {
     recent: Arc<Mutex<VecDeque<PathBuf>>>,
     saving: Arc<AtomicU32>,
+    encoder_name: Arc<Mutex<String>>,
 }
 
 impl Shared {
@@ -120,7 +122,7 @@ impl Session {
         overrides: SourceOverrides,
         events: Sender<EngineEvent>,
     ) -> anyhow::Result<Self> {
-        let encoder_name = Arc::new(Mutex::new(String::new()));
+        let encoder_name = shared.encoder_name.clone();
         let restart = Arc::new(AtomicBool::new(false));
         let alive = Arc::new(Mutex::new(true));
         let warn = |what: &str, e: &dyn std::fmt::Display| {
@@ -176,6 +178,8 @@ impl Session {
     /// Avvia cattura ed encoder video sul device della sorgente.
     fn start_video(&mut self, opened: Result<(GpuDevice, Box<dyn VideoSource>), cliprec_core::SourceError>) -> anyhow::Result<()> {
         let (device, mut source) = opened?;
+        // Un flag nuovo per ogni avvio: un thread di apertura dell'avvio precedente non tocca più il buffer.
+        self.alive = Arc::new(Mutex::new(true));
         if let Err(e) = cliprec_encode::set_gpu_priority(&device, self.config.general.gpu_priority != "normal") {
             tracing::warn!("priorità GPU: {e}");
         }
@@ -205,6 +209,9 @@ impl Session {
         if !dead {
             self.video_retry.1 = Duration::from_secs(5);
             return;
+        }
+        if let Ok(mut a) = self.alive.lock() {
+            *a = false;
         }
         if let Some(mut v) = self.video.take() {
             v.stop();
@@ -491,18 +498,23 @@ fn video_callback(
             }
         }
         let result = result.and_then(|()| enc.encode(frame, &mut push));
-        if result.is_ok() {
+        // Un frame ripetuto è già in `last`: la copia serve solo per i frame nuovi o di altra dimensione.
+        let same_size = last.as_ref().is_some_and(|l| l.width == frame.width && l.height == frame.height);
+        if result.is_ok() && !(frame.repeated && same_size) {
             remember(&device, &mut last, frame);
         }
         match result {
             Ok(()) => next_index = Some(frame.index + 1),
             Err(e) => {
-                if matches!(e, EncodeError::DeviceLost) {
-                    restart.store(true, Ordering::SeqCst);
-                }
                 let name = enc.params().encoder_name.clone();
-                let _ = events.send(EngineEvent::Warning(format!("encoder {name} fallito ({e}): passo al successivo")));
-                failed.push(name);
+                if matches!(e, EncodeError::DeviceLost) {
+                    // Il loop ricrea device, sorgente ed encoder: qui non si apre altro sul device morto.
+                    restart.store(true, Ordering::SeqCst);
+                    retry_at = Instant::now() + Duration::from_secs(3600);
+                } else {
+                    let _ = events.send(EngineEvent::Warning(format!("encoder {name} fallito ({e}): passo al successivo")));
+                    failed.push(name);
+                }
                 encoder = None;
                 next_index = None;
                 encoding_since = None;
