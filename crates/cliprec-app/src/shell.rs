@@ -25,6 +25,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::w;
 
 use crate::hotkey::{self, Chord, Hotkeys, InputEvent, Trigger};
+use crate::i18n::{self, K, Lang, fmt};
 use crate::icon::{self, IconState};
 use crate::notify::{self, Notifier};
 use crate::rawinput;
@@ -51,15 +52,16 @@ pub fn config_path() -> PathBuf {
 }
 
 /// Testo della voce di stato: secondi coperti e RAM.
-pub fn status_line(st: &EngineStatus) -> String {
+pub fn status_line(lang: Lang, st: &EngineStatus) -> String {
     if !st.buffer_running {
-        return "Buffer fermo".into();
+        return fmt(lang, K::StatusStopped, &[]);
     }
-    let mb = st.buffer_bytes / 1_000_000;
+    let mb = (st.buffer_bytes / 1_000_000).to_string();
+    let audio = format!("{:.0}", st.audio_seconds);
     if st.video_enabled {
-        format!("Buffer: {:.0} s video · {:.0} s audio · {mb} MB", st.video_seconds, st.audio_seconds)
+        fmt(lang, K::StatusVideo, &[&format!("{:.0}", st.video_seconds), &audio, &mb])
     } else {
-        format!("Buffer: {:.0} s audio · {mb} MB", st.audio_seconds)
+        fmt(lang, K::StatusAudio, &[&audio, &mb])
     }
 }
 
@@ -115,7 +117,7 @@ impl App {
     fn launch_settings(&self) {
         let exe = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join("cliprec-settings.exe")));
         let Some(exe) = exe.filter(|p| p.exists()) else {
-            self.process_event(&EngineEvent::Warning("cliprec-settings.exe non trovato accanto a ClipRec".into()));
+            self.process_event(&EngineEvent::Warning(fmt(i18n::current(), K::SettingsMissing, &[])));
             return;
         };
         let Ok(mut slot) = self.settings.lock() else { return };
@@ -135,10 +137,10 @@ impl App {
     }
 }
 
-fn parse_chord(label: &str, text: &str) -> Option<Chord> {
+fn parse_chord(label: &str, text: &str, lang: Lang) -> Option<Chord> {
     match hotkey::parse(text) {
         Ok(c) => {
-            for who in hotkey::known_conflicts(&c) {
+            for who in hotkey::known_conflicts(&c, lang) {
                 tracing::warn!("hotkey {label} «{text}» coincide con {who}");
             }
             Some(c)
@@ -151,12 +153,13 @@ fn parse_chord(label: &str, text: &str) -> Option<Chord> {
 }
 
 /// Avvisi per le hotkey non valide o in conflitto, da mostrare come `Warning`.
-fn hotkey_warnings(cfg: &Config) -> Vec<String> {
+fn hotkey_warnings(cfg: &Config, lang: Lang) -> Vec<String> {
     let mut out = Vec::new();
-    for (label, text) in [("Clip video", &cfg.hotkeys.video), ("Clip audio", &cfg.hotkeys.audio)] {
+    for (key, text) in [(K::HotkeyVideo, &cfg.hotkeys.video), (K::HotkeyAudio, &cfg.hotkeys.audio)] {
+        let label = fmt(lang, key, &[]);
         match hotkey::parse(text) {
-            Ok(c) => out.extend(hotkey::known_conflicts(&c).into_iter().map(|w| format!("La hotkey {label} «{text}» coincide con {w}"))),
-            Err(e) => out.push(format!("Hotkey {label} «{text}» non valida: {e}")),
+            Ok(c) => out.extend(hotkey::known_conflicts(&c, lang).into_iter().map(|w| fmt(lang, K::HotkeyConflict, &[&label, text, w]))),
+            Err(e) => out.push(fmt(lang, K::HotkeyInvalid, &[&label, text, &e.to_string()])),
         }
     }
     out
@@ -169,6 +172,9 @@ struct Ui {
     tray: TrayIcon,
     status_item: MenuItem,
     toggle_item: MenuItem,
+    folder_item: MenuItem,
+    settings_item: MenuItem,
+    quit_item: MenuItem,
     recent_menu: Submenu,
     recent_items: Vec<MenuItem>,
     recent_paths: Arc<Mutex<Vec<PathBuf>>>,
@@ -188,7 +194,7 @@ thread_local! {
 impl Ui {
     fn refresh(&mut self) {
         let st = self.app.status();
-        let text = status_line(&st);
+        let text = status_line(i18n::current(), &st);
         if text != self.shown_text {
             self.status_item.set_text(&text);
             let _ = self.tray.set_tooltip(Some(format!("ClipRec · {text}")));
@@ -202,7 +208,7 @@ impl Ui {
             self.shown_state = Some(state);
         }
         if self.shown_running != Some(st.buffer_running) {
-            self.toggle_item.set_text(if st.buffer_running { "Ferma buffer" } else { "Avvia buffer" });
+            self.toggle_item.set_text(fmt(i18n::current(), if st.buffer_running { K::MenuStop } else { K::MenuStart }, &[]));
             self.shown_running = Some(st.buffer_running);
         }
         let recent: Vec<PathBuf> = st.recent_clips.iter().take(RECENT_MAX).cloned().collect();
@@ -229,8 +235,19 @@ impl Ui {
         }
     }
 
+    /// Cambio lingua a caldo: riscrive le voci fisse e forza il ridisegno di quelle dinamiche.
+    fn relabel(&mut self, l: Lang) {
+        self.recent_menu.set_text(fmt(l, K::MenuRecent, &[]));
+        self.folder_item.set_text(fmt(l, K::MenuFolder, &[]));
+        self.settings_item.set_text(fmt(l, K::MenuSettings, &[]));
+        self.quit_item.set_text(fmt(l, K::MenuQuit, &[]));
+        self.shown_text.clear();
+        self.shown_running = None;
+        self.shown_recent = vec![PathBuf::from("\0")];
+    }
+
     fn empty_item(&self) -> Result<MenuItem, tray_icon::menu::Error> {
-        let it = MenuItem::new("Nessuna clip", false, None);
+        let it = MenuItem::new(fmt(i18n::current(), K::MenuNoClips, &[]), false, None);
         self.recent_menu.append(&it)?;
         Ok(it)
     }
@@ -247,10 +264,7 @@ impl Ui {
         match crate::sys::elevated_foreground_game(&games) {
             Some(g) if self.last_elevation_pid != Some(g.pid) => {
                 self.last_elevation_pid = Some(g.pid);
-                self.app.process_event(&EngineEvent::Warning(format!(
-                    "{} è in esecuzione come amministratore: le hotkey potrebbero non arrivare. Riavvia ClipRec come amministratore.",
-                    g.exe
-                )));
+                self.app.process_event(&EngineEvent::Warning(fmt(i18n::current(), K::ElevatedGame, &[&g.exe])));
             }
             Some(_) => {}
             None => self.last_elevation_pid = None,
@@ -260,9 +274,12 @@ impl Ui {
     fn reload_config(&mut self) {
         match Config::load(&config_path()) {
             Ok(cfg) => {
-                self.hotkeys.video = parse_chord("video", &cfg.hotkeys.video);
-                self.hotkeys.audio = parse_chord("audio", &cfg.hotkeys.audio);
-                for w in hotkey_warnings(&cfg) {
+                i18n::set_from_config(&cfg.general.language);
+                let l = i18n::current();
+                self.relabel(l);
+                self.hotkeys.video = parse_chord("video", &cfg.hotkeys.video, l);
+                self.hotkeys.audio = parse_chord("audio", &cfg.hotkeys.audio, l);
+                for w in hotkey_warnings(&cfg, i18n::current()) {
                     self.app.process_event(&EngineEvent::Warning(w));
                 }
                 if let Ok(mut n) = self.app.notifier.lock() {
@@ -342,6 +359,17 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             });
             LRESULT(0)
         }
+        m if m == crate::sys::second_instance_msg() => {
+            UI.with(|u| {
+                if let Ok(u) = u.try_borrow()
+                    && let Some(ui) = u.as_ref()
+                {
+                    tracing::info!("seconda istanza avviata");
+                    ui.app.process_event(&EngineEvent::Warning(fmt(i18n::current(), K::AlreadyRunning, &[])));
+                }
+            });
+            LRESULT(0)
+        }
         // SAFETY: parametri passati tali e quali dal sistema.
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
@@ -371,11 +399,12 @@ fn create_window() -> anyhow::Result<HWND> {
 
 fn build_ui(app: &Arc<App>, hwnd: HWND) -> anyhow::Result<Ui> {
     let status_item = MenuItem::new("ClipRec", false, None);
-    let toggle_item = MenuItem::with_id("toggle", "Ferma buffer", true, None);
-    let recent_menu = Submenu::new("Ultime clip", true);
-    let folder_item = MenuItem::with_id("folder", "Apri cartella clip", true, None);
-    let settings_item = MenuItem::with_id("settings", "Impostazioni…", true, None);
-    let quit_item = MenuItem::with_id("quit", "Esci", true, None);
+    let l = i18n::current();
+    let toggle_item = MenuItem::with_id("toggle", fmt(l, K::MenuStop, &[]), true, None);
+    let recent_menu = Submenu::new(fmt(l, K::MenuRecent, &[]), true);
+    let folder_item = MenuItem::with_id("folder", fmt(l, K::MenuFolder, &[]), true, None);
+    let settings_item = MenuItem::with_id("settings", fmt(l, K::MenuSettings, &[]), true, None);
+    let quit_item = MenuItem::with_id("quit", fmt(l, K::MenuQuit, &[]), true, None);
     let menu = Menu::new();
     menu.append_items(&[
         &status_item,
@@ -416,7 +445,7 @@ fn build_ui(app: &Arc<App>, hwnd: HWND) -> anyhow::Result<Ui> {
     }));
 
     let cfg = app.config.lock().map(|c| c.clone()).unwrap_or_default();
-    let hotkeys = Hotkeys::new(parse_chord("video", &cfg.hotkeys.video), parse_chord("audio", &cfg.hotkeys.audio));
+    let hotkeys = Hotkeys::new(parse_chord("video", &cfg.hotkeys.video, l), parse_chord("audio", &cfg.hotkeys.audio, l));
     rawinput::register(hwnd).context("registrazione Raw Input")?;
     Ok(Ui {
         app: Arc::clone(app),
@@ -424,6 +453,9 @@ fn build_ui(app: &Arc<App>, hwnd: HWND) -> anyhow::Result<Ui> {
         tray,
         status_item,
         toggle_item,
+        folder_item,
+        settings_item,
+        quit_item,
         recent_menu,
         recent_items: Vec::new(),
         recent_paths,
@@ -454,11 +486,12 @@ pub fn run(io: ShellIo) -> anyhow::Result<()> {
         hwnd: AtomicIsize::new(0),
     });
 
+    i18n::set_from_config(&config.general.language);
     let hwnd = create_window()?;
     app.hwnd.store(hwnd.0 as isize, Ordering::Relaxed);
     let ui = build_ui(&app, hwnd)?;
     UI.with(|u| *u.borrow_mut() = Some(ui));
-    for w in hotkey_warnings(&config) {
+    for w in hotkey_warnings(&config, i18n::current()) {
         app.process_event(&EngineEvent::Warning(w));
     }
 
@@ -525,24 +558,24 @@ mod tests {
     #[test]
     fn status_line_texts() {
         let mut st = EngineStatus::default();
-        assert_eq!(status_line(&st), "Buffer fermo");
+        assert_eq!(status_line(i18n::current(), &st), "Buffer fermo");
         st.buffer_running = true;
         st.video_enabled = true;
         st.video_seconds = 58.4;
         st.audio_seconds = 120.0;
         st.buffer_bytes = 412_000_000;
-        assert_eq!(status_line(&st), "Buffer: 58 s video · 120 s audio · 412 MB");
+        assert_eq!(status_line(i18n::current(), &st), "Buffer: 58 s video · 120 s audio · 412 MB");
         st.video_enabled = false;
-        assert_eq!(status_line(&st), "Buffer: 120 s audio · 412 MB");
+        assert_eq!(status_line(i18n::current(), &st), "Buffer: 120 s audio · 412 MB");
     }
 
     #[test]
     fn hotkey_warnings_cover_invalid_and_conflicts() {
         let mut cfg = Config::default();
-        assert!(hotkey_warnings(&cfg).is_empty());
+        assert!(hotkey_warnings(&cfg, i18n::current()).is_empty());
         cfg.hotkeys.video = "Alt+F10".into();
         cfg.hotkeys.audio = "Ctrl+Pippo".into();
-        let w = hotkey_warnings(&cfg);
+        let w = hotkey_warnings(&cfg, i18n::current());
         assert_eq!(w.len(), 2);
         assert!(w[0].contains("NVIDIA") && w[1].contains("non valida"));
     }

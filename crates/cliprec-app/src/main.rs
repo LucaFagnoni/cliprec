@@ -4,6 +4,7 @@
 mod autostart;
 mod engine;
 mod hotkey;
+mod i18n;
 mod icon;
 mod ipc_server;
 mod logging;
@@ -33,7 +34,8 @@ fn main() -> anyhow::Result<()> {
         return engine::run_soak(Config::default(), minutes, out);
     }
     let Some(_instance) = sys::acquire_single_instance(&sys::mutex_name())? else {
-        tracing::info!("ClipRec è già in esecuzione: esco");
+        tracing::info!("ClipRec è già in esecuzione: avviso la prima istanza ed esco");
+        sys::ping_first_instance();
         return Ok(());
     };
 
