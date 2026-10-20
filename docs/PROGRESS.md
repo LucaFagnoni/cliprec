@@ -44,6 +44,14 @@ Ultimo aggiornamento: 20 ottobre 2026, 04:40.
 | RAM del processo esclusi i buffer | < 50 MB | working set circa 16 MB (98 MB totali con 82 MB di buffer); memoria privata impegnata 336 MB con buffer di 19 MB, quasi tutta del driver NVENC/CUDA (da confermare con VMMap) |
 | Distribuzione | < 40 MB | 129,9 MB oggi (FFmpeg completa); 26-30 MB stimati con la build ridotta |
 
+## Provato dal vivo stanotte (senza tastiera né schermo dell'utente)
+
+- App completa (tray, motore, pipe) sulla finestra di `cargo xtask testwindow` con WGC: `Status`,
+  `TestClip` (clip di prova da 5 s, nome `xtask_…`), `ReloadConfig` (fps 60 → 30: encoder riaperto,
+  clip a 30 fps, risoluzione nativa della finestra 642×392), `Quit` (uscita con codice 0).
+- Un cambio di fps, codec o risoluzione svuota il buffer video (pacchetti con parametri diversi non
+  stanno nella stessa clip); l'audio resta.
+
 ## In corso
 
 - Sessione lunga dalle 04:18 alle 07:48 circa (`target/sessione-lunga/sessione-lunga.csv`): al minuto
