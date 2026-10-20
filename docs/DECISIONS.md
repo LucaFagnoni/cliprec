@@ -115,3 +115,10 @@ Le voci [DEFAULT] e [PROPOSTA] di SPEC.md valgono come decise; qui ci sono quell
     PC a 28 thread vale quanto `lp=6`) teneva circa 1 GB residente a 1080p; `lp=4` lo porta a 660 MB con 90 fps a
     1440p sul rumore (servono 60). Scartati `pred-struct=1` e `rtc=1` (sotto 100 MB, ma il tetto di
     bitrate salta a 416 Mbit/s e sul rumore si scende sotto 20 fps) e `lp=3` (57 fps a 1440p).
+32. **Sorgente «Tutto tranne un'app»** (`kind = "except"`, 20 ottobre, richiesta di Luca). Process
+    loopback in modalità EXCLUDE sull'albero dell'app: tutto l'audio del PC senza quel programma,
+    senza passare da un dispositivo. Serve a separare Discord dal resto senza il Loopback della
+    Focusrite, che riceveva anche la parte di Discord che suona sull'uscita predefinita (notifiche,
+    soundboard, video) e la restituiva in ritardo dopo il giro nell'hardware, con l'eco tra le tracce.
+    Limite di Windows: si esclude un solo albero di processi; finché l'app non è aperta si esclude
+    ClipRec, quindi in quella sorgente il «ding» di salvataggio entra quando l'app è aperta.

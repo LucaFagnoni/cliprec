@@ -121,6 +121,7 @@ pub fn to_form(c: &Config) -> (Form, Vec<SourceRow>) {
                 AudioSourceKind::App { exe } => (0, exe.clone()),
                 AudioSourceKind::Input { device } => (1, device.clone().unwrap_or_default()),
                 AudioSourceKind::Output { device } => (2, device.clone().unwrap_or_default()),
+                AudioSourceKind::Except { exe } => (3, exe.clone()),
             };
             SourceRow { name: s.name.clone().into(), kind, target: target.into(), volume: s.volume, delay: s.delay_ms, pick: 0 }
         })
@@ -202,6 +203,12 @@ pub fn build_lenient(form: &Form, rows: &[SourceRow], base: &Config) -> (Config,
             let kind = match r.kind {
                 1 => AudioSourceKind::Input { device },
                 2 => AudioSourceKind::Output { device },
+                3 => {
+                    if t.is_empty() {
+                        problems.push(Problem::EmptyAppExe(i));
+                    }
+                    AudioSourceKind::Except { exe: t }
+                }
                 _ => {
                     if t.is_empty() {
                         problems.push(Problem::EmptyAppExe(i));
@@ -394,6 +401,7 @@ mod tests {
         c.audio.sources = vec![
             AudioSourceConfig { volume: 0.5, ..AudioSourceConfig::new("Discord", AudioSourceKind::App { exe: "Discord.exe".into() }) },
             AudioSourceConfig::new("Mic", AudioSourceKind::Input { device: Some("{id}".into()) }),
+            AudioSourceConfig::new("Gioco", AudioSourceKind::Except { exe: "Discord.exe".into() }),
         ];
         c.clips.folder = Some("D:\\Clips".into());
         c.clips.container = VideoContainer::Mkv;

@@ -77,10 +77,11 @@ strings! {
     set_mode_merged: "Traccia unica (mix)", "Single track (mix)";
     set_add_mix: "Aggiungi in testa una traccia «Mix»", "Add a leading \"Mix\" track";
     set_add_source: "Aggiungi sorgente", "Add source";
-    set_sources_hint: "Ogni riga è una traccia della clip, in quest'ordine (fino a 8). App = l'audio di un solo programma; Microfono = un dispositivo d'ingresso; Uscita = tutto ciò che senti da altoparlanti o cuffie. Il ritardo (da -1000 a 1000 ms) allinea una sorgente in ritardo.", "Each row is a clip track, in this order (up to 8). App = the audio of one program; Microphone = an input device; Output = everything you hear from speakers or headphones. The delay (-1000 to 1000 ms) lines up a late source.";
+    set_sources_hint: "Ogni riga è una traccia della clip, in quest'ordine (fino a 8). App = l'audio di un solo programma; Microfono = un dispositivo d'ingresso; Uscita = tutto ciò che senti da altoparlanti o cuffie; Tutto tranne un'app = l'audio del PC senza quel programma (es. il gioco senza Discord). Il ritardo (da -1000 a 1000 ms) allinea una sorgente in ritardo.", "Each row is a clip track, in this order (up to 8). App = the audio of one program; Microphone = an input device; Output = everything you hear from speakers or headphones; Everything except an app = the PC audio without that program (e.g. the game without Discord). The delay (-1000 to 1000 ms) lines up a late source.";
     set_kind_app: "App (un programma)", "App (one program)";
     set_kind_input: "Microfono / ingresso", "Microphone / input";
     set_kind_output: "Uscita (ciò che senti)", "Output (what you hear)";
+    set_kind_except: "Tutto tranne un'app", "Everything except an app";
     set_col_name: "Nome della traccia", "Track name";
     set_col_kind: "Tipo", "Type";
     set_col_source: "Programma o dispositivo", "Program or device";

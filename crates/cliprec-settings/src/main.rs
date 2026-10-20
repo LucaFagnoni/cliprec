@@ -284,9 +284,9 @@ fn main() -> anyhow::Result<()> {
         // `idx` è la voce del menu: la prima è «Scegli…» per le app e il predefinito per i dispositivi.
         move |i, kind, idx| {
             let list = match kind {
-                0 => &lists.apps,
                 1 => &lists.inputs,
-                _ => &lists.outputs,
+                2 => &lists.outputs,
+                _ => &lists.apps,
             };
             let (Ok(i), Ok(idx)) = (usize::try_from(i), usize::try_from(idx)) else { return };
             let Some(mut row) = rows.row_data(i) else { return };
@@ -298,7 +298,7 @@ fn main() -> anyhow::Result<()> {
                         row.name = stem.into();
                     }
                 }
-                None if kind != 0 && idx == 0 => row.target = "".into(),
+                None if matches!(kind, 1 | 2) && idx == 0 => row.target = "".into(),
                 None => return,
             }
             rows.set_row_data(i, with_pick(row, &lists));

@@ -33,6 +33,7 @@ export global T {
     in property <string> kind-app;
     in property <string> kind-input;
     in property <string> kind-output;
+    in property <string> kind-except;
     in property <string> placeholder-name;
     in property <string> placeholder-app;
     in property <string> placeholder-device;
@@ -333,15 +334,15 @@ export component SettingsWindow inherits Window {
                                     edited(t) => { root.source-changed(i, { name: t, kind: r.kind, target: r.target, volume: r.volume, delay: r.delay, pick: r.pick }); }
                                 }
                                 ComboBox {
-                                    model: [T.kind-app, T.kind-input, T.kind-output];
+                                    model: [T.kind-app, T.kind-input, T.kind-output, T.kind-except];
                                     current-index: r.kind;
                                     width: 200px;
                                     selected(v) => {
                                         root.source-changed(i, { name: r.name, kind: self.current-index, target: "", volume: r.volume, delay: r.delay, pick: 0 });
                                     }
                                 }
-                                // App: nome dell'eseguibile, scritto o scelto tra le app aperte.
-                                if r.kind == 0: HorizontalLayout {
+                                // App e «tutto tranne un'app»: nome dell'eseguibile, scritto o scelto tra le app aperte.
+                                if r.kind == 0 || r.kind == 3: HorizontalLayout {
                                     spacing: 6px;
                                     horizontal-stretch: 1;
                                     LineEdit {
@@ -356,14 +357,14 @@ export component SettingsWindow inherits Window {
                                         width: 190px;
                                         selected(v) => {
                                             if (self.current-index > 0) {
-                                                root.source-pick(i, 0, self.current-index);
+                                                root.source-pick(i, r.kind, self.current-index);
                                             }
                                             self.current-index = 0;
                                         }
                                     }
                                 }
                                 // Ingresso e uscita: il dispositivo per nome, il predefinito di Windows in testa.
-                                if r.kind != 0: HorizontalLayout {
+                                if r.kind == 1 || r.kind == 2: HorizontalLayout {
                                     spacing: 6px;
                                     horizontal-stretch: 1;
                                     ComboBox {

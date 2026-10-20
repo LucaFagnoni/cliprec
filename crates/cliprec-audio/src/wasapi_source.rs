@@ -107,12 +107,15 @@ pub enum CaptureMode {
     ExcludeSelf,
     /// Process loopback in modalità INCLUDE sull'albero di un'app (PID radice).
     App(u32),
+    /// Process loopback in modalità EXCLUDE sull'albero di un'app (PID radice): tutto tranne l'app.
+    ExcludeApp(u32),
 }
 
 const MODE_NONE: u64 = 0;
 const MODE_ENDPOINT: u64 = 1;
 const MODE_EXCLUDE_SELF: u64 = 2;
 const MODE_APP: u64 = 3;
+const MODE_EXCLUDE_APP: u64 = 4;
 
 pub struct WasapiSource {
     name: String,
@@ -171,6 +174,7 @@ impl WasapiSource {
             MODE_ENDPOINT => Some(CaptureMode::Endpoint),
             MODE_EXCLUDE_SELF => Some(CaptureMode::ExcludeSelf),
             MODE_APP => Some(CaptureMode::App(v as u32)),
+            MODE_EXCLUDE_APP => Some(CaptureMode::ExcludeApp(v as u32)),
             _ => None,
         }
     }
@@ -191,7 +195,7 @@ impl AudioSource for WasapiSource {
         self.stop.store(false, Ordering::Release);
         let flags = Arc::new(DeviceFlags::default());
         let pid = Arc::new(AtomicU32::new(0));
-        if let AudioSourceKind::App { exe } = &self.kind {
+        if let AudioSourceKind::App { exe } | AudioSourceKind::Except { exe } = &self.kind {
             // Prima ricerca qui, sul thread chiamante; poi un thread normale ogni 3 s.
             pid.store(find_root_pid(exe).unwrap_or(0), Ordering::Release);
             let (exe, pid, flags, stop) = (exe.clone(), pid.clone(), flags.clone(), self.stop.clone());
@@ -383,7 +387,7 @@ impl Capture {
         let (direction, device) = match &self.kind {
             AudioSourceKind::Input { device } => (Direction::Capture, device.clone()),
             AudioSourceKind::Output { device } => (Direction::Render, device.clone()),
-            AudioSourceKind::App { .. } => return None,
+            AudioSourceKind::App { .. } | AudioSourceKind::Except { .. } => return None,
         };
         let mut cb = DeviceEventCallbacks::new();
         if device.is_none() {
@@ -425,6 +429,15 @@ impl Capture {
                 // ATTENZIONE: in wasapi 0.26 `include_tree = false` vuol dire modalità EXCLUDE.
                 let client = AudioClient::new_application_loopback_client(pid, true).map_err(classify)?;
                 (client, CHANNELS, Direction::Capture, Some(pid), (MODE_APP << 32) | u64::from(pid))
+            }
+            AudioSourceKind::Except { .. } => {
+                // Tutto tranne l'app, senza passare da un dispositivo: la sua copia nella traccia
+                // dell'app e il resto restano allineati. App assente: si esclude ClipRec, e alla
+                // comparsa dell'app `watch_pid` chiede la riapertura (PID 0 → PID vero).
+                let pid = self.pid.load(Ordering::Acquire);
+                let target = if pid == 0 { std::process::id() } else { pid };
+                let client = AudioClient::new_application_loopback_client(target, false).map_err(classify)?;
+                (client, CHANNELS, Direction::Capture, Some(pid), (MODE_EXCLUDE_APP << 32) | u64::from(pid))
             }
             AudioSourceKind::Input { device } | AudioSourceKind::Output { device } => {
                 let input = matches!(self.kind, AudioSourceKind::Input { .. });
@@ -828,6 +841,12 @@ mod tests {
         let default = mode_after_open(AudioSourceKind::Output { device: None });
         println!("uscita predefinita: {default:?}");
         assert_eq!(default, Some(CaptureMode::ExcludeSelf));
+        // «Tutto tranne un'app»: esclude l'albero dell'app per PID, e finché manca resta aperta.
+        let explorer = find_root_pid("explorer.exe").unwrap_or(0);
+        let except = mode_after_open(AudioSourceKind::Except { exe: "explorer.exe".into() });
+        assert_eq!(except, Some(CaptureMode::ExcludeApp(explorer)));
+        let absent = mode_after_open(AudioSourceKind::Except { exe: "nessuna-app-cliprec.exe".into() });
+        assert_eq!(absent, Some(CaptureMode::ExcludeApp(0)), "senza l'app la sorgente registra comunque");
         if let Some((id, name)) = list_devices(false).unwrap().into_iter().next() {
             let explicit = mode_after_open(AudioSourceKind::Output { device: Some(id) });
             println!("uscita esplicita {name}: {explicit:?}");

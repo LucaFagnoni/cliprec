@@ -191,6 +191,9 @@ pub enum AudioSourceKind {
     Input { device: Option<String> },
     /// Loopback di un dispositivo d'uscita; `None` = predefinito di Windows.
     Output { device: Option<String> },
+    /// Tutto ciò che suona sul PC tranne un'applicazione e i suoi processi figli (process loopback
+    /// in esclusione), per nome dell'exe. Finché l'app non è in esecuzione esclude solo ClipRec.
+    Except { exe: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -377,6 +380,8 @@ mod tests {
         assert_eq!(partial.clips.audio_seconds, 120);
         assert_eq!(partial.audio.sources.len(), 1);
         assert_eq!(partial.audio.sources[0].kind, AudioSourceKind::App { exe: "Discord.exe".into() });
+        let except: AudioSourceConfig = toml::from_str("name = \"Sistema\"\nkind = \"except\"\nexe = \"Discord.exe\"").unwrap();
+        assert_eq!(except.kind, AudioSourceKind::Except { exe: "Discord.exe".into() });
         assert_eq!(partial.audio.sources[0].volume, 1.0);
     }
 
