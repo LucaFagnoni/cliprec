@@ -11,7 +11,7 @@ use windows::Graphics::Capture::{Direct3D11CaptureFramePool, GraphicsCaptureItem
 use windows::Graphics::DirectX::Direct3D11::IDirect3DDevice;
 use windows::Graphics::DirectX::DirectXPixelFormat;
 use windows::Graphics::SizeInt32;
-use windows::Win32::Foundation::HWND;
+use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::Graphics::Direct3D11::{D3D11_BOX, D3D11_TEXTURE2D_DESC, ID3D11Texture2D};
 use windows::Win32::Graphics::Dxgi::IDXGIDevice;
 use windows::Win32::Graphics::Gdi::HMONITOR;
@@ -20,7 +20,7 @@ use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemIntero
 use windows::core::{HSTRING, IInspectable, Interface};
 
 use crate::pacer::{FrameSlots, Stats};
-use crate::targets::is_minimized;
+use crate::targets::{is_minimized, window_rect};
 
 const FORMAT: DirectXPixelFormat = DirectXPixelFormat::B8G8R8A8UIntNormalized;
 const BUFFERS: i32 = 2;
@@ -152,6 +152,14 @@ impl Drop for WgcCapture {
     }
 }
 
+/// `true` se il contenuto è meno di metà della finestra in larghezza o in altezza: non è la finestra
+/// com'è adesso (frame residuo della riduzione a icona, o un ingrandimento brusco di cui arriverà
+/// subito il frame giusto). I bordi invisibili e il DPI rendono le due misure solo simili.
+fn is_stale(content: SizeInt32, window: RECT) -> bool {
+    let (ww, wh) = (window.right - window.left, window.bottom - window.top);
+    2 * content.Width < ww || 2 * content.Height < wh
+}
+
 fn on_frame_arrived(
     pool: &Direct3D11CaptureFramePool,
     window: Option<isize>,
@@ -160,13 +168,19 @@ fn on_frame_arrived(
     pool_size: &AtomicU64,
 ) -> windows::core::Result<()> {
     let frame = pool.TryGetNextFrame()?;
-    if window.is_some_and(|h| is_minimized(HWND(h as *mut _))) {
-        return frame.Close();
+    let content = frame.ContentSize()?;
+    // Finestra minimizzata, o frame della finestra minimizzata (~146×28) che arriva quando
+    // IsIconic è già tornato falso (ripristino) o non lo è ancora (inizio della riduzione): si
+    // scarta e resta l'ultimo frame buono.
+    if let Some(h) = window {
+        let hwnd = HWND(h as *mut _);
+        if is_minimized(hwnd) || window_rect(hwnd).is_some_and(|r| is_stale(content, r)) {
+            return frame.Close();
+        }
     }
     // Stesso orologio e stessa unità di QpcTime (QPC in 100 ns).
     let captured = QpcTime(frame.SystemRelativeTime()?.Duration);
     stats.arrival.record(QpcTime::now().hns_since(captured));
-    let content = frame.ContentSize()?;
     let access: IDirect3DDxgiInterfaceAccess = frame.Surface()?.cast()?;
     // SAFETY: la superficie di un frame WGC è sempre una ID3D11Texture2D del nostro device.
     let src: ID3D11Texture2D = unsafe { access.GetInterface()? };
@@ -198,4 +212,21 @@ fn on_frame_arrived(
         tracing::debug!(w = content.Width, h = content.Height, "frame pool WGC ricreato");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn minimized_leftover_frames_are_stale() {
+        let window = |w, h| RECT { left: 40, top: 40, right: 40 + w, bottom: 40 + h };
+        let size = |w, h| SizeInt32 { Width: w, Height: h };
+        // Frame della finestra minimizzata arrivato dopo il ripristino.
+        assert!(is_stale(size(146, 28), window(480, 360)));
+        // Contenuto con i bordi invisibili tolti, o in ritardo di un frame su un ridimensionamento.
+        assert!(!is_stale(size(306, 233), window(320, 240)));
+        assert!(!is_stale(size(466, 353), window(320, 240)));
+        assert!(!is_stale(size(306, 233), window(480, 360)));
+    }
 }
