@@ -40,8 +40,9 @@ fn device(vendor_id: u32) -> Option<GpuDevice> {
     Some(dev)
 }
 
-/// Texture BGRA con render target, come quelle che produce la cattura; con `seed` piena di rumore.
-fn texture(gpu: &GpuDevice, w: u32, h: u32, seed: Option<u32>) -> (ID3D11Texture2D, ID3D11RenderTargetView) {
+/// Texture BGRA con render target, come quelle che produce la cattura; con `seed` piena di rumore
+/// e solo `BIND_SHADER_RESOURCE` (verifica che il video processor accetti texture non render target).
+fn texture(gpu: &GpuDevice, w: u32, h: u32, seed: Option<u32>) -> (ID3D11Texture2D, Option<ID3D11RenderTargetView>) {
     let desc = D3D11_TEXTURE2D_DESC {
         Width: w,
         Height: h,
@@ -50,7 +51,10 @@ fn texture(gpu: &GpuDevice, w: u32, h: u32, seed: Option<u32>) -> (ID3D11Texture
         Format: DXGI_FORMAT_B8G8R8A8_UNORM,
         SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
         Usage: D3D11_USAGE_DEFAULT,
-        BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
+        BindFlags: match seed {
+            Some(_) => D3D11_BIND_SHADER_RESOURCE.0 as u32,
+            None => (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
+        },
         ..Default::default()
     };
     let pixels: Vec<u32> = match seed {
@@ -69,10 +73,13 @@ fn texture(gpu: &GpuDevice, w: u32, h: u32, seed: Option<u32>) -> (ID3D11Texture
     // SAFETY: descrittore, dati iniziali (w×h pixel da 4 byte) e puntatore d'uscita locali.
     unsafe { gpu.device.CreateTexture2D(&desc, seed.map(|_| &init as *const _), Some(&mut tex)) }.unwrap();
     let tex = tex.unwrap();
+    if seed.is_some() {
+        return (tex, None);
+    }
     let mut rtv = None;
     // SAFETY: texture valida con BIND_RENDER_TARGET; puntatore d'uscita locale.
     unsafe { gpu.device.CreateRenderTargetView(&tex, None, Some(&mut rtv)) }.unwrap();
-    (tex, rtv.unwrap())
+    (tex, rtv)
 }
 
 #[derive(Debug)]
@@ -104,7 +111,7 @@ fn run(gpu: &GpuDevice, enc: &mut dyn VideoEncoder, sizes: &[(u32, u32)], noise:
         let (w, h) = sizes[part];
         let (tex, rtv) = &targets[part][i as usize % targets[part].len()];
         let t = i as f32 / FRAMES as f32;
-        if !noise {
+        if let Some(rtv) = rtv {
             // SAFETY: vista valida sul device del contesto, protetto per l'uso da più thread.
             unsafe { gpu.context.ClearRenderTargetView(rtv, &[t, 1.0 - t, (i % 60) as f32 / 60.0, 1.0]) };
         }

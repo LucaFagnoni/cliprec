@@ -14,15 +14,15 @@ use windows::Win32::Graphics::Direct3D11::{
     D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0,
     D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0,
     D3D11_VIDEO_PROCESSOR_STREAM, D3D11_VIDEO_USAGE_OPTIMAL_SPEED, D3D11_VPIV_DIMENSION_TEXTURE2D,
-    D3D11_BIND_RENDER_TARGET, D3D11_TEX2D_VPOV, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
+    D3D11_BIND_RENDER_TARGET, D3D11_BOX, D3D11_TEX2D_VPOV, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
     D3D11_VPOV_DIMENSION_TEXTURE2D, D3D11_VPOV_DIMENSION_TEXTURE2DARRAY, ID3D11Device, ID3D11DeviceContext,
     ID3D11Texture2D, ID3D11VideoContext1,
     ID3D11VideoDevice, ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator,
     ID3D11VideoProcessorInputView, ID3D11VideoProcessorOutputView,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
-    DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709, DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709, DXGI_FORMAT_NV12,
-    DXGI_RATIONAL, DXGI_SAMPLE_DESC,
+    DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709, DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709, DXGI_FORMAT,
+    DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12, DXGI_RATIONAL, DXGI_SAMPLE_DESC,
 };
 use windows::Wdk::Graphics::Direct3D::{
     D3DKMT_SCHEDULINGPRIORITYCLASS_HIGH, D3DKMT_SCHEDULINGPRIORITYCLASS_NORMAL, D3DKMTSetProcessSchedulingPriorityClass,
@@ -70,10 +70,49 @@ struct Processor {
     processor: ID3D11VideoProcessor,
     /// (puntatore della texture, vista). La vista tiene un riferimento alla texture, quindi il
     /// puntatore non può essere riusato da un'altra texture finché è in cache.
-    inputs: [Option<(usize, ID3D11VideoProcessorInputView)>; INPUT_VIEWS],
+    /// `None` come vista = la texture non accetta viste d'ingresso, va copiata in `copy`.
+    inputs: [Option<(usize, Option<ID3D11VideoProcessorInputView>)>; INPUT_VIEWS],
     next_input: usize,
     /// (puntatore della texture del pool, indice nell'array, vista).
     outputs: Vec<(usize, usize, ID3D11VideoProcessorOutputView)>,
+    /// Copia BGRA render target per le sorgenti che non accettano una vista d'ingresso.
+    copy: Option<(ID3D11Texture2D, ID3D11VideoProcessorInputView)>,
+}
+
+/// Texture `format` render target della dimensione data.
+fn texture(device: &ID3D11Device, w: u32, h: u32, format: DXGI_FORMAT) -> windows::core::Result<ID3D11Texture2D> {
+    let desc = D3D11_TEXTURE2D_DESC {
+        Width: w,
+        Height: h,
+        MipLevels: 1,
+        ArraySize: 1,
+        Format: format,
+        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+        Usage: D3D11_USAGE_DEFAULT,
+        BindFlags: D3D11_BIND_RENDER_TARGET.0 as u32,
+        ..Default::default()
+    };
+    let mut tex = None;
+    // SAFETY: descrittore locale valido per la chiamata; puntatore d'uscita locale.
+    unsafe { device.CreateTexture2D(&desc, None, Some(&mut tex))? };
+    tex.ok_or_else(|| windows::core::Error::from_hresult(windows::Win32::Foundation::E_POINTER))
+}
+
+/// Vista d'ingresso del video processor su una texture 2D (non array).
+fn input_view(
+    video_device: &ID3D11VideoDevice,
+    enumerator: &ID3D11VideoProcessorEnumerator,
+    tex: &ID3D11Texture2D,
+) -> windows::core::Result<ID3D11VideoProcessorInputView> {
+    let desc = D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC {
+        FourCC: 0,
+        ViewDimension: D3D11_VPIV_DIMENSION_TEXTURE2D,
+        Anonymous: D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0 { Texture2D: D3D11_TEX2D_VPIV { MipSlice: 0, ArraySlice: 0 } },
+    };
+    let mut view = None;
+    // SAFETY: texture ed enumeratore validi sullo stesso device; desc vive per la chiamata.
+    unsafe { video_device.CreateVideoProcessorInputView(tex, enumerator, &desc, Some(&mut view))? };
+    view.ok_or_else(|| windows::core::Error::from_hresult(windows::Win32::Foundation::E_POINTER))
 }
 
 pub(crate) struct Converter {
@@ -91,25 +130,7 @@ pub(crate) struct Converter {
 
 impl Converter {
     pub(crate) fn new(gpu: &GpuDevice, out_w: u32, out_h: u32, fps: u32, via_staging: bool) -> windows::core::Result<Self> {
-        let staging = if via_staging {
-            let desc = D3D11_TEXTURE2D_DESC {
-                Width: out_w,
-                Height: out_h,
-                MipLevels: 1,
-                ArraySize: 1,
-                Format: DXGI_FORMAT_NV12,
-                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
-                Usage: D3D11_USAGE_DEFAULT,
-                BindFlags: D3D11_BIND_RENDER_TARGET.0 as u32,
-                ..Default::default()
-            };
-            let mut tex = None;
-            // SAFETY: descrittore locale valido per la chiamata; puntatore d'uscita locale.
-            unsafe { gpu.device.CreateTexture2D(&desc, None, Some(&mut tex))? };
-            Some(tex.ok_or_else(|| windows::core::Error::from_hresult(windows::Win32::Foundation::E_POINTER))?)
-        } else {
-            None
-        };
+        let staging = if via_staging { Some(texture(&gpu.device, out_w, out_h, DXGI_FORMAT_NV12)?) } else { None };
         Ok(Self {
             device: gpu.device.clone(),
             context: gpu.context.clone(),
@@ -146,23 +167,32 @@ impl Converter {
         let Some(p) = self.proc.as_mut() else { return Err(windows::core::Error::from_hresult(windows::Win32::Foundation::E_UNEXPECTED)) };
 
         let src_key = src.as_raw() as usize;
-        let input = match p.inputs.iter().flatten().find(|(k, _)| *k == src_key) {
-            Some((_, v)) => v.clone(),
+        let cached = p.inputs.iter().flatten().find(|(k, _)| *k == src_key).map(|(_, v)| v.clone());
+        let direct = match cached {
+            Some(v) => v,
             None => {
-                let desc = D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC {
-                    FourCC: 0,
-                    ViewDimension: D3D11_VPIV_DIMENSION_TEXTURE2D,
-                    Anonymous: D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0 {
-                        Texture2D: D3D11_TEX2D_VPIV { MipSlice: 0, ArraySlice: 0 },
-                    },
-                };
-                let mut view = None;
-                // SAFETY: texture ed enumeratore validi sullo stesso device; desc vive per la chiamata.
-                unsafe { self.video_device.CreateVideoProcessorInputView(src, &p.enumerator, &desc, Some(&mut view))? };
-                let view = view.ok_or_else(|| windows::core::Error::from_hresult(windows::Win32::Foundation::E_POINTER))?;
-                p.inputs[p.next_input] = Some((src_key, view.clone()));
+                // Le texture senza BIND_RENDER_TARGET (es. solo SHADER_RESOURCE) non accettano una
+                // vista d'ingresso (E_INVALIDARG su RTX 3080): per quelle si copia su GPU.
+                let v = input_view(&self.video_device, &p.enumerator, src).ok();
+                p.inputs[p.next_input] = Some((src_key, v.clone()));
                 p.next_input = (p.next_input + 1) % INPUT_VIEWS;
-                view
+                v
+            }
+        };
+        let input = match direct {
+            Some(v) => v,
+            None => {
+                if p.copy.is_none() {
+                    let tex = texture(&self.device, src_w, src_h, DXGI_FORMAT_B8G8R8A8_UNORM)?;
+                    let view = input_view(&self.video_device, &p.enumerator, &tex)?;
+                    p.copy = Some((tex, view));
+                }
+                let Some((tex, view)) = &p.copy else { return Err(windows::core::Error::from_hresult(windows::Win32::Foundation::E_UNEXPECTED)) };
+                let area = D3D11_BOX { left: 0, top: 0, front: 0, right: src_w, bottom: src_h, back: 1 };
+                // SAFETY: entrambe le texture sono BGRA sullo stesso device e coprono `area`
+                // (contratto di GpuFrame: la texture è della dimensione dichiarata).
+                unsafe { self.context.CopySubresourceRegion(tex, 0, 0, 0, 0, src, 0, Some(&area)) };
+                view.clone()
             }
         };
 
@@ -264,6 +294,7 @@ impl Converter {
                 inputs: Default::default(),
                 next_input: 0,
                 outputs: Vec::new(),
+                copy: None,
             })
         }
     }
