@@ -119,8 +119,8 @@ pub fn open_source(cfg: &VideoConfig) -> Result<(GpuDevice, Box<dyn VideoSource>
     Ok((device, Box::new(source)))
 }
 
-/// Sorgente video reale: Desktop Duplication per i monitor (WGC se non è disponibile, per esempio
-/// sulla GPU dedicata dei portatili ibridi), Windows.Graphics.Capture per le finestre.
+/// Sorgente video reale: Windows.Graphics.Capture, con Desktop Duplication per i monitor quando WGC
+/// fallisce o non regge oltre 60 fps (build precedenti a 26100).
 pub struct CaptureSource {
     device: GpuDevice,
     target: Target,
@@ -143,9 +143,9 @@ impl CaptureSource {
             device,
             target,
             cursor: capture_cursor,
-            // Come «Cattura schermo» di OBS sui PC fissi: DDA non mostra il bordo giallo, cattura
-            // anche il fullscreen esclusivo e costa meno di WGC sul monitor intero.
-            prefer_dda: true,
+            // 0.1.6 usava DDA per i monitor: in gioco perdeva quasi tutti i tick (causa non
+            // riprodotta nei test). Si torna a WGC, provato in gioco; DDA resta il ripiego.
+            prefer_dda: false,
             stats: Arc::default(),
             description,
             native: Arc::default(),
@@ -154,7 +154,7 @@ impl CaptureSource {
         }
     }
 
-    /// Per i monitor prova prima Desktop Duplication (WGC resta il ripiego; è il default). Con `false`
+    /// Per i monitor prova prima Desktop Duplication (WGC resta il ripiego). Senza questa opzione
     /// DDA si usa solo se WGC fallisce o se si chiedono più di 60 fps su build precedenti a 26100.
     pub fn prefer_desktop_duplication(mut self, yes: bool) -> Self {
         self.prefer_dda = yes;
@@ -591,6 +591,33 @@ mod tests {
         assert_eq!(running.state, SourceState::Running);
         assert_eq!((running.source_width, running.source_height), (mw, mh));
         assert!(src.frames_arrived() >= 1, "DDA non ha consegnato nulla");
+    }
+
+    /// Regressione 0.1.6: con lo schermo fermo DDA aspettava il frame dentro AcquireNextFrame
+    /// tenendo il lock del contesto, e la callback (che come l'encoder usa il contesto) perdeva
+    /// quasi tutti i tick. Senza finestre animate i tick persi devono restare pochi.
+    #[test]
+    fn desktop_duplication_on_a_still_screen_keeps_every_tick() {
+        let _capture = exclusive_capture();
+        let device = crate::device_for_monitor(0).unwrap();
+        let ctx = device.context.clone();
+        // Con il puntatore, come nella configurazione predefinita.
+        let mut src = CaptureSource::new(device, Target::Monitor(0), true).prefer_desktop_duplication(true);
+        // Ogni frame passa dal contesto immediato, come la conversione dell'encoder.
+        src.start(
+            60,
+            Box::new(move |_| {
+                // SAFETY: contesto immediato del device della sessione, protetto da SetMultithreadProtected.
+                unsafe { ctx.Flush() }
+            }),
+        )
+        .unwrap();
+        std::thread::sleep(Duration::from_secs(3));
+        let s = src.stats();
+        src.stop();
+        println!("{}: consegnati {}, persi {}", src.describe(), s.frames_delivered, s.frames_dropped);
+        assert!(src.describe().contains("Desktop Duplication"));
+        assert!(s.frames_dropped <= 6, "{} tick persi su {}", s.frames_dropped, s.frames_delivered + s.frames_dropped);
     }
 
     /// Finestra propria catturata, ridimensionata, minimizzata e chiusa durante la cattura.

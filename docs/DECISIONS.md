@@ -216,3 +216,10 @@ Le voci [DEFAULT] e [PROPOSTA] di SPEC.md valgono come decise; qui ci sono quell
     «Esci» dalla tray chiude anche le finestre di impostazioni e aggiornamento. Il renderer software di
     Slint dopo riduci/ripristina ridisegna solo le zone cambiate su un buffer svuotato: al ripristino
     un velo invisibile cambia e la finestra si ridisegna intera.
+42. **Monitor di nuovo con WGC** (20 ottobre, 0.1.7). Con la 0.1.6 (DDA per il monitor) Luca perdeva
+    in gioco oltre 10 000 tick in pochi minuti. La causa non si riproduce nei test (schermo fermo,
+    puntatore, contesto usato a ogni frame: zero tick persi), quindi si torna alla cattura provata in
+    gioco con la 0.1.5 e DDA resta il ripiego e la via per il fullscreen esclusivo delle finestre.
+    Corretto comunque il ciclo DDA: `AcquireNextFrame` senza attesa e pausa di 2 ms fuori dal lock
+    del contesto, invece di attese fino a 100 ms che potevano tenere fermo l'encoder. La parte 41 sul
+    monitor con DDA è superata; restano valide le altre.

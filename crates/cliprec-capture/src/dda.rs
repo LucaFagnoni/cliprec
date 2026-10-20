@@ -105,6 +105,9 @@ impl Drop for DdaCapture {
     }
 }
 
+/// Intervallo tra due richieste di frame quando lo schermo non è cambiato (fino a 500 Hz).
+const POLL: std::time::Duration = std::time::Duration::from_millis(2);
+
 fn pump(
     dup: &IDXGIOutputDuplication,
     slots: &FrameSlots,
@@ -115,10 +118,16 @@ fn pump(
     while running.load(Ordering::Acquire) {
         let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
         let mut resource = None;
+        // Mai un'attesa dentro AcquireNextFrame: sul device condiviso (multithread protected) la
+        // fa tenendo il lock del contesto, e con lo schermo fermo bloccava l'encoder fino a 100 ms
+        // a chiamata (0.1.6: quasi tutti i tick persi). Si chiede senza attesa e si dorme fuori.
         // SAFETY: puntatori d'uscita locali; ogni frame acquisito è rilasciato sotto.
-        match unsafe { dup.AcquireNextFrame(100, &mut info, &mut resource) } {
+        match unsafe { dup.AcquireNextFrame(0, &mut info, &mut resource) } {
             Ok(()) => {}
-            Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => continue,
+            Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => {
+                std::thread::sleep(POLL);
+                continue;
+            }
             Err(e) => return Err(e),
         }
         // Posizione e forma del puntatore vanno lette prima di ReleaseFrame.

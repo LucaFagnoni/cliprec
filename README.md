@@ -103,8 +103,6 @@ Per pubblicare una versione: alzare `version` in `Cargo.toml` del workspace, poi
   in primo piano, ClipRec passa da solo alla Desktop Duplication del monitor e torna alla cattura
   della finestra quando il gioco esce dallo schermo intero. Nessuna iniezione nel gioco, quindi
   nessun rischio con gli anti-cheat; resta escluso solo ciò che Windows protegge (contenuti DRM).
-  La cattura del monitor usa già la Desktop Duplication (senza bordo giallo); WGC resta il ripiego,
-  per esempio sulla GPU dedicata dei portatili ibridi.
 - **Frame persi sotto carico**: mentre un gioco satura la scheda video (caricamenti, scene pesanti)
   la conversione e l'encoder possono saltare qualche frame, contati in «frame persi». Priorità GPU
   alta e processo «sopra il normale» li riducono; il colore 4:4:4 li aumenta, perché la conversione
