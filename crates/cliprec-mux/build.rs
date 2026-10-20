@@ -18,7 +18,9 @@ fn main() {
         for dll in &dlls {
             if let Some(name) = dll.file_name() {
                 let dest = dir.join(name);
-                if !dest.exists() {
+                // Si ricopia se cambia la build di FFmpeg (stesso nome, altra dimensione).
+                let len = |p: &PathBuf| std::fs::metadata(p).map(|m| m.len()).ok();
+                if len(&dest) != len(dll) {
                     let _ = std::fs::copy(dll, dest);
                 }
             }
