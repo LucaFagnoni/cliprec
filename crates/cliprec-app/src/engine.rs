@@ -190,6 +190,7 @@ impl Session {
                 sources,
                 &[],
                 &[],
+                &[],
                 config.audio.mode,
                 config.audio.add_mix_track && config.audio.mode == TrackMode::Separate,
                 sink,
@@ -995,20 +996,17 @@ pub fn run(
             Ok(cmd @ (AppCommand::SaveVideoClip | AppCommand::SaveAudioClip | AppCommand::SaveTestClip)) => {
                 if let Some(s) = &session {
                     let clips = &s.config.clips;
-                    match cmd {
-                        AppCommand::SaveTestClip => {
-                            s.save_test();
-                        }
-                        AppCommand::SaveAudioClip => {
-                            s.save(ClipKind::Audio, clips.audio_seconds);
-                        }
+                    let accepted = match cmd {
+                        AppCommand::SaveTestClip => s.save_test(),
+                        AppCommand::SaveAudioClip => s.save(ClipKind::Audio, clips.audio_seconds),
                         // In modalità solo audio la hotkey video salva una clip audio di N secondi.
-                        _ if s.video.is_none() => {
-                            s.save(ClipKind::Audio, clips.video_seconds);
-                        }
-                        _ => {
-                            s.save(ClipKind::Video, clips.video_seconds);
-                        }
+                        _ if s.video.is_none() => s.save(ClipKind::Audio, clips.video_seconds),
+                        _ => s.save(ClipKind::Video, clips.video_seconds),
+                    };
+                    // Snapshot preso e scrittura accodata: il suono di conferma parte adesso, dopo lo
+                    // snapshot, quindi non finisce nella clip appena richiesta.
+                    if accepted.is_some() {
+                        let _ = events.send(EngineEvent::ClipRequested);
                     }
                 } else {
                     let _ = events.send(EngineEvent::Warning(tr(K::EngBufferStopped, &[])));
@@ -1938,6 +1936,44 @@ video_seconds = = 30").unwrap();
         assert!(!warns_about(&format!("Discord.exe {}", cliprec_audio::NOT_RUNNING)));
         assert!(!warns_about(cliprec_audio::OPENING));
         assert!(warns_about("dispositivo scollegato"));
+    }
+
+    /// Il suono di conferma parte alla richiesta: `ClipRequested` arriva prima che la clip sia scritta.
+    #[test]
+    fn clip_request_is_confirmed_before_the_clip_is_written() {
+        let _serial = heavy();
+        let dir = fault_dir("richiesta");
+        let mut config = Config::default();
+        config.video.enabled = false;
+        config.audio.sources = vec![cliprec_core::config::AudioSourceConfig::new(
+            "Assente",
+            cliprec_core::config::AudioSourceKind::App { exe: "cliprec-app-assente.exe".into() },
+        )];
+        config.clips.folder = Some(dir.clone());
+        config.clips.audio_seconds = 1;
+        if let Ok(mut p) = persist().lock() {
+            *p = None;
+        }
+        let (cmd_tx, cmd_rx) = std::sync::mpsc::channel();
+        let (ev_tx, ev_rx) = std::sync::mpsc::channel();
+        let status = Arc::new(Mutex::new(EngineStatus::default()));
+        let path = dir.join("config.toml");
+        let engine = std::thread::spawn(move || run(config, true, &path, &cmd_rx, ev_tx, status));
+        std::thread::sleep(Duration::from_millis(1500));
+        cmd_tx.send(AppCommand::SaveAudioClip).unwrap();
+        let mut seen = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline && !seen.iter().any(|e| matches!(e, EngineEvent::ClipSaved(_))) {
+            if let Ok(e) = ev_rx.recv_timeout(Duration::from_millis(100)) {
+                seen.push(e);
+            }
+        }
+        cmd_tx.send(AppCommand::Quit).unwrap();
+        engine.join().unwrap();
+        let requested = seen.iter().position(|e| matches!(e, EngineEvent::ClipRequested));
+        let saved = seen.iter().position(|e| matches!(e, EngineEvent::ClipSaved(_)));
+        assert!(requested.is_some() && saved.is_some(), "{seen:?}");
+        assert!(requested < saved, "la conferma deve arrivare prima della clip scritta: {seen:?}");
     }
 
     /// m11: «Ferma buffer» libera la RAM del buffer.

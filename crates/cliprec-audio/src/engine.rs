@@ -39,29 +39,44 @@ struct Route {
     /// Ritardo della sorgente in unità da 100 ns, sommato al QPC di ogni blocco.
     delay_hns: i64,
     scratch: Vec<f32>,
+    /// Canali uniti: media di sinistra e destra su entrambi.
+    mono: bool,
+    mono_buf: Vec<f32>,
     mix: Option<MixInput>,
 }
 
 impl Route {
     fn push(&mut self, c: AudioChunk<'_>) {
-        let c = AudioChunk { qpc: c.qpc.add_hns(self.delay_hns), samples: c.samples };
+        let qpc = c.qpc.add_hns(self.delay_hns);
+        let n = c.samples.len();
+        if self.mono {
+            if self.mono_buf.len() < n {
+                // Cresce solo per pacchetti più lunghi di 1 s: a regime non alloca.
+                self.mono_buf.resize(n, 0.0);
+            }
+            for (o, f) in self.mono_buf[..n].chunks_exact_mut(CHANNELS).zip(c.samples.chunks_exact(CHANNELS)) {
+                let m = (f[0] + f[1]) * 0.5;
+                o.fill(m);
+            }
+        }
+        let samples: &[f32] = if self.mono { &self.mono_buf[..n] } else { c.samples };
         if let Some(track) = self.track {
             if self.volume == 1.0 {
-                self.sink.push(track, c.qpc, c.samples);
+                self.sink.push(track, qpc, samples);
             } else {
-                if self.scratch.len() < c.samples.len() {
+                if self.scratch.len() < n {
                     // Cresce solo per pacchetti più lunghi di 1 s: a regime non alloca.
-                    self.scratch.resize(c.samples.len(), 0.0);
+                    self.scratch.resize(n, 0.0);
                 }
-                let out = &mut self.scratch[..c.samples.len()];
-                for (d, s) in out.iter_mut().zip(c.samples) {
+                let out = &mut self.scratch[..n];
+                for (d, s) in out.iter_mut().zip(samples) {
                     *d = s * self.volume;
                 }
-                self.sink.push(track, c.qpc, out);
+                self.sink.push(track, qpc, out);
             }
         }
         if let Some(mix) = &mut self.mix {
-            mix.push(c);
+            mix.push(AudioChunk { qpc, samples });
         }
     }
 }
@@ -86,7 +101,8 @@ impl AudioEngine {
             .collect();
         let volumes: Vec<f32> = specs.iter().map(|s| s.volume).collect();
         let delays: Vec<i32> = specs.iter().map(|s| s.delay_ms).collect();
-        Self::with_sources(sources, &volumes, &delays, cfg.mode, cfg.add_mix_track, sink)
+        let monos: Vec<bool> = specs.iter().map(|s| s.mono).collect();
+        Self::with_sources(sources, &volumes, &delays, &monos, cfg.mode, cfg.add_mix_track, sink)
     }
 
     /// Avvia sorgenti già costruite. `volumes[i]` è il guadagno lineare della sorgente `i` (1.0 se
@@ -101,6 +117,7 @@ impl AudioEngine {
         mut sources: Vec<Box<dyn AudioSource>>,
         volumes: &[f32],
         delays_ms: &[i32],
+        monos: &[bool],
         mode: TrackMode,
         add_mix_track: bool,
         sink: Arc<dyn AudioTrackSink>,
@@ -136,6 +153,8 @@ impl AudioEngine {
                 volume: volume(i),
                 delay_hns: i64::from(delays_ms.get(i).copied().unwrap_or(0).clamp(-MAX_DELAY_MS, MAX_DELAY_MS)) * 10_000,
                 scratch: vec![0.0; SAMPLE_RATE as usize * CHANNELS],
+                mono: monos.get(i).copied().unwrap_or(false),
+                mono_buf: vec![0.0; SAMPLE_RATE as usize * CHANNELS],
                 mix,
             };
             if let Err(e) = src.start(Box::new(move |c| route.push(c))) {
@@ -262,6 +281,26 @@ mod tests {
     use crate::BeepSource;
     use std::sync::Mutex;
 
+    /// Mono: un microfono su un solo canale finisce su entrambi, a metà livello (poi il volume).
+    #[test]
+    fn mono_source_puts_the_same_signal_on_both_channels() {
+        let sink = Arc::new(TestSink::default());
+        sink.set_tracks(&["Mic".into()]);
+        let mut route = Route {
+            track: Some(0),
+            sink: sink.clone(),
+            volume: 2.0,
+            delay_hns: 0,
+            scratch: Vec::new(),
+            mono: true,
+            mono_buf: Vec::new(),
+            mix: None,
+        };
+        // Solo il canale destro ha segnale, come un microfono sull'ingresso 2.
+        route.push(AudioChunk { qpc: QpcTime(0), samples: &[0.0, 0.5, 0.0, 0.5] });
+        assert_eq!(sink.data.lock().unwrap()[0], vec![0.5; 4]);
+    }
+
     #[derive(Default)]
     struct TestSink {
         names: Mutex<Vec<String>>,
@@ -303,7 +342,7 @@ mod tests {
     #[test]
     fn separate_mode_with_mix_track() {
         let sink = Arc::new(TestSink::default());
-        let mut engine = AudioEngine::with_sources(beeps(), &[1.0, 0.5], &[], TrackMode::Separate, true, sink.clone()).unwrap();
+        let mut engine = AudioEngine::with_sources(beeps(), &[1.0, 0.5], &[], &[], TrackMode::Separate, true, sink.clone()).unwrap();
         std::thread::sleep(Duration::from_millis(1200));
         assert!(engine.states().iter().all(|(_, s)| *s == SourceState::Running));
         engine.stop();
@@ -320,7 +359,7 @@ mod tests {
     #[test]
     fn merged_mode_single_track_beeps_on_whole_seconds() {
         let sink = Arc::new(TestSink::default());
-        let mut engine = AudioEngine::with_sources(beeps(), &[], &[], TrackMode::Merged, false, sink.clone()).unwrap();
+        let mut engine = AudioEngine::with_sources(beeps(), &[], &[], &[], TrackMode::Merged, false, sink.clone()).unwrap();
         std::thread::sleep(Duration::from_millis(2600));
         engine.stop();
         assert_eq!(*sink.names.lock().unwrap(), ["Mix"]);
@@ -451,7 +490,7 @@ mod tests {
     fn mix_keeps_late_source() {
         let sink = Arc::new(TestSink::default());
         let late: Box<dyn AudioSource> = Box::new(LateSource { stop: Arc::default(), thread: None });
-        let mut engine = AudioEngine::with_sources(vec![late], &[], &[], TrackMode::Merged, false, sink.clone()).unwrap();
+        let mut engine = AudioEngine::with_sources(vec![late], &[], &[], &[], TrackMode::Merged, false, sink.clone()).unwrap();
         std::thread::sleep(Duration::from_millis(2000));
         engine.stop();
         let data = sink.data.lock().unwrap();
@@ -479,7 +518,7 @@ mod tests {
             }
         }
         let sink = Arc::new(PanicOnce(TestSink::default(), AtomicBool::new(false)));
-        let mut engine = AudioEngine::with_sources(beeps(), &[], &[], TrackMode::Merged, false, sink.clone()).unwrap();
+        let mut engine = AudioEngine::with_sources(beeps(), &[], &[], &[], TrackMode::Merged, false, sink.clone()).unwrap();
         std::thread::sleep(Duration::from_millis(1000));
         assert!(engine.mixer_error().is_some_and(|m| m.contains("panic di prova")));
         engine.stop();
@@ -492,7 +531,7 @@ mod tests {
     #[test]
     fn per_source_delay_shifts_beeps() {
         let sink = Arc::new(TestSink::default());
-        let mut engine = AudioEngine::with_sources(beeps(), &[], &[100, -100], TrackMode::Separate, true, sink.clone()).unwrap();
+        let mut engine = AudioEngine::with_sources(beeps(), &[], &[100, -100], &[], TrackMode::Separate, true, sink.clone()).unwrap();
         std::thread::sleep(Duration::from_millis(2600));
         engine.stop();
         let blocks = sink.blocks.lock().unwrap();
@@ -538,7 +577,7 @@ mod tests {
     fn failed_source_track_continues_in_silence() {
         let sink = Arc::new(TestSink::default());
         let sources: Vec<Box<dyn AudioSource>> = vec![Box::new(BeepSource::new("A", 1000.0)), Box::new(Denied)];
-        let mut engine = AudioEngine::with_sources(sources, &[], &[], TrackMode::Separate, false, sink.clone()).unwrap();
+        let mut engine = AudioEngine::with_sources(sources, &[], &[], &[], TrackMode::Separate, false, sink.clone()).unwrap();
         std::thread::sleep(Duration::from_millis(700));
         assert!(matches!(engine.states()[1].1, SourceState::Error(_)));
         engine.stop();

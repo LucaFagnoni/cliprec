@@ -146,13 +146,14 @@ strings! {
     set_process_events: "Aggancio immediato delle app", "Hook apps immediately";
     set_process_events_desc: "Usa gli eventi di Windows quando un'app si apre o si chiude. Serve ClipRec avviato come amministratore; altrimenti controlla ogni mezzo secondo.", "Uses Windows events when an app opens or closes. Needs ClipRec running as administrator; otherwise it checks every half second.";
     set_add_source: "Aggiungi sorgente", "Add source";
-    set_sources_hint: "In ordine di traccia, fino a 8. «Tutto tranne un'app» registra l'audio del PC senza quel programma, per esempio il gioco senza Discord.", "In track order, up to 8. \"Everything except an app\" records the PC audio without that program, for example the game without Discord.";
+    set_sources_hint: "In ordine di traccia, fino a 8. «Tutto tranne un'app» registra l'audio del PC senza quel programma, per esempio il gioco senza Discord. «Mono» unisce i canali di un microfono che si sente da un lato solo.", "In track order, up to 8. \"Everything except an app\" records the PC audio without that program, for example the game without Discord. \"Mono\" merges the channels of a microphone heard on one side only.";
     set_kind_app: "App", "App";
     set_kind_input: "Microfono / ingresso", "Microphone / input";
     set_kind_output: "Uscita (ciò che senti)", "Output (what you hear)";
     set_kind_except: "Tutto tranne un'app", "Everything except an app";
     set_col_volume: "Volume", "Volume";
     set_col_delay: "Ritardo", "Delay";
+    set_mono: "Mono", "Mono";
     set_pick_app: "Scegli un'app aperta…", "Pick a running app…";
     set_device_missing: "Non collegato", "Not connected";
     set_placeholder_name: "Nome della traccia", "Track name";
@@ -197,7 +198,8 @@ strings! {
     set_start_admin_desc: "Serve per registrare i giochi avviati come amministratore e per l'aggancio immediato delle app. Windows chiede conferma quando salvi.", "Needed to record games running as administrator and to hook apps immediately. Windows asks for confirmation when you save.";
     set_notifications: "Notifiche", "Notifications";
     set_notifications_desc: "Avviso con i pulsanti Apri e Cartella dopo ogni clip.", "A notice with Open and Folder buttons after each clip.";
-    set_sound: "Suono al salvataggio", "Sound on save";
+    set_sound: "Suono di conferma", "Confirmation sound";
+    set_sound_desc: "Un suono breve appena premi la scorciatoia, prima che la clip sia scritta.", "A short sound as soon as you press the shortcut, before the clip is written.";
     set_ram_max: "Tetto di RAM", "RAM cap";
     set_ram_max_desc: "In MB, per i buffer. Vuoto: automatico.", "In MB, for the buffers. Empty: automatic.";
     set_ram_auto: "Automatico", "Automatic";

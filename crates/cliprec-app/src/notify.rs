@@ -110,10 +110,13 @@ impl Notifier {
 
     pub fn handle(&mut self, ev: &EngineEvent) {
         match ev {
-            EngineEvent::ClipSaved(c) => {
+            // Il suono conferma la richiesta appena premuta, non la fine del salvataggio.
+            EngineEvent::ClipRequested => {
                 if self.sound {
-                    play_save_sound();
+                    play_request_sound();
                 }
+            }
+            EngineEvent::ClipSaved(c) => {
                 if self.enabled {
                     show_clip_saved(c);
                 }
@@ -184,7 +187,7 @@ fn open_folder_of(path: &Path) {
 }
 
 /// Suono breve di sistema, asincrono.
-fn play_save_sound() {
+fn play_request_sound() {
     use windows::Win32::Media::Audio::{PlaySoundW, SND_ALIAS, SND_ASYNC, SND_NODEFAULT};
     if headless() {
         return;

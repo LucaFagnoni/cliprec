@@ -245,12 +245,16 @@ pub struct AudioSourceConfig {
     /// compensare la latenza di un dispositivo, come il «Sync Offset» di OBS. Da -1000 a 1000.
     #[serde(default)]
     pub delay_ms: i32,
+    /// Unisce i canali (media di sinistra e destra) e mette lo stesso segnale su entrambi: per i
+    /// microfoni mono collegati a un ingresso stereo, che altrimenti si sentono da un lato solo.
+    #[serde(default)]
+    pub mono: bool,
 }
 
 impl AudioSourceConfig {
     /// Sorgente con volume 1 e nessun ritardo.
     pub fn new(name: impl Into<String>, kind: AudioSourceKind) -> Self {
-        Self { name: name.into(), kind, volume: 1.0, delay_ms: 0 }
+        Self { name: name.into(), kind, volume: 1.0, delay_ms: 0, mono: false }
     }
 }
 

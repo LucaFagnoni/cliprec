@@ -107,6 +107,7 @@ export global T {
     in property <string> kind-except;
     in property <string> col-volume;
     in property <string> col-delay;
+    in property <string> mono;
     in property <string> pick-app;
     in property <string> device-missing;
     in property <string> placeholder-name;
@@ -152,6 +153,7 @@ export global T {
     in property <string> notifications;
     in property <string> notifications-desc;
     in property <string> sound;
+    in property <string> sound-desc;
     in property <string> ram-max;
     in property <string> ram-max-desc;
     in property <string> ram-auto;
@@ -225,6 +227,7 @@ export struct SourceRow {
     delay: int,
     // Posizione nel menu dei dispositivi: 0 = predefinito di Windows, -1 = non collegato.
     pick: int,
+    mono: bool,
 }
 
 // Colori delle Impostazioni di Windows 11, chiari o scuri come il sistema.
@@ -756,14 +759,14 @@ export component SettingsWindow inherits Window {
                                     text: r.name;
                                     placeholder-text: T.placeholder-name;
                                     width: 220px;
-                                    edited(t) => { root.source-changed(i, { name: t, kind: r.kind, target: r.target, volume: r.volume, delay: r.delay, pick: r.pick }); }
+                                    edited(t) => { root.source-changed(i, { name: t, kind: r.kind, target: r.target, volume: r.volume, delay: r.delay, pick: r.pick, mono: r.mono }); }
                                 }
                                 ComboBox {
                                     model: [T.kind-app, T.kind-input, T.kind-output, T.kind-except];
                                     current-index: r.kind;
                                     width: 220px;
                                     selected(v) => {
-                                        root.source-changed(i, { name: r.name, kind: self.current-index, target: "", volume: r.volume, delay: r.delay, pick: 0 });
+                                        root.source-changed(i, { name: r.name, kind: self.current-index, target: "", volume: r.volume, delay: r.delay, pick: 0, mono: r.mono });
                                     }
                                 }
                                 Rectangle { horizontal-stretch: 1; }
@@ -781,7 +784,7 @@ export component SettingsWindow inherits Window {
                                         text: r.target;
                                         placeholder-text: T.placeholder-app;
                                         horizontal-stretch: 1;
-                                        edited(t) => { root.source-changed(i, { name: r.name, kind: r.kind, target: t, volume: r.volume, delay: r.delay, pick: r.pick }); }
+                                        edited(t) => { root.source-changed(i, { name: r.name, kind: r.kind, target: t, volume: r.volume, delay: r.delay, pick: r.pick, mono: r.mono }); }
                                     }
                                     ComboBox {
                                         model: root.app-choices;
@@ -817,10 +820,16 @@ export component SettingsWindow inherits Window {
                                     maximum: 200;
                                     value: r.volume * 100;
                                     width: 200px;
-                                    changed(v) => { root.source-changed(i, { name: r.name, kind: r.kind, target: r.target, volume: Math.round(v) / 100, delay: r.delay, pick: r.pick }); }
+                                    changed(v) => { root.source-changed(i, { name: r.name, kind: r.kind, target: r.target, volume: Math.round(v) / 100, delay: r.delay, pick: r.pick, mono: r.mono }); }
                                 }
                                 Text { text: Math.round(r.volume * 100) + "%"; width: 40px; color: Theme.text; vertical-alignment: center; }
                                 Rectangle { horizontal-stretch: 1; }
+                                Text { text: T.mono; color: Theme.text-secondary; vertical-alignment: center; }
+                                Switch {
+                                    checked: r.mono;
+                                    toggled => { root.source-changed(i, { name: r.name, kind: r.kind, target: r.target, volume: r.volume, delay: r.delay, pick: r.pick, mono: self.checked }); }
+                                }
+                                Rectangle { width: 16px; }
                                 Text { text: T.col-delay; color: Theme.text-secondary; vertical-alignment: center; }
                                 SpinBox {
                                     minimum: -1000;
@@ -828,7 +837,7 @@ export component SettingsWindow inherits Window {
                                     step-size: 10;
                                     value: r.delay;
                                     width: 110px;
-                                    edited(v) => { root.source-changed(i, { name: r.name, kind: r.kind, target: r.target, volume: r.volume, delay: v, pick: r.pick }); }
+                                    edited(v) => { root.source-changed(i, { name: r.name, kind: r.kind, target: r.target, volume: r.volume, delay: v, pick: r.pick, mono: r.mono }); }
                                 }
                                 Text { text: "ms"; color: Theme.text-secondary; vertical-alignment: center; }
                             }
@@ -981,6 +990,7 @@ export component SettingsWindow inherits Window {
                     Divider { }
                     SettingRow {
                         title: T.sound;
+                        description: T.sound-desc;
                         Switch { checked <=> root.f.sound; }
                     }
                 }

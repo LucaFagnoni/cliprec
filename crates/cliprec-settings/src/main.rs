@@ -255,7 +255,7 @@ fn main() -> anyhow::Result<()> {
         let rows = rows.clone();
         move || {
             if rows.row_count() < cliprec_core::config::MAX_AUDIO_SOURCES {
-                rows.push(SourceRow { name: "".into(), kind: 0, target: "".into(), volume: 1.0, delay: 0, pick: 0 });
+                rows.push(SourceRow { name: "".into(), kind: 0, target: "".into(), volume: 1.0, delay: 0, pick: 0, mono: false });
             }
         }
     });

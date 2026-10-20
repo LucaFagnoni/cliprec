@@ -142,7 +142,7 @@ pub fn to_form(c: &Config) -> (Form, Vec<SourceRow>) {
                 AudioSourceKind::Output { device } => (2, device.clone().unwrap_or_default()),
                 AudioSourceKind::Except { exe } => (3, exe.clone()),
             };
-            SourceRow { name: s.name.clone().into(), kind, target: target.into(), volume: s.volume, delay: s.delay_ms, pick: 0 }
+            SourceRow { name: s.name.clone().into(), kind, target: target.into(), volume: s.volume, delay: s.delay_ms, pick: 0, mono: s.mono }
         })
         .collect();
     (form, rows)
@@ -268,6 +268,7 @@ pub fn build_lenient(form: &Form, rows: &[SourceRow], base: &Config) -> (Config,
             AudioSourceConfig {
                 volume: r.volume.clamp(0.0, 2.0),
                 delay_ms: r.delay.clamp(-1000, 1000),
+                mono: r.mono,
                 ..AudioSourceConfig::new(name, kind)
             }
         })
@@ -459,7 +460,7 @@ mod tests {
         c.audio.process_events = true;
         c.audio.sources = vec![
             AudioSourceConfig { volume: 0.5, ..AudioSourceConfig::new("Discord", AudioSourceKind::App { exe: "Discord.exe".into() }) },
-            AudioSourceConfig::new("Mic", AudioSourceKind::Input { device: Some("{id}".into()) }),
+            AudioSourceConfig { mono: true, ..AudioSourceConfig::new("Mic", AudioSourceKind::Input { device: Some("{id}".into()) }) },
             AudioSourceConfig::new("Gioco", AudioSourceKind::Except { exe: "Discord.exe".into() }),
         ];
         c.clips.folder = Some("D:\\Clips".into());
@@ -493,7 +494,7 @@ mod tests {
         f.max_bitrate = "abc".into();
         f.max_mb = "0".into();
         for _ in 0..7 {
-            r.push(SourceRow { name: "x".into(), kind: 1, target: "".into(), volume: 1.0, delay: 0, pick: 0 });
+            r.push(SourceRow { name: "x".into(), kind: 1, target: "".into(), volume: 1.0, delay: 0, pick: 0, mono: false });
         }
         let p = build_config(&f, &r, &c).unwrap_err();
         for expected in [
@@ -522,7 +523,7 @@ mod tests {
         let (mut f, mut r) = rows_of(&c);
         f.source_kind = 3;
         f.source_target = "  ".into();
-        r.push(SourceRow { name: " ".into(), kind: 0, target: "".into(), volume: 1.0, delay: 0, pick: 0 });
+        r.push(SourceRow { name: " ".into(), kind: 0, target: "".into(), volume: 1.0, delay: 0, pick: 0, mono: false });
         let p = build_config(&f, &r, &c).unwrap_err();
         assert!(p.contains(&Problem::EmptyVideoTarget));
         assert!(p.contains(&Problem::EmptySourceName(2)));

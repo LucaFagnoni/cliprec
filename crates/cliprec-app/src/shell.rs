@@ -91,7 +91,7 @@ impl App {
             match ev {
                 EngineEvent::ClipFailed { .. } | EngineEvent::Error(_) => *e = Some(Instant::now()),
                 EngineEvent::ClipSaved(_) => *e = None,
-                EngineEvent::Warning(_) => {}
+                EngineEvent::Warning(_) | EngineEvent::ClipRequested => {}
             }
         }
         if let Ok(mut n) = self.notifier.lock() {

@@ -21,6 +21,8 @@ pub enum AppCommand {
 /// Eventi dal motore alla shell, per notifiche e icona.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum EngineEvent {
+    /// Richiesta di clip accettata: snapshot preso, scrittura accodata (per il suono di conferma).
+    ClipRequested,
     ClipSaved(SavedClip),
     ClipFailed { kind: ClipKind, reason: String },
     /// Avviso non bloccante (es. pagine non bloccate in RAM, frame neri).
