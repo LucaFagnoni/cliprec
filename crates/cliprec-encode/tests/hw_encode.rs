@@ -130,7 +130,19 @@ fn run(gpu: &GpuDevice, enc: &mut dyn VideoEncoder, sizes: &[(u32, u32)], noise:
     (out, FRAMES as f64 / secs)
 }
 
-fn check_packets(pkts: &[Pkt]) {
+/// Tipi dei NAL di un pacchetto Annex B (parser indipendente da quello del crate).
+fn nal_types(data: &[u8], hevc: bool) -> Vec<u8> {
+    (0..data.len().saturating_sub(3))
+        .filter(|&i| data[i..i + 3] == [0, 0, 1])
+        .map(|i| if hevc { (data[i + 3] >> 1) & 0x3f } else { data[i + 3] & 0x1f })
+        .collect()
+}
+
+fn check_packets(pkts: &[Pkt], hevc: bool) {
+    for p in pkts {
+        let idr = nal_types(&p.data, hevc).iter().any(|&t| if hevc { t == 19 || t == 20 } else { t == 5 });
+        assert_eq!(p.keyframe, idr, "keyframe se e solo se il pacchetto contiene un IDR");
+    }
     assert_eq!(pkts.len() as u64, FRAMES, "un pacchetto per frame");
     assert!(pkts[0].keyframe, "il primo pacchetto deve essere un keyframe");
     for w in pkts.windows(2) {
@@ -153,7 +165,7 @@ fn check_packets(pkts: &[Pkt]) {
 }
 
 fn ffprobe(path: &PathBuf) -> String {
-    let ffmpeg = std::env::var("FFMPEG_DIR").unwrap_or_else(|_| r"D:\Repositories\cliprec\third_party\ffmpeg".into());
+    let ffmpeg = std::env::var("FFMPEG_DIR").unwrap_or_else(|_| "D:/Repositories/cliprec/third_party/ffmpeg".into());
     let out = Command::new(PathBuf::from(ffmpeg).join("bin").join("ffprobe.exe"))
         .args(["-v", "error", "-count_frames", "-select_streams", "v:0"])
         .args(["-show_entries", "stream=codec_name,width,height,nb_read_frames", "-of", "csv=p=0"])
@@ -162,6 +174,26 @@ fn ffprobe(path: &PathBuf) -> String {
         .unwrap();
     assert!(out.status.success(), "ffprobe: {}", String::from_utf8_lossy(&out.stderr));
     String::from_utf8_lossy(&out.stdout).trim().to_owned()
+}
+
+/// Decodifica il file con ffmpeg e confronta il pixel centrale di ogni frame con il colore pieno
+/// disegnato in `run`: rileva superfici riscritte mentre l'encoder le legge e conversioni sbagliate.
+fn check_colors(path: &PathBuf, w: u32, h: u32) {
+    let ffmpeg = std::env::var("FFMPEG_DIR").unwrap_or_else(|_| "D:/Repositories/cliprec/third_party/ffmpeg".into());
+    let out = Command::new(PathBuf::from(ffmpeg).join("bin").join("ffmpeg.exe"))
+        .args(["-v", "error", "-i"])
+        .arg(path)
+        .args(["-vf", &format!("crop=2:2:{}:{}", w / 2, h / 2), "-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "ffmpeg: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(out.stdout.len() as u64, FRAMES * 12);
+    for (i, px) in out.stdout.chunks(12).enumerate() {
+        let t = i as f32 / FRAMES as f32;
+        let want = [t, 1.0 - t, (i % 60) as f32 / 60.0].map(|c| (c * 255.0).round() as i32);
+        let diff = (0..3).map(|c| (i32::from(px[c]) - want[c]).abs()).max().unwrap();
+        assert!(diff <= 6, "frame {i}: {:?} invece di {want:?}", &px[..3]);
+    }
 }
 
 fn write_stream(name: &str, extradata: &[u8], pkts: &[Pkt]) -> PathBuf {
@@ -203,12 +235,15 @@ fn encode_and_probe(
     assert!(!params.extradata.is_empty(), "extradata vuoto");
     assert_eq!((params.width, params.height), out);
     let (pkts, fps) = run(&gpu, enc.as_mut(), sizes, noise);
-    check_packets(&pkts);
+    check_packets(&pkts, probe_codec == "hevc");
     let bytes: usize = pkts.iter().map(|p| p.data.len()).sum();
     let bps = bytes as f64 * 8.0 / (FRAMES as f64 / f64::from(FPS));
     let key_bytes = pkts.iter().filter(|p| p.keyframe).map(|p| p.data.len()).max().unwrap_or(0);
     let path = write_stream(file, &params.extradata, &pkts);
     let probe = ffprobe(&path);
+    if !noise {
+        check_colors(&path, out.0, out.1);
+    }
     eprintln!(
         "{encoder}{} su {}: {fps:.0} fps di encode, {} pacchetti, {:.1} KB/pacchetto medi, keyframe max {:.1} KB, {:.2} Mbit/s (tetto {:.2}), extradata {} B (inizio {:02x?}); ffprobe: {probe}",
         if noise { " (rumore)" } else { "" },
@@ -313,6 +348,48 @@ fn com_references_are_balanced() {
         assert!(refcount(&gpu.device) > before, "l'encoder deve tenere riferimenti al device");
     }
     assert_eq!(refcount(&gpu.device), before, "riferimenti al device non rilasciati");
+}
+
+#[test]
+fn open_after_skips_failed_encoders() {
+    let Some(gpu) = device(NVIDIA) else { return };
+    let settings = EncoderSettings::from_config(&Default::default(), 1920, 1080);
+    let enc = cliprec_encode::open_after(&gpu, &settings, &["hevc_nvenc".to_owned()]).unwrap();
+    assert_eq!(enc.params().encoder_name, "h264_nvenc");
+    let all: Vec<String> = cliprec_encode::candidates(settings.codec).into_iter().map(|(_, n)| n).collect();
+    assert!(cliprec_encode::open_after(&gpu, &settings, &all).is_err());
+}
+
+/// Writer condiviso per catturare l'uscita di tracing.
+#[derive(Clone, Default)]
+struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for Captured {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn ffmpeg_logs_go_to_tracing() {
+    let Some(gpu) = device(NVIDIA) else { return };
+    let out = Captured::default();
+    let writer = out.clone();
+    let subscriber = tracing_subscriber::fmt().with_writer(move || writer.clone()).with_ansi(false).finish();
+    // Globale: con un subscriber per thread l'interesse dei callsite, già registrati da altri test
+    // in parallelo, può restare in cache come «mai». Nessun altro test installa un subscriber.
+    tracing::subscriber::set_global_default(subscriber).unwrap();
+    cliprec_encode::quiet_ffmpeg_logs();
+    // QSV su un device NVIDIA: libvpl non crea la sessione e FFmpeg lo scrive a livello ERROR.
+    let settings = EncoderSettings::from_config(&Default::default(), 1280, 720);
+    assert!(cliprec_encode::open(&gpu, &settings, "hevc_qsv").is_err());
+    let text = String::from_utf8(out.0.lock().unwrap().clone()).unwrap();
+    eprintln!("{text}");
+    assert!(text.contains("ffmpeg") && text.contains("QSV"), "log FFmpeg non inoltrato: {text:?}");
 }
 
 #[test]

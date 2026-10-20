@@ -21,5 +21,8 @@ windows = { workspace = true, features = [
     "Wdk_Graphics_Direct3D",
 ] }
 
+[dev-dependencies]
+tracing-subscriber.workspace = true
+
 [lints]
 workspace = true
