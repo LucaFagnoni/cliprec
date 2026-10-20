@@ -20,6 +20,7 @@
 //! ```
 
 mod d3d;
+mod worker;
 mod ffi;
 mod nal;
 mod yuv;

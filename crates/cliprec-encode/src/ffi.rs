@@ -9,6 +9,7 @@ use windows::Win32::Graphics::Direct3D11::{D3D11_BIND_DECODER, D3D11_BIND_RENDER
 use windows::core::Interface;
 
 use crate::d3d::{Converter, Output};
+use crate::worker::{Done, Worker};
 use crate::yuv::{Plane, nv12_to_i420};
 use crate::{EncoderSettings, Vendor};
 use cliprec_core::config::RateControl;
@@ -20,7 +21,7 @@ use cliprec_core::config::RateControl;
 /// riempito con una copia GPU da una texture render target intermedia.
 const QSV_POOL_SIZE: c_int = 16;
 
-const EAGAIN: c_int = 11;
+pub(crate) const EAGAIN: c_int = 11;
 const ENOENT: c_int = 2;
 const EINVAL: c_int = 22;
 const ENOSYS: c_int = 40;
@@ -48,7 +49,7 @@ struct AVD3D11VAFramesContext {
     texture_infos: *mut c_void,
 }
 
-fn av_error_string(code: c_int) -> String {
+pub(crate) fn av_error_string(code: c_int) -> String {
     let mut buf = [0 as c_char; 128];
     // SAFETY: il buffer è locale e la sua lunghezza è passata; av_strerror lo termina con NUL.
     unsafe {
@@ -138,6 +139,9 @@ pub(crate) struct HwEncoder {
     /// Ultimo frame mandato all'encoder (`frame` o una superficie QSV), nullo prima del primo: un
     /// frame ripetuto lo rimanda senza rifare la conversione.
     last_sent: *mut ffi::AVFrame,
+    /// Thread che manda i frame a FFmpeg e raccoglie i pacchetti; da quando parte è l'unico a usare
+    /// `ctx` e `pkt`.
+    worker: Option<Worker>,
 }
 
 // SAFETY: i contesti FFmpeg non sono legati al thread che li ha creati; `HwEncoder` è usato da un
@@ -150,6 +154,8 @@ impl Drop for HwEncoder {
         // SAFETY: ogni puntatore è nullo o di proprietà esclusiva di `self`; le funzioni di
         // rilascio di FFmpeg accettano puntatori nulli e li azzerano.
         unsafe {
+            // Prima il thread, che usa contesto e pacchetto.
+            self.worker = None;
             ffi::avcodec_free_context(&mut self.ctx);
             ffi::av_frame_free(&mut self.frame);
             for slot in &mut self.qsv_slots {
@@ -253,6 +259,7 @@ impl HwEncoder {
             first: None,
             last_pts: -1,
             last_sent: ptr::null_mut(),
+            worker: None,
         };
 
         // SAFETY: sequenza documentata di libavutil/libavcodec. Ogni puntatore allocato finisce
@@ -414,6 +421,9 @@ impl HwEncoder {
             if !c.extradata.is_null() && c.extradata_size > 0 {
                 enc.params.extradata = std::slice::from_raw_parts(c.extradata, c.extradata_size as usize).to_vec();
             }
+            // Da qui `ctx` e `pkt` li usa solo il thread dell'encoder; `enc` lo ferma prima di liberarli.
+            let worker = Worker::start(enc.ctx, enc.pkt).map_err(|e| EncodeError::Failed(format!("{name}: thread dell'encoder: {e}")))?;
+            enc.worker = Some(worker);
         }
         Ok(enc)
     }
@@ -544,55 +554,66 @@ impl HwEncoder {
         base.add_hns(hns as i64)
     }
 
-    /// Manda all'encoder `send` (un frame di `self` già riempito) con il pts dato, poi svuota.
-    fn send(&mut self, send: *mut ffi::AVFrame, pts: i64, sink: &mut dyn FnMut(PacketRef<'_>)) -> Result<(), EncodeError> {
-        // SAFETY: `send` è un frame di proprietà di `self` con un buffer valido; l'encoder ne
-        // prende un riferimento proprio in avcodec_send_frame, quindi rimandarlo è lecito.
-        let ret = unsafe {
-            let f = &mut *send;
-            f.pts = pts;
-            f.duration = 1;
-            f.color_primaries = ffi::AVColorPrimaries::BT709;
-            f.color_trc = ffi::AVColorTransferCharacteristic::BT709;
-            f.colorspace = ffi::AVColorSpace::BT709;
-            f.color_range = ffi::AVColorRange::MPEG;
-            ffi::avcodec_send_frame(self.ctx, send)
-        };
-        if ret < 0 {
-            return Err(self.runtime_error("avcodec_send_frame", av_error_string(ret)));
+    /// Accoda per il thread dell'encoder un riferimento a `send` (un frame di `self` già riempito)
+    /// con il pts dato, e consegna a `sink` i pacchetti pronti.
+    fn queue(&mut self, send: *mut ffi::AVFrame, pts: i64, sink: &mut dyn FnMut(PacketRef<'_>)) -> Result<(), EncodeError> {
+        let Some(worker) = self.worker.as_ref() else { return Err(self.runtime_error("encoder", "chiuso".into())) };
+        let mut failed = None;
+        let mut ready = |d: Done| self.deliver(d, sink, &mut failed);
+        // SAFETY: `send` è un frame di `self` con un buffer valido, convertito sopra.
+        let queued = unsafe { worker.queue(send, pts, &mut ready) };
+        if let Err(Done::Failed(step, e)) = queued {
+            return Err(self.runtime_error(step, e));
         }
-        self.drain(sink)
+        failed.map_or(Ok(()), Err)
     }
 
-    /// Consegna a `sink` tutti i pacchetti pronti.
-    fn drain(&mut self, sink: &mut dyn FnMut(PacketRef<'_>)) -> Result<(), EncodeError> {
-        let duration = HNS_PER_SEC / i64::from(self.params.fps.max(1));
-        loop {
-            // SAFETY: contesto aperto e pacchetto allocato, entrambi di proprietà di `self`.
-            let ret = unsafe { ffi::avcodec_receive_packet(self.ctx, self.pkt) };
-            if ret == ffi::AVERROR(EAGAIN) || ret == ffi::AVERROR_EOF {
-                return Ok(());
-            }
-            if ret < 0 {
-                return Err(self.runtime_error("avcodec_receive_packet", av_error_string(ret)));
-            }
-            // SAFETY: dopo un receive riuscito `pkt` contiene dati validi per `size` byte fino a
-            // av_packet_unref; la fetta non sopravvive alla chiamata di `sink`.
-            unsafe {
-                let p = &*self.pkt;
-                let data = if p.data.is_null() || p.size <= 0 { &[][..] } else { std::slice::from_raw_parts(p.data, p.size as usize) };
-                let dts = if p.dts == ffi::AV_NOPTS_VALUE { p.pts } else { p.dts };
+    /// Consegna un risultato del thread: pacchetto a `sink`, errore in `failed`.
+    fn deliver(&self, d: Done, sink: &mut dyn FnMut(PacketRef<'_>), failed: &mut Option<EncodeError>) {
+        match d {
+            Done::Packet(p) => {
                 sink(PacketRef {
-                    data,
+                    data: &p.data,
                     pts: self.to_qpc(p.pts),
-                    dts: self.to_qpc(dts),
-                    duration,
+                    dts: self.to_qpc(p.dts),
+                    duration: HNS_PER_SEC / i64::from(self.params.fps.max(1)),
                     // Solo gli IDR aprono un GOP chiuso: un I-frame non IDR o un CRA non bastano.
-                    keyframe: p.flags & ffi::AV_PKT_FLAG_KEY != 0
-                        && crate::nal::first_vcl_is_idr(self.params.codec, data).unwrap_or(true),
+                    keyframe: p.key && crate::nal::first_vcl_is_idr(self.params.codec, &p.data).unwrap_or(true),
                 });
-                ffi::av_packet_unref(self.pkt);
+                if let Some(w) = self.worker.as_ref() {
+                    w.recycle(p.data);
+                }
             }
+            Done::Failed(step, e) => *failed = Some(self.runtime_error(step, e)),
+            Done::Flushed => {}
+        }
+    }
+
+    /// Superficie QSV libera (l'encoder e la coda hanno rilasciato il loro riferimento), aspettando
+    /// fino a [`crate::worker::STALL`] e consegnando intanto i pacchetti.
+    fn free_qsv_slot(&mut self, sink: &mut dyn FnMut(PacketRef<'_>)) -> Result<usize, EncodeError> {
+        let n = self.qsv_slots.len();
+        let deadline = std::time::Instant::now() + crate::worker::STALL;
+        loop {
+            // SAFETY: i frame delle superfici sono mappati e vivi fino a Drop; buf[0] non è nullo
+            // (verificato in map_qsv_slots).
+            let free = (0..n)
+                .map(|k| (self.next_slot + k) % n)
+                .find(|&i| unsafe { ffi::av_buffer_get_ref_count((*self.qsv_slots[i].frame).buf[0]) } == 1);
+            if let Some(i) = free {
+                return Ok(i);
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(self.runtime_error("superficie QSV", format!("tutte le {n} superfici sono occupate")));
+            }
+            let mut failed = None;
+            if let Some(w) = self.worker.as_ref() {
+                w.poll(&mut |d| self.deliver(d, sink, &mut failed));
+            }
+            if let Some(e) = failed {
+                return Err(e);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
         }
     }
 }
@@ -611,7 +632,7 @@ impl VideoEncoder for HwEncoder {
         // la superficie già convertita. Niente conversione sulla GPU, che sotto carico compete col
         // gioco e fa perdere tick; come i frame duplicati di `ffmpeg -r`, che gli encoder accettano.
         if frame.repeated && !self.last_sent.is_null() {
-            return self.send(self.last_sent, pts, sink);
+            return self.queue(self.last_sent, pts, sink);
         }
         // Finché la conversione non riesce, nessuna superficie è valida da rimandare.
         self.last_sent = ptr::null_mut();
@@ -636,14 +657,7 @@ impl VideoEncoder for HwEncoder {
             }
         } else {
             let n = self.qsv_slots.len();
-            // SAFETY: i frame delle superfici sono mappati e vivi fino a Drop; buf[0] non è nullo
-            // (verificato in map_qsv_slots).
-            let free = (0..n)
-                .map(|k| (self.next_slot + k) % n)
-                .find(|&i| unsafe { ffi::av_buffer_get_ref_count((*self.qsv_slots[i].frame).buf[0]) } == 1);
-            let Some(i) = free else {
-                return Err(self.runtime_error("superficie QSV", format!("tutte le {n} superfici sono occupate")));
-            };
+            let i = self.free_qsv_slot(sink)?;
             self.next_slot = (i + 1) % n;
             let slot = &self.qsv_slots[i];
             (slot.texture, slot.index, slot.frame)
@@ -670,15 +684,16 @@ impl VideoEncoder for HwEncoder {
         }
 
         self.last_sent = send;
-        self.send(send, pts, sink)
+        self.queue(send, pts, sink)
     }
 
     fn flush(&mut self, sink: &mut dyn FnMut(PacketRef<'_>)) -> Result<(), EncodeError> {
-        // SAFETY: contesto aperto; un frame nullo chiede lo svuotamento.
-        let ret = unsafe { ffi::avcodec_send_frame(self.ctx, ptr::null()) };
-        if ret < 0 && ret != ffi::AVERROR_EOF {
-            return Err(self.runtime_error("flush", av_error_string(ret)));
+        let Some(worker) = self.worker.as_ref() else { return Ok(()) };
+        let mut failed = None;
+        let flushed = worker.flush(&mut |d| self.deliver(d, sink, &mut failed));
+        if let Err(Done::Failed(step, e)) = flushed {
+            return Err(self.runtime_error(step, e));
         }
-        self.drain(sink)
+        failed.map_or(Ok(()), Err)
     }
 }
