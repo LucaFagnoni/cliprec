@@ -116,6 +116,38 @@ fn create_instance(name: &[u16], sddl: &[u16], first: bool) -> anyhow::Result<Ra
     Ok(h.0)
 }
 
+/// Thread in ascolto contemporaneo sulla pipe.
+const ACCEPTORS: usize = 4;
+
+fn accept_loop(name: &[u16], sddl: &[u16], ctx: &Context, pending: &mut Option<usize>) {
+    loop {
+        let raw = match pending.take() {
+            Some(h) => h as RawHandle,
+            None => match create_instance(name, sddl, false) {
+                Ok(h) => h,
+                Err(e) => {
+                    tracing::error!("pipe: {e}");
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                    continue;
+                }
+            },
+        };
+        // SAFETY: `raw` è un handle di pipe valido di cui prendiamo la proprietà.
+        let file = unsafe { File::from_raw_handle(raw) };
+        // SAFETY: l'handle resta valido finché `file` vive; chiamata sincrona.
+        let connected = unsafe { ConnectNamedPipe(windows::Win32::Foundation::HANDLE(raw), None) };
+        // Un client può collegarsi tra la creazione e la connect: non è un errore.
+        // SAFETY: legge l'ultimo errore del thread.
+        if connected.is_err() && unsafe { GetLastError() } != ERROR_PIPE_CONNECTED {
+            continue;
+        }
+        let ctx = ctx.clone();
+        if let Err(e) = std::thread::Builder::new().name("ipc-conn".into()).spawn(move || serve_connection(&ctx, file)) {
+            tracing::error!("thread connessione: {e}");
+        }
+    }
+}
+
 /// Avvia il server su `pipe_name` in un thread supervisionato. Se un'altra istanza possiede già
 /// la pipe (o la creazione fallisce) restituisce l'errore e non parte.
 pub fn spawn(pipe_name: String, ctx: Context) -> anyhow::Result<()> {
@@ -123,35 +155,13 @@ pub fn spawn(pipe_name: String, ctx: Context) -> anyhow::Result<()> {
     let sddl = wide(&format!("D:P(A;;GA;;;{})", crate::sys::current_user_sid()?));
     // La prima istanza è creata qui per riportare subito un conflitto; poi passa al thread.
     let first = create_instance(&name, &sddl, true)? as usize;
-    let mut pending = Some(first);
-    spawn_supervised("ipc", move || {
-        loop {
-            let raw = match pending.take() {
-                Some(h) => h as RawHandle,
-                None => match create_instance(&name, &sddl, false) {
-                    Ok(h) => h,
-                    Err(e) => {
-                        tracing::error!("pipe: {e}");
-                        std::thread::sleep(std::time::Duration::from_secs(1));
-                        continue;
-                    }
-                },
-            };
-            // SAFETY: `raw` è un handle di pipe valido di cui prendiamo la proprietà.
-            let file = unsafe { File::from_raw_handle(raw) };
-            // SAFETY: l'handle resta valido finché `file` vive; chiamata sincrona.
-            let connected = unsafe { ConnectNamedPipe(windows::Win32::Foundation::HANDLE(raw), None) };
-            // Un client può collegarsi tra la creazione e la connect: non è un errore.
-            // SAFETY: legge l'ultimo errore del thread.
-            if connected.is_err() && unsafe { GetLastError() } != ERROR_PIPE_CONNECTED {
-                continue;
-            }
-            let ctx = ctx.clone();
-            if let Err(e) = std::thread::Builder::new().name("ipc-conn".into()).spawn(move || serve_connection(&ctx, file)) {
-                tracing::error!("thread connessione: {e}");
-            }
-        }
-    })?;
+    // Più thread in ascolto: mentre uno crea la sua prossima istanza gli altri hanno già una pipe
+    // libera, così un secondo client non trova mai la pipe occupata (m5).
+    for i in 0..ACCEPTORS {
+        let (name, sddl, ctx) = (name.clone(), sddl.clone(), ctx.clone());
+        let mut pending = (i == 0).then_some(first);
+        spawn_supervised("ipc", move || accept_loop(&name, &sddl, &ctx, &mut pending))?;
+    }
     Ok(())
 }
 
@@ -235,5 +245,35 @@ mod tests {
         assert!(matches!(decode_line::<IpcResponse>(&line), Ok(IpcResponse::Error(_))), "risposta all'errore interno: {line:?}");
         let line = ask(IpcRequest::Status);
         assert!(matches!(decode_line::<IpcResponse>(&line), Ok(IpcResponse::Status(_))), "la connessione deve restare viva: {line:?}");
+    }
+
+    #[test]
+    fn m5_two_concurrent_clients_never_find_the_pipe_busy() {
+        let (c, _rx, _) = ctx();
+        let name = format!(r"\\.\pipe\cliprec-test-m5-{}", std::process::id());
+        spawn(name.clone(), c).unwrap();
+        let busy = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let workers: Vec<_> = (0..2)
+            .map(|_| {
+                let (name, busy) = (name.clone(), busy.clone());
+                std::thread::spawn(move || {
+                    for _ in 0..1000 {
+                        match OpenOptions::new().read(true).write(true).open(&name) {
+                            Ok(mut p) => {
+                                p.write_all(encode_line(&IpcRequest::Status).unwrap().as_bytes()).unwrap();
+                                let mut line = String::new();
+                                BufReader::new(&p).read_line(&mut line).unwrap();
+                            }
+                            Err(e) if e.raw_os_error() == Some(231) => _ = busy.fetch_add(1, Ordering::SeqCst),
+                            Err(e) => panic!("{e}"),
+                        }
+                    }
+                })
+            })
+            .collect();
+        for w in workers {
+            w.join().unwrap();
+        }
+        assert_eq!(busy.load(Ordering::SeqCst), 0, "ERROR_PIPE_BUSY su 2000 connessioni");
     }
 }
