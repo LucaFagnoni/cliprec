@@ -48,6 +48,11 @@ Name: "autostart"; Description: "Avvia ClipRec con Windows"; Flags: unchecked
 
 [Files]
 Source: "..\target\dist\ClipRec\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs
+; Visual C++ Redistributable (scelta di Luca). Scaricarlo prima con `cargo xtask redist`.
+; ATTENZIONE: il redistributable chiede l'elevazione (UAC) anche se l'installer di ClipRec e per
+; utente e senza amministratore; si lancia solo se il runtime manca (VCRedistNeeded). La cartella
+; di ClipRec contiene comunque le DLL del runtime accanto agli exe (distribuzione app-local).
+Source: "..\third_party\vc_redist\vc_redist.x64.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall; Check: VCRedistNeeded
 
 [Icons]
 ; AppUserModelID uguale a quello di autostart.rs: i toast funzionano dal primo avvio.
@@ -60,6 +65,7 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
   ValueData: """{app}\{#AppExe}"" --tray"; Flags: uninsdeletevalue; Tasks: autostart
 
 [Run]
+Filename: "{tmp}\vc_redist.x64.exe"; Parameters: "/install /quiet /norestart"; StatusMsg: "Installazione del runtime Visual C++ (richiede l'autorizzazione di Windows)..."; Check: VCRedistNeeded
 Filename: "{app}\{#AppExe}"; Parameters: "--tray"; Description: "Avvia ClipRec"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
@@ -68,6 +74,16 @@ Filename: "{sys}\taskkill.exe"; Parameters: "/F /IM {#AppExe}"; Flags: runhidden
 Filename: "{sys}\taskkill.exe"; Parameters: "/F /IM cliprec-settings.exe"; Flags: runhidden; RunOnceId: "KillSettings"
 
 [Code]
+// Runtime VC++ 14.x x64 gia presente? (valore Installed=1, vista a 64 bit e WOW6432Node)
+function VCRedistNeeded: Boolean;
+var
+  v: Cardinal;
+begin
+  Result := not (
+    (RegQueryDWordValue(HKLM64, 'SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64', 'Installed', v) and (v = 1)) or
+    (RegQueryDWordValue(HKLM64, 'SOFTWARE\WOW6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\x64', 'Installed', v) and (v = 1)));
+end;
+
 // Alla disinstallazione la configurazione in %APPDATA%\ClipRec resta, salvo scelta.
 // Le clip in Videos\ClipRec non si toccano mai.
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
