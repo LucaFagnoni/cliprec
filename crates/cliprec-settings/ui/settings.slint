@@ -38,6 +38,9 @@ export global T {
     in property <string> placeholder-device;
     in property <string> hotkey-video;
     in property <string> hotkey-audio;
+    in property <string> pad-video;
+    in property <string> pad-audio;
+    in property <string> pad-hint;
     in property <string> hotkey-press;
     in property <string> hotkey-clear;
     in property <string> hotkey-hint;
@@ -92,6 +95,8 @@ export struct Form {
     add-mix: bool,
     hotkey-video: string,
     hotkey-audio: string,
+    pad-video: string,
+    pad-audio: string,
     video-seconds: int,
     audio-seconds: int,
     folder: string,
@@ -360,6 +365,15 @@ export component SettingsWindow inherits Window {
                         }
                         Button { text: T.hotkey-clear; clicked => { root.f.hotkey-audio = ""; } }
                     }
+                    FormRow {
+                        label: T.pad-video;
+                        LineEdit { text <=> root.f.pad-video; placeholder-text: "Back+A"; min-width: 260px; }
+                    }
+                    FormRow {
+                        label: T.pad-audio;
+                        LineEdit { text <=> root.f.pad-audio; placeholder-text: "LB+RB+Y"; min-width: 260px; }
+                    }
+                    Text { text: T.pad-hint; color: #808080; wrap: word-wrap; }
                     Text { text: T.hotkey-hint; color: #808080; wrap: word-wrap; }
                     Text { text: root.hotkey-warning; color: #d08000; wrap: word-wrap; visible: root.hotkey-warning != ""; }
                 }
