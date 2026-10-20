@@ -669,6 +669,40 @@ mod tests {
         assert!(s.frames_dropped <= 6, "{} tick persi su {}", s.frames_dropped, s.frames_delivered + s.frames_dropped);
     }
 
+    /// Zero-copy: con WGC i frame consegnati sono le superfici del pool (condivise con DWM), non
+    /// copie; il pacer ne tiene al più due e il pool non si esaurisce (i frame nuovi continuano ad
+    /// arrivare anche con una callback lenta come una conversione sotto carico).
+    #[test]
+    fn wgc_frames_are_delivered_without_copy() {
+        use windows::Win32::Graphics::Direct3D11::{D3D11_RESOURCE_MISC_SHARED_NTHANDLE, D3D11_TEXTURE2D_DESC};
+        let _capture = shared_capture();
+        let _anim = TestWindow::open("cliprec-test-zero-copy", 320, 240);
+        let device = crate::device_for_monitor(0).unwrap();
+        let mut src = CaptureSource::new(device, Target::Monitor(0), false).prefer_desktop_duplication(false);
+        let shared = Arc::new(Mutex::new((0u32, 0u32)));
+        let seen = shared.clone();
+        src.start(
+            60,
+            Box::new(move |f| {
+                let mut d = D3D11_TEXTURE2D_DESC::default();
+                // SAFETY: texture valida per tutta la callback.
+                unsafe { f.texture.GetDesc(&mut d) };
+                let mut s = seen.lock().unwrap();
+                s.0 += 1;
+                s.1 += u32::from(d.MiscFlags & D3D11_RESOURCE_MISC_SHARED_NTHANDLE.0 as u32 != 0);
+                std::thread::sleep(Duration::from_millis(8));
+            }),
+        )
+        .unwrap();
+        std::thread::sleep(Duration::from_secs(2));
+        src.stop();
+        let (frames, pool) = *shared.lock().unwrap();
+        let arrived = src.frames_arrived();
+        println!("{frames} frame consegnati, {pool} superfici del pool WGC, {arrived} arrivati");
+        assert!(frames >= 100 && pool >= frames - 2, "copie invece delle superfici WGC: {pool} su {frames}");
+        assert!(arrived >= 60, "pool WGC esaurito: {arrived} frame arrivati in 2 s");
+    }
+
     /// Finestra propria catturata, ridimensionata, minimizzata e chiusa durante la cattura.
     #[test]
     fn window_capture_survives_resize_minimize_and_close() {

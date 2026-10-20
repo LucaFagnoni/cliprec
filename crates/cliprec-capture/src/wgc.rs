@@ -1,5 +1,6 @@
-//! Sessione Windows.Graphics.Capture: frame pool free-threaded a 2 buffer sul device condiviso;
-//! ogni frame arrivato viene copiato in uno slot del pacer e rilasciato subito.
+//! Sessione Windows.Graphics.Capture: frame pool free-threaded a 4 buffer sul device condiviso.
+//! Zero-copy: ogni frame arrivato va negli slot del pacer così com'è e torna al pool quando ne
+//! arriva uno più nuovo e il pacer non lo sta consegnando (al più due frame in mano).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -12,7 +13,7 @@ use windows::Graphics::DirectX::Direct3D11::IDirect3DDevice;
 use windows::Graphics::DirectX::DirectXPixelFormat;
 use windows::Graphics::SizeInt32;
 use windows::Win32::Foundation::{HWND, RECT};
-use windows::Win32::Graphics::Direct3D11::{D3D11_BOX, D3D11_TEXTURE2D_DESC, ID3D11Texture2D};
+use windows::Win32::Graphics::Direct3D11::{D3D11_TEXTURE2D_DESC, ID3D11Texture2D};
 use windows::Win32::Graphics::Dxgi::IDXGIDevice;
 use windows::Win32::Graphics::Gdi::HMONITOR;
 use windows::Win32::System::WinRT::Direct3D11::{CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess};
@@ -23,7 +24,8 @@ use crate::pacer::{FrameSlots, Stats};
 use crate::targets::{is_minimized, window_rect};
 
 const FORMAT: DirectXPixelFormat = DirectXPixelFormat::B8G8R8A8UIntNormalized;
-const BUFFERS: i32 = 2;
+/// Due frame al più in mano al pacer (l'ultimo e quello in consegna) e due per WGC.
+const BUFFERS: i32 = 4;
 const SESSION_CLASS: &str = "Windows.Graphics.Capture.GraphicsCaptureSession";
 
 /// `true` se il sistema supporta Windows.Graphics.Capture.
@@ -218,18 +220,14 @@ fn on_frame_arrived(
     // aspetta il primo frame del pool ricreato.
     let width = content.Width.max(1) as u32;
     let height = content.Height.max(1) as u32;
-    if width <= desc.Width && height <= desc.Height {
-        slots.publish(width, height, captured, |dst| {
-            let region = D3D11_BOX { left: 0, top: 0, front: 0, right: width, bottom: height, back: 1 };
-            // SAFETY: regione dentro entrambe le texture (stesso formato BGRA); contesto immediato protetto.
-            unsafe { slots.device.context.CopySubresourceRegion(dst, 0, 0, 0, 0, &src, 0, Some(&region)) };
-            Ok(())
-        })?;
-    }
-    // Nessun riferimento alla superficie oltre il rilascio del frame.
-    drop(src);
     drop(access);
-    frame.Close()?;
+    if width <= desc.Width && height <= desc.Height {
+        // Senza copia: il frame resta allo slot, che lo chiude quando non serve più.
+        slots.publish_frame(frame, src, width, height, captured);
+    } else {
+        drop(src);
+        frame.Close()?;
+    }
     stats.arrived.fetch_add(1, Ordering::Relaxed);
     if content.Width > 0 && content.Height > 0 && pack(content) != pool_size.load(Ordering::Relaxed) {
         // Raro (ridimensionamento): ricrea il device WinRT invece di tenerlo nel gestore.

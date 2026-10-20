@@ -37,7 +37,14 @@ if ($audio) {
     Esito 'sincronia clip audio' ($LASTEXITCODE -eq 0) $s.Trim()
 }
 
-# 3. App completa sulla finestra di test
+# 3. App completa sulla finestra di test. Con un ClipRec già aperto (quello dell'utente) la pipe
+# porterebbe a lui: Status, TestClip e Quit finirebbero sulla sua istanza. Allora si salta.
+$altro = Get-Process cliprec-app -ErrorAction SilentlyContinue
+if ($altro) {
+    Esito 'app completa' $false "saltata: un ClipRec è già in esecuzione (PID $($altro.Id -join ', ')); chiudilo e rilancia"
+    $esiti | Format-Table -AutoSize -Wrap
+    exit 1
+}
 $cfg = Join-Path $out 'config.toml'
 @"
 [video]

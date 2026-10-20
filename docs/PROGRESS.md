@@ -5,6 +5,14 @@ indipendente, analisi della RAM). Il riepilogo della notte segue più sotto, agg
 
 ## Riepilogo per Luca
 
+### Cattura ottimizzata (20 ottobre, sera, DECISIONS 44)
+
+- WGC senza copie: la superficie catturata va direttamente alla conversione (test
+  `wgc_frames_are_delivered_without_copy`); una copia BGRA piena in meno per ogni frame arrivato.
+- Encoder su un thread proprio con una coda di 6 frame: i picchi di lentezza non fanno più
+  perdere tick al pacer.
+- Da provare: frame persi in un gioco pesante rispetto alla 0.1.8.
+
 ### Limiti noti ridotti (20 ottobre, pomeriggio, DECISIONS 43)
 
 - Frame ripetuti e riempitivi senza conversione né copie sulla GPU (meno frame persi sotto carico).

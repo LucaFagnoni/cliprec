@@ -14,6 +14,8 @@ use crate::time::QpcTime;
 /// durante la chiamata a [`FrameCallback`]: chi la riceve deve finire di leggerla (o accodarne
 /// la copia sul contesto immediato) prima di tornare.
 pub struct GpuFrame {
+    /// Grande almeno `width`×`height`: il contenuto è il rettangolo in alto a sinistra (le superfici
+    /// di WGC, consegnate senza copia, possono essere più grandi del contenuto).
     pub texture: ID3D11Texture2D,
     pub width: u32,
     pub height: u32,

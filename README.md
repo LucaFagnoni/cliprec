@@ -104,9 +104,9 @@ Per pubblicare una versione: alzare `version` in `Cargo.toml` del workspace, poi
   del monitor, sia con la cattura del gioco sia con quella del monitor, e torna indietro quando il
   gioco esce dallo schermo intero. Nessuna iniezione nel gioco, quindi nessun rischio con gli
   anti-cheat; resta escluso solo ciò che Windows protegge (contenuti DRM).
-- **Frame persi sotto carico**: i frame ripetuti e i riempitivi dei tick persi non costano più
-  lavoro alla scheda video (si rimanda la superficie già convertita), quindi sotto carico se ne
-  perdono meno. Se il gioco satura la GPU qualche tick può ancora saltare, contato in «frame persi»;
+- **Frame persi sotto carico**: i frame catturati arrivano all'encoder senza copie, i frame
+  ripetuti e i riempitivi non costano lavoro alla scheda video, e l'encoder lavora su un thread
+  suo con una coda di 100 ms che assorbe i picchi, quindi sotto carico se ne perdono meno. Se il gioco satura la GPU qualche tick può ancora saltare, contato in «frame persi»;
   i buchi fino a 250 ms si riempiono ripetendo il frame, così il file resta a frequenza costante.
   Il colore 4:4:4 li aumenta.
 - **AMD (AMF)**: scritto e con un ripiego in VBR semplice, ma provato solo senza una Radeon. Se

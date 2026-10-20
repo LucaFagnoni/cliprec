@@ -12,6 +12,7 @@ use windows::Win32::Graphics::Direct3D11::{
     D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, ID3D11RenderTargetView,
     ID3D11Texture2D,
 };
+use windows::Graphics::Capture::Direct3D11CaptureFrame;
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
 use windows::Win32::System::Threading::{
     CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, CreateWaitableTimerExW, GetCurrentThread, INFINITE, SetThreadPriority,
@@ -67,6 +68,16 @@ struct Slot {
     /// Istante QPC in cui il contenuto è stato prodotto (`SystemRelativeTime` di WGC,
     /// `LastPresentTime` di DDA, il pts per la sintetica).
     captured: QpcTime,
+    /// Frame WGC di cui `tex` è la superficie (zero-copy): torna al pool quando lo slot si libera.
+    frame: Option<Direct3D11CaptureFrame>,
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        if let Some(f) = self.frame.take() {
+            let _ = f.Close();
+        }
+    }
 }
 
 #[derive(Default)]
@@ -80,6 +91,18 @@ struct SlotsInner {
     seq: u64,
     /// `true` dopo il primo frame vero (non segnaposto).
     real: bool,
+}
+
+impl SlotsInner {
+    /// Restituisce al pool i frame WGC che non sono né l'ultimo né quello in consegna.
+    fn drop_stale_frames(&mut self) {
+        let (latest, in_use) = (self.latest, self.in_use);
+        for (i, s) in self.slots.iter_mut().enumerate() {
+            if Some(i) != latest && Some(i) != in_use && s.as_ref().is_some_and(|s| s.frame.is_some()) {
+                *s = None;
+            }
+        }
+    }
 }
 
 /// L'ultimo frame preso in prestito dal pacer.
@@ -143,10 +166,11 @@ impl FrameSlots {
         let (latest, in_use) = (g.latest, g.in_use);
         // Con tre slot e al massimo due occupati, uno libero c'è sempre.
         let i = (0..3).find(|&i| Some(i) != latest && Some(i) != in_use).unwrap_or(0);
-        let reuse = matches!(&g.slots[i], Some(s) if s.width == width && s.height == height);
+        // Mai la superficie di un frame WGC: è del pool, non nostra.
+        let reuse = matches!(&g.slots[i], Some(s) if s.width == width && s.height == height && s.frame.is_none());
         if !reuse {
             let tex = create_bgra(&self.device, width, height)?;
-            g.slots[i] = Some(Slot { tex, width, height, captured });
+            g.slots[i] = Some(Slot { tex, width, height, captured, frame: None });
         }
         if let Some(s) = g.slots[i].as_mut() {
             fill(&s.tex)?;
@@ -156,6 +180,20 @@ impl FrameSlots {
         g.seq += 1;
         g.real |= real;
         Ok(())
+    }
+
+    /// Pubblica un frame WGC senza copiarlo: `tex` (la sua superficie, con il contenuto `width`×`height`
+    /// in alto a sinistra) resta valida finché il frame non torna al pool, cioè quando ne arriva uno
+    /// più nuovo e il pacer non lo sta consegnando. Così restano in mano al più due frame del pool.
+    pub fn publish_frame(&self, frame: Direct3D11CaptureFrame, tex: ID3D11Texture2D, width: u32, height: u32, captured: QpcTime) {
+        let mut g = lock(&self.inner);
+        let (latest, in_use) = (g.latest, g.in_use);
+        let i = (0..3).find(|&i| Some(i) != latest && Some(i) != in_use).unwrap_or(0);
+        g.slots[i] = Some(Slot { tex, width, height, captured, frame: Some(frame) });
+        g.latest = Some(i);
+        g.seq += 1;
+        g.real = true;
+        g.drop_stale_frames();
     }
 
     fn has_real(&self) -> bool {
@@ -178,7 +216,9 @@ impl FrameSlots {
     }
 
     fn release(&self) {
-        lock(&self.inner).in_use = None;
+        let mut g = lock(&self.inner);
+        g.in_use = None;
+        g.drop_stale_frames();
     }
 
     /// Esegue `f` sull'ultimo frame tenendo il lock: la cattura non può riscriverlo finché `f` non

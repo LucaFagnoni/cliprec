@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 
 use cliprec_core::GpuDevice;
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11_BOX, D3D11_CPU_ACCESS_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE,
-    D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING, ID3D11Texture2D,
+    D3D11_BOX, D3D11_CPU_ACCESS_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_QUERY_DESC,
+    D3D11_QUERY_EVENT, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING, ID3D11Query, ID3D11Texture2D,
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
 
@@ -82,6 +82,10 @@ fn verdict(now: Instant, black_since: Option<Instant>, arrived_at: Instant, watc
 struct Probe {
     device: GpuDevice,
     staging: ID3D11Texture2D,
+    /// Segnala la fine della copia: interrogarla fa accorgere il driver che la copia è finita.
+    /// Senza, con il contesto fermo (frame WGC passati senza copia, nessun encoder) un Map senza
+    /// attesa risponde «ancora in corso» anche un secondo dopo.
+    done: ID3D11Query,
     pending: bool,
 }
 
@@ -103,7 +107,11 @@ impl Probe {
         // SAFETY: descrittore e puntatore d'uscita locali.
         unsafe { device.device.CreateTexture2D(&desc, None, Some(&mut tex))? };
         let staging = tex.ok_or(windows::core::Error::from(windows::Win32::Foundation::E_POINTER))?;
-        Ok(Self { device: device.clone(), staging, pending: false })
+        let mut query = None;
+        // SAFETY: descrittore e puntatore d'uscita locali.
+        unsafe { device.device.CreateQuery(&D3D11_QUERY_DESC { Query: D3D11_QUERY_EVENT, MiscFlags: 0 }, Some(&mut query))? };
+        let done = query.ok_or(windows::core::Error::from(windows::Win32::Foundation::E_POINTER))?;
+        Ok(Self { device: device.clone(), staging, done, pending: false })
     }
 
     /// Legge la copia precedente (se la GPU l'ha finita) e accoda la prossima.
@@ -112,6 +120,12 @@ impl Probe {
         let ctx = &self.device.context;
         let mut result = None;
         if self.pending {
+            let mut finished = 0u32;
+            // SAFETY: query valida; `finished` è un'uscita di 4 byte come richiesto da D3D11_QUERY_EVENT.
+            let polled = unsafe { ctx.GetData(&self.done, Some((&raw mut finished).cast()), 4, 0) };
+            if polled.is_err() || finished == 0 {
+                return None; // copia ancora in corso: si riprova al prossimo giro
+            }
             let mut map = D3D11_MAPPED_SUBRESOURCE::default();
             // SAFETY: texture di staging valida; DO_NOT_WAIT restituisce errore invece di bloccare.
             let mapped = unsafe {
@@ -140,6 +154,13 @@ impl Probe {
             }
         });
         self.pending = queued.is_some();
+        if self.pending {
+            // SAFETY: query valida; contesto immediato protetto da SetMultithreadProtected.
+            unsafe {
+                ctx.End(&self.done);
+                ctx.Flush();
+            }
+        }
         result
     }
 }

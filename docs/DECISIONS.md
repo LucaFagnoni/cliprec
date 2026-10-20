@@ -242,3 +242,17 @@ Le voci [DEFAULT] e [PROPOSTA] di SPEC.md valgono come decise; qui ci sono quell
     registrare. Router: una «Uscita» per canale virtuale (Sonar, Voicemeeter, Wave Link), senza i
     mix «Stream»/«Monitor»; un'unica sorgente che somma più dispositivi avrebbe chiesto il mixer per
     ogni traccia. Iniezione nel gioco sempre esclusa (27).
+44. **Cattura senza copie ed encoder su un thread proprio** (20 ottobre, richiesta di Luca).
+    Zero-copy WGC: il frame del pool (4 buffer) va negli slot del pacer così com'è e torna al pool
+    quando ne arriva uno più nuovo e il pacer non lo sta consegnando, quindi al più due in mano;
+    il video processor legge la superficie WGC direttamente (`SHADER_RESOURCE | RENDER_TARGET`,
+    nessun ripiego sulla copia, misurato). Sparisce una copia BGRA piena per ogni frame arrivato,
+    compresi quelli in più dovuti a `MinUpdateInterval` a 3/4 di periodo (17), che resta così: i
+    frame in più non costano più nulla. Memoria: 4 superfici invece di 2 del pool più 3 slot.
+    `GpuFrame.texture` può essere più grande del contenuto (in alto a sinistra). Desktop
+    Duplication copia ancora: deve rilasciare il frame subito. La sonda dei frame neri ora
+    interroga una query d'evento prima di leggere: con il contesto fermo un `Map` senza attesa
+    restava «in corso» per un giro. Encoder: il pacer converte e accoda (6 frame, 100 ms a 60 fps),
+    il thread `cliprec-encode` manda a FFmpeg e raccoglie i pacchetti, che tornano alla chiamata
+    successiva; a coda piena il pacer aspetta come prima, dopo 2 s è un errore dell'encoder. Frame
+    della coda e buffer dei pacchetti girano tra i due thread (niente allocazioni a regime).

@@ -35,7 +35,7 @@ use windows::core::Interface;
 /// Viste d'ingresso tenute in cache: il pool di cattura ruota poche texture.
 // ponytail: cache a rotazione di 4 viste; una texture fuori cache costa una vista nuova per frame,
 // alzare il numero se la sorgente usa pool più grandi.
-const INPUT_VIEWS: usize = 4;
+const INPUT_VIEWS: usize = 8;
 
 /// Rettangolo in cui disegnare una sorgente `src_w`×`src_h` dentro `out_w`×`out_h` mantenendo
 /// le proporzioni, centrato e con coordinate pari (crominanza 4:2:0 allineata).
@@ -261,7 +261,7 @@ impl Converter {
                 let Some((tex, view)) = &p.copy else { return Err(windows::core::Error::from_hresult(windows::Win32::Foundation::E_UNEXPECTED)) };
                 let area = D3D11_BOX { left: 0, top: 0, front: 0, right: src_w, bottom: src_h, back: 1 };
                 // SAFETY: entrambe le texture sono BGRA sullo stesso device e coprono `area`
-                // (contratto di GpuFrame: la texture è della dimensione dichiarata).
+                // (contratto di GpuFrame: la texture è grande almeno quanto la dimensione dichiarata).
                 unsafe { self.context.CopySubresourceRegion(tex, 0, 0, 0, 0, src, 0, Some(&area)) };
                 view.clone()
             }
