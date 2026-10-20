@@ -35,6 +35,7 @@ pub fn run_dist(root: &Path) -> Result<()> {
     copy(root.join("THIRD_PARTY_NOTICES.md"), "THIRD_PARTY_NOTICES.md")?;
     copy(ffmpeg.join("LICENSE.txt"), "FFmpeg-LICENSE.txt")?;
     std::fs::write(out.join("FFmpeg-BUILD.txt"), build_info(&ffmpeg)?)?;
+    copy_licenses(root, &out)?;
     bundle_runtime(&out)?;
     let missing = missing_imports(&out)?;
     if !missing.is_empty() {
@@ -54,13 +55,62 @@ fn build_info(ffmpeg: &Path) -> Result<String> {
     if !o.status.success() {
         bail!("ffmpeg -version fallito");
     }
-    let text = String::from_utf8_lossy(&o.stdout);
-    Ok(format!(
-        "Libreria FFmpeg inclusa in ClipRec (LGPL, vedi FFmpeg-LICENSE.txt).\n\
-         Build: BtbN FFmpeg-Builds, https://github.com/BtbN/FFmpeg-Builds\n\
-         Sorgente: https://ffmpeg.org/download.html (tag n9.0.2) e gli script di build nel repository sopra.\n\n{}\n",
-        text.lines().take(2).chain(text.lines().filter(|l| l.starts_with("configuration:"))).collect::<Vec<_>>().join("\n")
-    ))
+    Ok(build_info_text(&String::from_utf8_lossy(&o.stdout)))
+}
+
+fn build_info_text(text: &str) -> String {
+    let version = text.lines().next().unwrap_or("");
+    // "ffmpeg version n9.0.2-28-g669f5ab083-20261019 Copyright ..."
+    let full = version.split_whitespace().nth(2).unwrap_or("");
+    let tag = full.split('-').next().unwrap_or("");
+    let commit = full.split("-g").nth(1).and_then(|s| s.split('-').next()).unwrap_or("");
+    let release = crate::FFMPEG_URL.split("/download/").nth(1).and_then(|s| s.split('/').next()).unwrap_or("");
+    format!(
+        "Libreria FFmpeg inclusa in ClipRec: LGPL 3 (FFmpeg-LICENSE.txt, licenses/LGPL-3.0.txt, licenses/GPL-3.0.txt).\n\n\
+         Versione esatta: {full}\n\
+         Commit FFmpeg: {commit}\n\
+         Sorgente di FFmpeg: https://github.com/FFmpeg/FFmpeg/commit/{commit} (base: https://github.com/FFmpeg/FFmpeg/tree/{tag})\n\
+         Binari: BtbN FFmpeg-Builds, release https://github.com/BtbN/FFmpeg-Builds/releases/tag/{release}\n\
+         Archivio: {url}\n\
+         SHA-256: {sha}\n\
+         Script di build (sorgenti delle librerie incluse e opzioni): https://github.com/BtbN/FFmpeg-Builds\n\n\
+         {info}\n",
+        url = crate::FFMPEG_URL,
+        sha = crate::FFMPEG_SHA256,
+        info = text.lines().take(2).chain(text.lines().filter(|l| l.starts_with("configuration:"))).collect::<Vec<_>>().join("\n")
+    )
+}
+
+/// Copia in `licenses/` i testi generici di `installer/licenses` e, per ogni crate Rust, i file di
+/// licenza del suo sorgente in `licenses/crates/<nome>-<versione>/`.
+fn copy_licenses(root: &Path, out: &Path) -> Result<()> {
+    let dest = out.join("licenses");
+    std::fs::create_dir_all(&dest)?;
+    for e in std::fs::read_dir(root.join("installer").join("licenses"))? {
+        let p = e?.path();
+        if let Some(name) = p.file_name() {
+            std::fs::copy(&p, dest.join(name))?;
+        }
+    }
+    let meta = crate::notices::load_meta(root)?;
+    let missing = crate::notices::uncovered(&meta, root)?;
+    if !missing.is_empty() {
+        bail!("crate senza testo di licenza: {missing:?}");
+    }
+    for c in crate::notices::crates(&meta)? {
+        let files = crate::notices::license_files(&c.dir);
+        if files.is_empty() {
+            continue; // coperto da un testo generico (controllato da `uncovered`)
+        }
+        let d = dest.join("crates").join(format!("{}-{}", c.name, c.version));
+        std::fs::create_dir_all(&d)?;
+        for f in files {
+            if let Some(name) = f.file_name() {
+                std::fs::copy(&f, d.join(name))?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn dir_size(dir: &Path) -> Result<u64> {
@@ -71,6 +121,17 @@ fn dir_size(dir: &Path) -> Result<u64> {
         sum += if m.is_dir() { dir_size(&e.path())? } else { m.len() };
     }
     Ok(sum)
+}
+
+/// SHA-256 di un file (`certutil -hashfile`, già in Windows) confrontato con quello atteso.
+pub fn verify_sha256(path: &Path, expected: &str) -> Result<()> {
+    let o = Command::new("certutil.exe").arg("-hashfile").arg(path).arg("SHA256").output().context("certutil")?;
+    let text = String::from_utf8_lossy(&o.stdout);
+    let got = text.lines().nth(1).map(|l| l.replace(' ', "").to_ascii_lowercase()).unwrap_or_default();
+    if !o.status.success() || got != expected.to_ascii_lowercase() {
+        bail!("{}: SHA-256 {got:?}, atteso {expected:?}", path.display());
+    }
+    Ok(())
 }
 
 const VC_REDIST_URL: &str = "https://aka.ms/vs/17/release/vc_redist.x64.exe";
@@ -200,6 +261,45 @@ mod tests {
     use super::*;
 
     /// Regressione M1: l'installer include il redistributable e lo lancia solo se manca.
+    const SAMPLE: &str = include_str!("../../installer/ffmpeg-version.txt");
+
+    #[test]
+    fn sha256_is_verified() {
+        let f = std::env::temp_dir().join("cliprec-xtask-sha.txt");
+        std::fs::write(&f, "abc").unwrap();
+        verify_sha256(&f, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad").unwrap();
+        assert!(verify_sha256(&f, &"0".repeat(64)).is_err());
+        std::fs::remove_file(&f).unwrap();
+    }
+
+    #[test]
+    fn ffmpeg_download_is_pinned() {
+        assert!(!crate::FFMPEG_URL.contains("latest"), "URL non fissato: {}", crate::FFMPEG_URL);
+        assert!(crate::FFMPEG_SHA256.len() == 64 && crate::FFMPEG_SHA256.bytes().all(|b| b.is_ascii_hexdigit()), "SHA-256 mancante");
+    }
+
+    #[test]
+    fn build_info_names_exact_build() {
+        let t = build_info_text(SAMPLE);
+        for needle in [
+            "n9.0.2-28-g669f5ab083-20261019",
+            "https://github.com/FFmpeg/FFmpeg/commit/669f5ab083",
+            "https://github.com/BtbN/FFmpeg-Builds/releases/tag/autobuild-2026-10-19-13-06",
+            "--enable-version3",
+        ] {
+            assert!(t.contains(needle), "FFmpeg-BUILD.txt senza {needle:?}:
+{t}");
+        }
+    }
+
+    #[test]
+    fn dist_folder_has_gpl_text() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/dist/ClipRec");
+        if dir.exists() {
+            assert!(dir.join("licenses").join("GPL-3.0.txt").exists(), "licenses/GPL-3.0.txt assente in {}", dir.display());
+        }
+    }
+
     #[test]
     fn installer_ships_vc_redist_with_check() {
         let iss = include_str!("../../installer/cliprec.iss");

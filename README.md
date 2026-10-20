@@ -26,7 +26,8 @@ Specifica completa in `SPEC.md`, decisioni in `docs/DECISIONS.md`, stato in `doc
 ```powershell
 cargo xtask ffmpeg                 # una volta: scarica FFmpeg 9 LGPL in third_party\ffmpeg
 cargo build --release              # target\release\cliprec-app.exe e cliprec-settings.exe
-cargo xtask dist                   # cartella target\dist\ClipRec con exe, DLL FFmpeg e licenze
+cargo xtask redist                 # una volta: scarica vc_redist.x64.exe (Microsoft) per l'installer
+cargo xtask dist                   # target\dist\ClipRec: exe, DLL FFmpeg e runtime VC++, licenze
 cargo xtask notices                # rigenera THIRD_PARTY_NOTICES.md
 ```
 
@@ -88,7 +89,7 @@ una clip di 5 s. Interfaccia in italiano e inglese (`language = "it"`, `"en"` o 
   scrive la chiave `HKCU\...\Run`.
 - Giochi avviati come amministratore: Windows può non consegnare le hotkey.
 - App che usano WASAPI esclusivo non sono catturabili in loopback.
-- La distribuzione è oggi di circa 130 MB (FFmpeg completa); l'obiettivo di 40 MB richiede la
+- La distribuzione è oggi di circa 134 MB (FFmpeg completa); l'obiettivo di 40 MB richiede la
   build ridotta. Nessun certificato di firma disponibile: gli exe non sono firmati.
 
 ## Licenze

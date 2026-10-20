@@ -21,8 +21,12 @@ use cliprec_tests::generate::{self, GenOptions};
 use cliprec_tests::probe::{self, Expect};
 use cliprec_tests::{bench, sync};
 
-const FFMPEG_URL: &str =
-    "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n9.0-latest-win64-lgpl-shared-9.0.zip";
+/// Build fissata: release `autobuild-2026-10-19-13-06` di BtbN (FFmpeg n9.0.2-28-g669f5ab083).
+/// Lo SHA-256 è quello dichiarato da GitHub per l'asset ed è identico alle DLL in uso (avutil verificata).
+/// Se la release sparisce, serve una nuova release fissata e un nuovo hash (vedi docs/DECISIONS.md).
+const FFMPEG_SHA256: &str = "557513674c1628d82cad40515d75bc28d26c4730582b4029b018c4a1ff77a49c";
+
+const FFMPEG_URL: &str = "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-19-13-06/ffmpeg-n9.0.2-28-g669f5ab083-win64-lgpl-shared-9.0.zip";
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -132,6 +136,7 @@ fn ffmpeg(root: &Path) -> Result<()> {
     std::fs::create_dir_all(&tmp)?;
     let zip = tmp.join("ffmpeg.zip");
     run(Command::new("curl.exe").args(["-sSfL", "-o"]).arg(&zip).arg(FFMPEG_URL))?;
+    dist::verify_sha256(&zip, FFMPEG_SHA256)?;
     let system_tar = PathBuf::from(std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into()))
         .join("System32")
         .join("tar.exe");
