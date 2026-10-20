@@ -187,6 +187,7 @@ impl VideoSource for CaptureSource {
             health: Health::new(&self.device),
             target_monitor: None,
             other_adapter: false,
+            usable_adapters: Vec::new(),
         };
         // Primo giro sincrono: un monitor inesistente o una sessione rifiutata sono errori d'avvio.
         watch.poll()?;
@@ -253,6 +254,16 @@ struct Watch {
     /// Monitor su cui sta il bersaglio, e se è pilotato da un adattatore diverso dal device.
     target_monitor: Option<HMONITOR>,
     other_adapter: bool,
+    /// Adattatori già provati: (LUID, si può creare un device lì sopra).
+    usable_adapters: Vec<(i64, bool)>,
+}
+
+/// `true` se conviene riaprire device e sorgente: il bersaglio è su un adattatore diverso da quello
+/// del device *e* su quell'adattatore si può creare un device. Se non si può (adattatore solo
+/// display, virtuale, senza video), [`crate::device_for_monitor`] ripiegherebbe di nuovo sul
+/// predefinito: segnalarlo farebbe riavviare la sessione all'infinito.
+fn should_reopen(target_luid: Option<i64>, device_luid: i64, usable: impl FnOnce(i64) -> bool) -> bool {
+    target_luid.is_some_and(|l| l != device_luid && usable(l))
 }
 
 enum Capture {
@@ -391,7 +402,16 @@ impl Watch {
         if monitor != self.target_monitor {
             self.target_monitor = monitor;
             let luid = monitor.and_then(adapter_luid_for_monitor);
-            self.other_adapter = luid.is_some_and(|l| l != self.slots.device.adapter_luid);
+            let cache = &mut self.usable_adapters;
+            self.other_adapter = should_reopen(luid, self.slots.device.adapter_luid, |l| {
+                // Una prova per adattatore e per sessione: creare un device costa decine di ms.
+                if let Some(&(_, ok)) = cache.iter().find(|(c, _)| *c == l) {
+                    return ok;
+                }
+                let ok = GpuDevice::create(Some(l)).is_ok();
+                cache.push((l, ok));
+                ok
+            });
             if self.other_adapter {
                 tracing::warn!("{ADAPTER_CHANGED} (device {:?})", self.slots.device);
             }
@@ -652,6 +672,20 @@ mod tests {
         println!("{desc}: {n} frame, arrivati {}, {state:?}", src.frames_arrived());
         assert_eq!(state, SourceState::Waiting(ADAPTER_CHANGED.into()));
         assert!(n >= 10, "{n} frame");
+    }
+
+    /// Un device già di ripiego (adattatore del monitor inutilizzabile) non deve mai produrre
+    /// ADAPTER_CHANGED, altrimenti l'app riavvierebbe la sessione all'infinito.
+    #[test]
+    fn fallback_device_never_asks_to_reopen() {
+        let (monitor_gpu, default_gpu) = (0xae43, 0xcea9);
+        // Ripiego: il bersaglio è sull'adattatore che non regge un device.
+        assert!(!should_reopen(Some(monitor_gpu), default_gpu, |_| false));
+        // Adattatore diverso e usabile: riaprire conviene.
+        assert!(should_reopen(Some(monitor_gpu), default_gpu, |_| true));
+        // Stesso adattatore o adattatore ignoto: niente da fare, e nessuna prova di creazione.
+        assert!(!should_reopen(Some(default_gpu), default_gpu, |_| unreachable!()));
+        assert!(!should_reopen(None, default_gpu, |_| unreachable!()));
     }
 
     #[test]
