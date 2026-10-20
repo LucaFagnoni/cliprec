@@ -20,6 +20,7 @@ use ffmpeg_the_third::ffi::{
     avio_open,
 };
 use windows::Win32::Storage::FileSystem::{GetDiskFreeSpaceExW, MOVE_FILE_FLAGS, MoveFileExW};
+use windows::Win32::System::Threading::{GetCurrentThread, GetThreadPriority, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL};
 use windows::core::HSTRING;
 
 use crate::MuxError;
@@ -217,6 +218,7 @@ pub(crate) fn write(
     std::thread::scope(|scope| {
         for (((enc, tb, index), t), tx) in jobs.into_iter().zip(tracks).zip(senders) {
             scope.spawn(move || {
+                lower_priority();
                 let run = std::panic::AssertUnwindSafe(|| encode_track(enc, tb, index, codec, t, &tx));
                 let result = std::panic::catch_unwind(run).unwrap_or(Err(MuxError::EncoderPanicked));
                 if let Err(e) = result {
@@ -491,6 +493,19 @@ fn encode_track(
     check("avcodec_send_frame", unsafe { avcodec_send_frame(ctx, ptr::null()) })?;
     drain()?;
     Ok(())
+}
+
+/// Priorità dell'ultimo thread di codifica audio, per i test (m8).
+pub(crate) static ENCODER_PRIORITY: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(i32::MIN);
+
+/// Abbassa la priorità del thread di codifica (m8): sotto il normale, per non contendere la CPU
+/// al gioco. La modalità «background» abbasserebbe anche l'I/O, che qui non serve.
+fn lower_priority() {
+    // SAFETY: pseudo-handle del thread corrente, sempre valido; se fallisce si resta a normale.
+    let _ = unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL) };
+    // SAFETY: pseudo-handle del thread corrente, sempre valido.
+    let p = unsafe { GetThreadPriority(GetCurrentThread()) };
+    ENCODER_PRIORITY.store(p, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Byte liberi per l'utente sul volume di `dir`, o `None` se non si riesce a saperlo.

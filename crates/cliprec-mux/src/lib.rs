@@ -585,6 +585,19 @@ mod tests {
         assert!(matches!(ensure_space(&target, u64::MAX / 4), Err(MuxError::DiskFull { .. })));
     }
 
+    /// m8: i thread di codifica audio girano sotto la priorità normale.
+    #[test]
+    fn encoder_threads_run_at_low_priority() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/test-output/mux/priority");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let tracks = vec![cliprec_core::AudioTrackPcm { name: "A".into(), samples: vec![0.1; 48_000 * 2] }];
+        let audio = AudioSnapshot { start: QpcTime(0), tracks };
+        write_audio_clip(&dir.join("clip"), &audio, AudioClipFormat::FlacPerTrack).unwrap();
+        let p = ffi::ENCODER_PRIORITY.load(Ordering::Relaxed);
+        assert!(p < 0, "priorità del thread di codifica: {p} (0 = normale)");
+    }
+
     #[test]
     fn safe_file_names() {
         assert_eq!(file_name("Mic: 1/2?"), "Mic_ 1_2_");

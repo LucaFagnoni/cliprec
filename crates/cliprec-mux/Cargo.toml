@@ -12,7 +12,7 @@ cliprec-buffer.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 ffmpeg-the-third.workspace = true
-windows = { workspace = true, features = ["Win32_Storage_FileSystem"] }
+windows = { workspace = true, features = ["Win32_Storage_FileSystem", "Win32_System_Threading"] }
 
 [dev-dependencies]
 serde_json.workspace = true
