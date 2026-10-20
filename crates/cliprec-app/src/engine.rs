@@ -530,13 +530,14 @@ impl Session {
                 let path = folder.join(name);
                 // Il muxer aggiunge l'estensione e « (2)» se il nome esiste già.
                 match video {
+                    // L'audio si decomprime a blocchi mentre si scrive: il picco di memoria non cresce
+                    // con durata e numero di tracce (M5).
                     Some(video) => {
-                        let audio = audio.map(cliprec_buffer::AudioRefs::render);
                         cliprec_mux::write_video_clip(&path, &video, audio.as_ref(), &opts).map_err(|e| e.to_string())
                     }
                     None => {
                         let audio = audio.ok_or_else(|| tr(K::EngAudioEmpty, &[]))?;
-                        cliprec_mux::write_audio_clip(&path, &audio.render(), format).map_err(|e| e.to_string())
+                        cliprec_mux::write_audio_clip(&path, &audio, format).map_err(|e| e.to_string())
                     }
                 }
             };
@@ -676,6 +677,16 @@ fn video_callback(
                         if tests::PANIC_IN_OPEN.swap(false, Ordering::SeqCst) {
                             panic!("panic iniettato nell'apertura dell'encoder");
                         }
+                        #[cfg(test)]
+                        let skip: Vec<String> = if tests::FORCE_SOFTWARE.load(Ordering::SeqCst) {
+                            cliprec_encode::candidates(settings.codec)
+                                .into_iter()
+                                .map(|(_, n)| n)
+                                .filter(|n| n != cliprec_encode::SOFTWARE_ENCODER)
+                                .collect()
+                        } else {
+                            skip
+                        };
                         open_encoder(&device, &settings, &skip, &buffer, &encoder_name, &alive, &events)
                     }))
                     .unwrap_or_else(|_| Err("errore interno nell'apertura dell'encoder".into()));
@@ -1378,6 +1389,8 @@ mod tests {
 
     /// Aggancio per M9: il prossimo thread di apertura dell'encoder va in panic.
     pub(super) static PANIC_IN_OPEN: AtomicBool = AtomicBool::new(false);
+    /// Aggancio per M6: gli encoder hardware vengono saltati, si apre quello software.
+    pub(super) static FORCE_SOFTWARE: AtomicBool = AtomicBool::new(false);
 
     /// Sorgente che parte ma non consegna mai frame: l'encoder non è mai pronto.
     struct NeverSource;
@@ -1585,6 +1598,35 @@ mod tests {
         handle.unwrap().join().unwrap();
         let events: Vec<_> = rx.try_iter().collect();
         assert!(events.iter().any(|e| matches!(e, EngineEvent::ClipSaved(c) if c.kind == ClipKind::Audio)), "{events:?}");
+    }
+
+    /// M6, catena completa con l'encoder di riserva: senza encoder hardware la sessione apre SVT-AV1
+    /// e la clip MP4 è valida per ffprobe (60 fps costanti, due tracce, durata ≥ N). Test
+    /// d'integrazione: il ripiego in `open_after` ha il suo test di regressione in `cliprec-encode`.
+    #[test]
+    fn m6_software_encoder_clip_is_valid_mp4() {
+        use cliprec_tests::probe::{Expect, check};
+        let _serial = heavy();
+        let mut config = Config::default();
+        config.clips.video_seconds = 2;
+        FORCE_SOFTWARE.store(true, Ordering::SeqCst);
+        let (session, _buffer, rx) = synthetic_session("m6-svtav1", &mut config, Shared::default());
+        std::thread::sleep(Duration::from_secs(4));
+        let encoder = session.status().encoder;
+        session.save(ClipKind::Video, 2).unwrap().join().unwrap();
+        drop(session);
+        FORCE_SOFTWARE.store(false, Ordering::SeqCst);
+        assert_eq!(encoder, "libsvtav1");
+        let clip = rx
+            .try_iter()
+            .find_map(|e| match e {
+                EngineEvent::ClipSaved(c) => Some(c.path),
+                _ => None,
+            })
+            .expect("clip salvata");
+        let expect = Expect { min_duration: Some(2.0), audio_tracks: Some(2), fps: Some(60.0), ..Expect::default() };
+        let violations = check(&clip, &expect).unwrap();
+        assert!(violations.is_empty(), "{violations:?}");
     }
 
     /// M5: le clip si scrivono una alla volta (picco di memoria limitato), ma nessuna va persa.
