@@ -216,6 +216,28 @@ fn retained_video_always_covers_n_seconds_with_b_frames() {
     }
 }
 
+/// La memoria segue il flusso reale, non il tetto di bitrate: si prealloca poco e si cresce a
+/// blocchi solo se serve, fino al tetto di memoria.
+#[test]
+fn arena_follows_the_real_bitrate() {
+    // Tetto 40 Mbit/s, 10 s: stima 60 MB, preallocati 15 MB.
+    let b = ReplayBuffer::new(BufferConfig { video_seconds: 10.0, audio_seconds: 1.0, max_bytes: 512 * MB, lock_pages: false });
+    b.set_video_params(VideoStreamParams { bit_rate: 40_000_000, ..params() });
+    assert!(b.stats().bytes <= 16 * MB, "{:?}", b.stats());
+    // Flusso reale 1 Mbit/s per 20 s (2500 B a frame a 50 fps): resta nella preallocazione.
+    for seq in 0..1000 {
+        push(&b, seq, 2_500, seq % 50 == 0);
+    }
+    assert!(b.stats().bytes <= 16 * MB, "{:?}", b.stats());
+    // Flusso a 40 Mbit/s: l'arena cresce fino a coprire 10 s e mezzo più un GOP, non oltre.
+    for seq in 1000..2000 {
+        push(&b, seq, 100_000, seq % 50 == 0);
+    }
+    let st = b.stats();
+    assert!(st.bytes > 50 * MB && st.bytes < 80 * MB, "{st:?}");
+    assert!(st.video_seconds >= 10.0, "{st:?}");
+}
+
 /// Unico test che blocca pagine (gli altri usano `lock_pages: false`), così può controllare
 /// che il working set torni com'era.
 #[test]
@@ -223,8 +245,8 @@ fn locked_pages_survive_repeated_reloads() {
     let before = crate::lock::working_set().unwrap();
     for i in 0..5 {
         let b = ReplayBuffer::new(BufferConfig { video_seconds: 1.0, audio_seconds: 1.0, max_bytes: 256 * MB, lock_pages: true });
-        // 64 MB preallocati e bloccati (bitrate × 3 s), più un blocco audio.
-        b.set_video_params(VideoStreamParams { bit_rate: 64 * MB as u64 * 8 / 3, ..params() });
+        // 64 MB preallocati e bloccati (un quarto di bitrate × 3 s), più un blocco audio.
+        b.set_video_params(VideoStreamParams { bit_rate: 4 * 64 * MB as u64 * 8 / 3, ..params() });
         b.set_tracks(&["A".into()]);
         push_track(&b, 0, 0, 48_000, 480);
         push(&b, 0, 1000, true);

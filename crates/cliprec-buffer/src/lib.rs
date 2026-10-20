@@ -31,6 +31,8 @@ use crate::audio::Track;
 const VIDEO_CHUNK: usize = 4 << 20;
 /// Video conservato oltre `video_seconds`, oltre al GOP in corso.
 const RETAIN_MARGIN_SECS: f64 = 0.5;
+/// Frazione della stima dal tetto di bitrate preallocata subito.
+const PREALLOC_DIVISOR: usize = 4;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct BufferConfig {
@@ -156,7 +158,9 @@ impl ReplayBuffer {
     }
 
     /// Imposta i parametri dello stream video. Se cambiano, i pacchetti vecchi (non più
-    /// compatibili) vengono scartati. Prealloca l'arena stimata dal bitrate.
+    /// compatibili) vengono scartati. Prealloca un quarto della stima dal tetto di bitrate (con
+    /// qualità costante il flusso reale sta di solito molto sotto il tetto); oltre, l'arena cresce a
+    /// blocchi da 4 MiB, bloccati e poi riciclati, fino a `max_bytes`.
     pub fn set_video_params(&self, params: VideoStreamParams) {
         let mut v = lock(&self.video);
         if v.params.as_ref() == Some(&params) {
@@ -166,7 +170,7 @@ impl ReplayBuffer {
         v.keyframes.clear();
         v.memory_limited = false;
         let estimate = BufferConfig::estimate_bytes(params.bit_rate, self.config.video_seconds, 0.0, 0);
-        v.ring.reserve(estimate.min(self.config.max_bytes));
+        v.ring.reserve((estimate / PREALLOC_DIVISOR).min(self.config.max_bytes));
         v.params = Some(params);
     }
 
