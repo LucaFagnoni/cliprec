@@ -36,6 +36,13 @@ export global T {
     in property <string> placeholder-name;
     in property <string> placeholder-app;
     in property <string> placeholder-device;
+    in property <string> col-name;
+    in property <string> col-kind;
+    in property <string> col-source;
+    in property <string> col-volume;
+    in property <string> col-delay;
+    in property <string> pick-app;
+    in property <string> device-missing;
     in property <string> hotkey-video;
     in property <string> hotkey-audio;
     in property <string> pad-video;
@@ -121,6 +128,8 @@ export struct SourceRow {
     target: string,
     volume: float,
     delay: int,
+    // Posizione nel menu dei dispositivi: 0 = predefinito di Windows, -1 = non collegato.
+    pick: int,
 }
 
 component FormRow inherits HorizontalLayout {
@@ -184,6 +193,8 @@ export component SettingsWindow inherits Window {
     in property <[string]> monitors;
     in property <[string]> windows-list;
     in property <[string]> apps;
+    // Menu della scheda Audio: «Scegli…» in testa alle app, il predefinito in testa ai dispositivi.
+    in property <[string]> app-choices;
     in property <[string]> inputs;
     in property <[string]> outputs;
     in property <string> ram-estimate;
@@ -295,6 +306,15 @@ export component SettingsWindow inherits Window {
                         }
                     }
                     Text { text: T.sources-hint; color: #808080; wrap: word-wrap; }
+                    HorizontalLayout {
+                        spacing: 6px;
+                        Text { text: T.col-name; width: 150px; color: #a0a0a0; }
+                        Text { text: T.col-kind; width: 200px; color: #a0a0a0; }
+                        Text { text: T.col-source; horizontal-stretch: 1; color: #a0a0a0; }
+                        Text { text: T.col-volume; width: 136px; color: #a0a0a0; }
+                        Text { text: T.col-delay; width: 140px; color: #a0a0a0; }
+                        Rectangle { width: 114px; }
+                    }
                     ScrollView {
                         VerticalLayout {
                             spacing: 6px;
@@ -304,38 +324,57 @@ export component SettingsWindow inherits Window {
                                 LineEdit {
                                     text: r.name;
                                     placeholder-text: T.placeholder-name;
-                                    width: 130px;
-                                    edited(t) => { root.source-changed(i, { name: t, kind: r.kind, target: r.target, volume: r.volume, delay: r.delay }); }
+                                    width: 150px;
+                                    edited(t) => { root.source-changed(i, { name: t, kind: r.kind, target: r.target, volume: r.volume, delay: r.delay, pick: r.pick }); }
                                 }
                                 ComboBox {
                                     model: [T.kind-app, T.kind-input, T.kind-output];
                                     current-index: r.kind;
-                                    width: 110px;
+                                    width: 200px;
                                     selected(v) => {
-                                        root.source-changed(i, { name: r.name, kind: self.current-index, target: "", volume: r.volume, delay: r.delay });
+                                        root.source-changed(i, { name: r.name, kind: self.current-index, target: "", volume: r.volume, delay: r.delay, pick: 0 });
                                     }
                                 }
-                                LineEdit {
-                                    text: r.target;
-                                    placeholder-text: r.kind == 0 ? T.placeholder-app : T.placeholder-device;
+                                // App: nome dell'eseguibile, scritto o scelto tra le app aperte.
+                                if r.kind == 0: HorizontalLayout {
+                                    spacing: 6px;
                                     horizontal-stretch: 1;
-                                    edited(t) => { root.source-changed(i, { name: r.name, kind: r.kind, target: t, volume: r.volume, delay: r.delay }); }
-                                }
-                                ComboBox {
-                                    model: r.kind == 0 ? root.apps : (r.kind == 1 ? root.inputs : root.outputs);
-                                    current-index: -1;
-                                    width: 120px;
-                                    selected(v) => {
-                                        root.source-pick(i, r.kind, self.current-index);
-                                        self.current-index = -1;
+                                    LineEdit {
+                                        text: r.target;
+                                        placeholder-text: T.placeholder-app;
+                                        horizontal-stretch: 1;
+                                        edited(t) => { root.source-changed(i, { name: r.name, kind: r.kind, target: t, volume: r.volume, delay: r.delay, pick: r.pick }); }
                                     }
+                                    ComboBox {
+                                        model: root.app-choices;
+                                        current-index: 0;
+                                        width: 190px;
+                                        selected(v) => {
+                                            if (self.current-index > 0) {
+                                                root.source-pick(i, 0, self.current-index);
+                                            }
+                                            self.current-index = 0;
+                                        }
+                                    }
+                                }
+                                // Ingresso e uscita: il dispositivo per nome, il predefinito di Windows in testa.
+                                if r.kind != 0: HorizontalLayout {
+                                    spacing: 6px;
+                                    horizontal-stretch: 1;
+                                    ComboBox {
+                                        model: r.kind == 1 ? root.inputs : root.outputs;
+                                        current-index: r.pick;
+                                        horizontal-stretch: 1;
+                                        selected(v) => { root.source-pick(i, r.kind, self.current-index); }
+                                    }
+                                    if r.pick < 0: Text { text: T.device-missing; color: #e06c6c; vertical-alignment: center; }
                                 }
                                 Slider {
                                     minimum: 0;
                                     maximum: 200;
                                     value: r.volume * 100;
                                     width: 90px;
-                                    changed(v) => { root.source-changed(i, { name: r.name, kind: r.kind, target: r.target, volume: Math.round(v) / 100, delay: r.delay }); }
+                                    changed(v) => { root.source-changed(i, { name: r.name, kind: r.kind, target: r.target, volume: Math.round(v) / 100, delay: r.delay, pick: r.pick }); }
                                 }
                                 Text { text: Math.round(r.volume * 100) + "%"; width: 40px; vertical-alignment: center; }
                                 SpinBox {
@@ -344,7 +383,7 @@ export component SettingsWindow inherits Window {
                                     step-size: 10;
                                     value: r.delay;
                                     width: 120px;
-                                    edited(v) => { root.source-changed(i, { name: r.name, kind: r.kind, target: r.target, volume: r.volume, delay: v }); }
+                                    edited(v) => { root.source-changed(i, { name: r.name, kind: r.kind, target: r.target, volume: r.volume, delay: v, pick: r.pick }); }
                                 }
                                 Text { text: "ms"; vertical-alignment: center; }
                                 Button { text: "▲"; width: 34px; enabled: i > 0; clicked => { root.source-move(i, -1); } }

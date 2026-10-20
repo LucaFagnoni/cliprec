@@ -122,6 +122,30 @@ struct Lists {
     outputs: Vec<Choice>,
 }
 
+/// Menu della scheda Audio con la prima voce nella lingua attuale: «Scegli…» in testa alle app, il
+/// predefinito di Windows in testa ai dispositivi (le righe mostrano il nome, non l'ID).
+fn set_audio_menus(ui: &SettingsWindow, lists: &Lists) {
+    let t = ui.global::<T>();
+    let menu = |first: SharedString, list: &[Choice]| {
+        let items = std::iter::once(first).chain(list.iter().map(|c| SharedString::from(c.label.as_str())));
+        ModelRc::new(VecModel::from(items.collect::<Vec<_>>()))
+    };
+    ui.set_app_choices(menu(t.get_pick_app(), &lists.apps));
+    ui.set_inputs(menu(t.get_placeholder_device(), &lists.inputs));
+    ui.set_outputs(menu(t.get_placeholder_device(), &lists.outputs));
+}
+
+/// Aggiorna la voce del menu dei dispositivi che corrisponde al `target` della riga.
+fn with_pick(mut row: SourceRow, lists: &Lists) -> SourceRow {
+    let list = match row.kind {
+        1 => &lists.inputs,
+        2 => &lists.outputs,
+        _ => return row,
+    };
+    row.pick = model::device_pick(&row.target, list.iter().map(|c| c.value.as_str()));
+    row
+}
+
 fn set_message(ui: &SettingsWindow, text: &str, error: bool) {
     ui.set_message(text.into());
     ui.set_message_error(error);
@@ -197,25 +221,32 @@ fn main() -> anyhow::Result<()> {
     ui.set_monitors(labels(&lists.monitors));
     ui.set_windows_list(labels(&lists.windows));
     ui.set_apps(labels(&lists.apps));
-    ui.set_inputs(labels(&lists.inputs));
-    ui.set_outputs(labels(&lists.outputs));
+    set_audio_menus(&ui, &lists);
+    for i in 0..rows.row_count() {
+        if let Some(r) = rows.row_data(i) {
+            rows.set_row_data(i, with_pick(r, &lists));
+        }
+    }
 
     let base = Rc::new(RefCell::new(base));
 
     ui.on_language_changed({
         let w = ui.as_weak();
+        let lists = lists.clone();
         move || {
             if let Some(ui) = w.upgrade() {
                 set_lang(&ui, Lang::resolve(ui.get_f().language));
+                set_audio_menus(&ui, &lists);
             }
         }
     });
 
     ui.on_source_changed({
         let rows = rows.clone();
+        let lists = lists.clone();
         move |i, row| {
             if let Ok(i) = usize::try_from(i) {
-                rows.set_row_data(i, row);
+                rows.set_row_data(i, with_pick(row, &lists));
             }
         }
     });
@@ -223,7 +254,7 @@ fn main() -> anyhow::Result<()> {
         let rows = rows.clone();
         move || {
             if rows.row_count() < cliprec_core::config::MAX_AUDIO_SOURCES {
-                rows.push(SourceRow { name: "".into(), kind: 0, target: "".into(), volume: 1.0, delay: 0 });
+                rows.push(SourceRow { name: "".into(), kind: 0, target: "".into(), volume: 1.0, delay: 0, pick: 0 });
             }
         }
     });
@@ -250,6 +281,7 @@ fn main() -> anyhow::Result<()> {
     ui.on_source_pick({
         let rows = rows.clone();
         let lists = lists.clone();
+        // `idx` è la voce del menu: la prima è «Scegli…» per le app e il predefinito per i dispositivi.
         move |i, kind, idx| {
             let list = match kind {
                 0 => &lists.apps,
@@ -257,13 +289,19 @@ fn main() -> anyhow::Result<()> {
                 _ => &lists.outputs,
             };
             let (Ok(i), Ok(idx)) = (usize::try_from(i), usize::try_from(idx)) else { return };
-            let (Some(mut row), Some(choice)) = (rows.row_data(i), list.get(idx)) else { return };
-            row.target = choice.value.as_str().into();
-            if row.name.trim().is_empty() {
-                let stem = choice.label.strip_suffix(".exe").unwrap_or(&choice.label);
-                row.name = stem.into();
+            let Some(mut row) = rows.row_data(i) else { return };
+            match idx.checked_sub(1).and_then(|k| list.get(k)) {
+                Some(choice) => {
+                    row.target = choice.value.as_str().into();
+                    if row.name.trim().is_empty() {
+                        let stem = choice.label.strip_suffix(".exe").unwrap_or(&choice.label);
+                        row.name = stem.into();
+                    }
+                }
+                None if kind != 0 && idx == 0 => row.target = "".into(),
+                None => return,
             }
-            rows.set_row_data(i, row);
+            rows.set_row_data(i, with_pick(row, &lists));
         }
     });
     ui.on_codec_picked({

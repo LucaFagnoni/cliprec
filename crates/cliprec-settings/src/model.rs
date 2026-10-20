@@ -42,6 +42,16 @@ fn trimmed(s: &slint::SharedString) -> String {
 }
 
 /// Config -> (form, righe audio).
+/// Posizione di un dispositivo nel menu della scheda Audio, che ha il predefinito di Windows in
+/// testa: 0 per il predefinito (`target` vuoto), -1 se il dispositivo non è collegato.
+pub fn device_pick<'a>(target: &str, ids: impl IntoIterator<Item = &'a str>) -> i32 {
+    let target = target.trim();
+    if target.is_empty() {
+        return 0;
+    }
+    ids.into_iter().position(|id| id == target).map_or(-1, |p| i32::try_from(p + 1).unwrap_or(-1))
+}
+
 pub fn to_form(c: &Config) -> (Form, Vec<SourceRow>) {
     let (source_kind, source_target) = match &c.video.source {
         VideoSourceConfig::Auto => (0, String::new()),
@@ -112,7 +122,7 @@ pub fn to_form(c: &Config) -> (Form, Vec<SourceRow>) {
                 AudioSourceKind::Input { device } => (1, device.clone().unwrap_or_default()),
                 AudioSourceKind::Output { device } => (2, device.clone().unwrap_or_default()),
             };
-            SourceRow { name: s.name.clone().into(), kind, target: target.into(), volume: s.volume, delay: s.delay_ms }
+            SourceRow { name: s.name.clone().into(), kind, target: target.into(), volume: s.volume, delay: s.delay_ms, pick: 0 }
         })
         .collect();
     (form, rows)
@@ -414,7 +424,7 @@ mod tests {
         f.max_bitrate = "abc".into();
         f.max_mb = "0".into();
         for _ in 0..7 {
-            r.push(SourceRow { name: "x".into(), kind: 1, target: "".into(), volume: 1.0, delay: 0 });
+            r.push(SourceRow { name: "x".into(), kind: 1, target: "".into(), volume: 1.0, delay: 0, pick: 0 });
         }
         let p = build_config(&f, &r, &c).unwrap_err();
         for expected in [
@@ -430,12 +440,20 @@ mod tests {
     }
 
     #[test]
+    fn device_pick_finds_the_device_by_id() {
+        let ids = ["{0.0.1}.{a}", "{0.0.1}.{b}"];
+        assert_eq!(device_pick("", ids), 0, "vuoto = predefinito di Windows");
+        assert_eq!(device_pick("{0.0.1}.{b}", ids), 2, "il predefinito occupa la prima voce");
+        assert_eq!(device_pick("{0.0.1}.{c}", ids), -1, "dispositivo non collegato");
+    }
+
+    #[test]
     fn video_target_and_source_rows_are_checked() {
         let c = Config::default();
         let (mut f, mut r) = rows_of(&c);
         f.source_kind = 3;
         f.source_target = "  ".into();
-        r.push(SourceRow { name: " ".into(), kind: 0, target: "".into(), volume: 1.0, delay: 0 });
+        r.push(SourceRow { name: " ".into(), kind: 0, target: "".into(), volume: 1.0, delay: 0, pick: 0 });
         let p = build_config(&f, &r, &c).unwrap_err();
         assert!(p.contains(&Problem::EmptyVideoTarget));
         assert!(p.contains(&Problem::EmptySourceName(2)));
