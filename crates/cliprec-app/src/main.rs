@@ -48,7 +48,7 @@ fn main() -> anyhow::Result<()> {
     };
 
     i18n::set_from_config("auto");
-    let startup = startup::startup_config(&shell::config_path(), cliprec_audio::find_root_pid("Discord.exe").is_some());
+    let startup = startup::startup_config(&shell::config_path(), cliprec_audio::find_root_pid("Discord.exe").is_some(), !notify::headless() && autostart::run_value_present());
     let config = startup.config.clone();
     open_settings_if_needed(startup.open_settings);
 

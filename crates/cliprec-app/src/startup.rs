@@ -14,7 +14,7 @@ pub struct Startup {
     pub open_settings: bool,
 }
 
-pub fn startup_config(path: &Path, discord_running: bool) -> Startup {
+pub fn startup_config(path: &Path, discord_running: bool, run_value_present: bool) -> Startup {
     if path.exists() {
         match Config::load(path) {
             Ok(config) => Startup { config, start_buffer: true, error: None, open_settings: false },
@@ -27,7 +27,7 @@ pub fn startup_config(path: &Path, discord_running: bool) -> Startup {
             }
         }
     } else {
-        let config = first_run_defaults(discord_running);
+        let config = first_run_defaults(discord_running, run_value_present);
         match config.save(path) {
             Ok(()) => tracing::info!("primo avvio: configurazione scritta in {}", path.display()),
             Err(e) => tracing::error!("primo avvio: {e}"),
@@ -38,8 +38,10 @@ pub fn startup_config(path: &Path, discord_running: bool) -> Startup {
 
 /// Primo avvio: predefiniti (video automatico, audio di sistema e microfono, hotkey assegnate),
 /// più Discord se è aperto.
-pub fn first_run_defaults(discord_running: bool) -> Config {
+pub fn first_run_defaults(discord_running: bool, run_value_present: bool) -> Config {
     let mut config = Config::default();
+    // L'installer può aver scritto il valore Run: la config lo adotta invece di cancellarlo.
+    config.general.start_with_windows = run_value_present;
     if discord_running {
         config.audio.sources.push(cliprec_core::config::AudioSourceConfig::new(
             "Discord",
@@ -61,8 +63,8 @@ mod tests {
 
     #[test]
     fn first_run_adds_discord_only_when_open() {
-        assert_eq!(first_run_defaults(false).audio.sources.len(), 2);
-        let with = first_run_defaults(true);
+        assert_eq!(first_run_defaults(false, false).audio.sources.len(), 2);
+        let with = first_run_defaults(true, false);
         assert_eq!(with.audio.sources.last().map(|s| s.name.as_str()), Some("Discord"));
         assert_eq!(with.hotkeys.video, "Ctrl+Alt+F10");
     }
@@ -71,7 +73,7 @@ mod tests {
     fn m2_unreadable_config_keeps_buffer_stopped_and_reports() {
         let path = temp("m2");
         std::fs::write(&path, "[clips\nvideo_seconds = = 30").unwrap();
-        let s = startup_config(&path, false);
+        let s = startup_config(&path, false, false);
         assert!(!s.start_buffer, "il buffer non deve partire con i predefiniti");
         let err = s.error.expect("serve un errore da notificare");
         assert!(err.contains("config.toml"), "{err}");
@@ -80,14 +82,24 @@ mod tests {
     }
 
     #[test]
+    fn m12_first_run_adopts_the_installer_autostart_value() {
+        assert!(first_run_defaults(false, true).general.start_with_windows, "il valore Run dell'installer va adottato");
+        assert!(!first_run_defaults(false, false).general.start_with_windows);
+        let path = temp("m12");
+        let s = startup_config(&path, false, true);
+        assert!(s.config.general.start_with_windows);
+        assert!(Config::load(&path).unwrap().general.start_with_windows, "la config scritta lo conserva");
+    }
+
+    #[test]
     fn valid_and_first_run_configs_start_the_buffer() {
         let path = temp("ok");
         std::fs::write(&path, "[clips]\nvideo_seconds = 30\n").unwrap();
-        let s = startup_config(&path, false);
+        let s = startup_config(&path, false, false);
         assert!(s.start_buffer && s.error.is_none() && !s.open_settings);
         assert_eq!(s.config.clips.video_seconds, 30);
         let new = temp("new");
-        let s = startup_config(&new, false);
+        let s = startup_config(&new, false, false);
         assert!(s.start_buffer && s.open_settings && new.exists());
     }
 }

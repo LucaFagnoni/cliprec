@@ -28,9 +28,18 @@ pub fn apply(config: &Config) {
     }
 }
 
-fn apply_autostart(enabled: bool) -> anyhow::Result<()> {
+/// Il valore `Run` di ClipRec esiste già (scritto dall'installer)? Sola lettura del registro.
+pub fn run_value_present() -> bool {
+    autolaunch().and_then(|a| Ok(a.is_enabled()?)).unwrap_or(false)
+}
+
+fn autolaunch() -> anyhow::Result<auto_launch::AutoLaunch> {
     let exe = std::env::current_exe()?;
-    let auto = AutoLaunchBuilder::new().set_app_name("ClipRec").set_app_path(&exe.to_string_lossy()).set_args(&["--tray"]).build()?;
+    Ok(AutoLaunchBuilder::new().set_app_name("ClipRec").set_app_path(&exe.to_string_lossy()).set_args(&["--tray"]).build()?)
+}
+
+fn apply_autostart(enabled: bool) -> anyhow::Result<()> {
+    let auto = autolaunch()?;
     if auto.is_enabled()? != enabled {
         if enabled { auto.enable()? } else { auto.disable()? }
     }
