@@ -106,6 +106,14 @@ fn first_run_config(path: &std::path::Path) -> Config {
         Ok(()) => tracing::info!("primo avvio: configurazione scritta in {}", path.display()),
         Err(e) => tracing::error!("primo avvio: {e}"),
     }
+    // Primo avvio: si aprono le impostazioni (sorgenti proposte, hotkey, pulsante «Prova»).
+    let settings = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join("cliprec-settings.exe")));
+    if !notify::headless()
+        && let Some(exe) = settings.filter(|p| p.exists())
+        && let Err(e) = std::process::Command::new(exe).spawn()
+    {
+        tracing::warn!("primo avvio: impostazioni non aperte: {e}");
+    }
     config
 }
 
