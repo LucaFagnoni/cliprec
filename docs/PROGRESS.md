@@ -1,6 +1,6 @@
 # Stato di ClipRec
 
-Ultimo aggiornamento: 20 ottobre 2026, 08:00 (riepilogo finale della notte; ultimo controllo alle 08:40).
+Ultimo aggiornamento: 20 ottobre 2026, 08:40 (riepilogo finale della notte).
 
 ## Riepilogo per Luca
 
@@ -81,8 +81,9 @@ avviso invece della proposta interattiva (20); spegnimento del PC lasciato alla 
   quando trova sia `pokewilds-finito.txt` sia `cliprec-finito.txt`, e comunque alle 09:30.
 - `cliprec-finito.txt` **non l'ho scritto**: lo avrei fatto solo con una tua conferma diretta in questa
   chat, che non è arrivata. Da parte di ClipRec quindi il PC resta acceso; se il watcher di pokewilds
-  è attivo, lo spegnerà alle 09:30. Alle 08:00 in `.coordinamento/` non c'era ancora nessun file.
-- Alle 09:00 ClipRec non lascia processi in esecuzione: lavoro committato, nessuna app aperta.
+  è attivo, lo spegnerà alle 09:30. Alle 08:40 in `.coordinamento/` non c'era ancora nessun file.
+- Alle 08:40 ClipRec non ha processi in esecuzione e tutto il lavoro è committato su `main`; nessun
+  lavoro nuovo dopo quell'ora, stop alle 09:00.
 
 ## Misure (release, RTX 3080, sorgenti sintetiche 1080p60 HEVC)
 
