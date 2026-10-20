@@ -25,7 +25,7 @@ fn out_dir() -> PathBuf {
 }
 
 fn clean(base: &Path) {
-    for ext in ["", ".mp4", ".mkv", ".flac", ".wav", ".mka", ".part", ".mp4.part"] {
+    for ext in ["", ".mp4", ".mkv", ".flac", ".wav", ".mka", ".opus", ".m4a", ".part", ".mp4.part"] {
         let p = PathBuf::from(format!("{}{ext}", base.display()));
         let _ = std::fs::remove_dir_all(&p);
         let _ = std::fs::remove_file(&p);
@@ -371,6 +371,68 @@ fn video_clip_with_reordered_frames() {
         let secs = saved.duration_secs;
         assert!(secs >= 3.0 - 1e-9 && secs < 3.0 + 32.0 / FPS as f64, "durata {secs}");
         check_video_file(&saved.path, secs, "hevc");
+    }
+}
+
+/// m27: WAV polifonico, Opus e AAC (M4A).
+#[test]
+fn audio_clips_polywav_opus_aac() {
+    let b = filled_buffer();
+    let end = pts(6 * FPS);
+    let refs = b.snapshot_audio_refs(end.add_hns(-4 * HNS_PER_SEC), end).unwrap();
+
+    // WAV polifonico: un solo file, 2 canali per traccia, nomi in iXML.
+    let base = out_dir().join("audio_poly");
+    clean(&base);
+    let saved = write_audio_clip(&base, &refs, AudioClipFormat::PolyWav).unwrap();
+    assert_eq!(saved.path.extension().unwrap(), "wav");
+    let p = ffprobe(&saved.path, &[]);
+    println!("polywav: {}", summary(&p));
+    let s = &p["streams"][0];
+    assert_eq!(s["codec_name"], "pcm_s24le");
+    assert_eq!(s["channels"], 4);
+    assert_eq!(s["sample_rate"], "48000");
+    assert!((f(&p["format"]["duration"]) - 4.0).abs() < 1e-3);
+    let bytes = std::fs::read(&saved.path).unwrap();
+    let text = String::from_utf8_lossy(&bytes);
+    for name in ["Gioco L", "Gioco R", "Discord L", "Discord R"] {
+        assert!(text.contains(&format!("<NAME>{name}</NAME>")), "iXML senza {name}");
+    }
+    // I campioni sono quelli dello snapshot: canali 0-1 = Gioco, 2-3 = Discord.
+    let pcm = decode_s32(&saved.path);
+    let snap = b.snapshot_audio(end.add_hns(-4 * HNS_PER_SEC), end).unwrap();
+    for (i, frame) in pcm.chunks_exact(4).enumerate().step_by(997) {
+        for (ch, got) in frame.iter().enumerate() {
+            let want = (snap.tracks[ch / 2].samples[i * 2 + ch % 2] * 8_388_607.0).round() as i32;
+            assert_eq!(got >> 8, want, "frame {i} canale {ch}");
+        }
+    }
+
+    for (format, ext, codec) in [(AudioClipFormat::Opus, "opus", "opus"), (AudioClipFormat::Aac, "m4a", "aac")] {
+        let base = out_dir().join(format!("audio_{ext}"));
+        clean(&base);
+        let saved = write_audio_clip(&base, &refs, format).unwrap();
+        assert!(saved.path.is_dir());
+        for (file, name) in [(format!("01 - Gioco.{ext}"), "Gioco"), (format!("02 - Discord.{ext}"), "Discord")] {
+            let p = ffprobe(&saved.path.join(&file), &[]);
+            println!("{file}: {}", summary(&p));
+            let s = &p["streams"][0];
+            assert_eq!(s["codec_name"], codec);
+            assert_eq!(s["channels"], 2);
+            let d = f(&p["format"]["duration"]);
+            assert!((d - 4.0).abs() < 0.05, "{file}: durata {d}");
+            let title = [&p["format"]["tags"]["title"], &s["tags"]["title"], &s["tags"]["name"], &s["tags"]["handler_name"]]
+                .into_iter()
+                .find_map(|v| v.as_str().map(str::to_owned));
+            assert_eq!(title.as_deref(), Some(name), "{file}: nome della traccia");
+        }
+        // Una sola traccia: un file, niente cartella.
+        let base = out_dir().join(format!("audio_single_{ext}"));
+        clean(&base);
+        let one = cliprec_core::AudioSnapshot { start: refs.start(), tracks: vec![snap.tracks[0].clone()] };
+        let saved = write_audio_clip(&base, &one, format).unwrap();
+        assert!(saved.path.is_file());
+        assert_eq!(saved.path.extension().unwrap(), ext);
     }
 }
 

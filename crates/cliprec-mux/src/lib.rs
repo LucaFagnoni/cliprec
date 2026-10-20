@@ -13,6 +13,7 @@
 //!   ovunque, anche dove il WAV float non è supportato.
 
 mod ffi;
+mod polywav;
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -46,6 +47,8 @@ pub enum MuxError {
     OutOfMemory,
     #[error("clip scritta ma non rinominata (resta in {part}): {source}")]
     RenameFailed { part: PathBuf, source: std::io::Error },
+    #[error("clip troppo grande per il formato: {0}")]
+    TooLarge(&'static str),
     #[error("{op} {path}: {source}")]
     Io { op: &'static str, path: PathBuf, source: std::io::Error },
 }
@@ -426,21 +429,24 @@ pub fn write_audio_clip<A: ClipAudio + ?Sized>(
         AudioClipFormat::FlacPerTrack => ("flac", AudioCodec::Flac, ".flac"),
         AudioClipFormat::WavPerTrack => ("wav", AudioCodec::PcmS24, ".wav"),
         AudioClipFormat::Mka => ("matroska", AudioCodec::Flac, ".mka"),
-        // Formati nuovi del contratto: li implementa replay-buffer (m27).
-        AudioClipFormat::PolyWav | AudioClipFormat::Opus | AudioClipFormat::Aac => {
-            return Err(MuxError::EncoderMissing(format!("{format:?} non ancora supportato")));
+        AudioClipFormat::Opus => ("opus", AudioCodec::Opus { bit_rate: 128_000 }, ".opus"),
+        AudioClipFormat::Aac => ("mp4", AudioCodec::Aac { bit_rate: 192_000 }, ".m4a"),
+        AudioClipFormat::PolyWav => {
+            let saved = write_reserved(path, ".wav", false, |part| polywav::write(part, audio))?;
+            return Ok(SavedClip { kind: ClipKind::Audio, bytes: size_of(&saved), path: saved, duration_secs });
         }
     };
+    let faststart = ffmt == "mp4";
     let track = |i: usize| Track { name: audio.track_name(i), source: Aligned::new(audio.reader(i), 0, frames) };
 
     let saved = if format == AudioClipFormat::Mka || count == 1 {
-        write_reserved(path, ext, false, |part| ffi::write(part, ffmt, None, (0..count).map(track).collect(), codec, false))?
+        write_reserved(path, ext, false, |part| ffi::write(part, ffmt, None, (0..count).map(track).collect(), codec, faststart))?
     } else {
         write_reserved(path, "", true, |part| {
             std::fs::create_dir(part).map_err(io("creazione della cartella", part))?;
             for i in 0..count {
                 let file = part.join(format!("{:02} - {}{ext}", i + 1, file_name(audio.track_name(i))));
-                ffi::write(&file, ffmt, None, vec![track(i)], codec, false)?;
+                ffi::write(&file, ffmt, None, vec![track(i)], codec, faststart)?;
             }
             Ok(())
         })?
