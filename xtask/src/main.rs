@@ -1,12 +1,22 @@
 //! `cargo xtask <comando>`: automazione del progetto.
 //!
+//! - `probe <file|cartella> [--duration S] [--tracks N] [--names "A,B"] [--fps F]`: validazione ffprobe.
+//! - `sync <file|cartella> [--tolerance-ms 20]`: misura della sincronia (lampi e bip).
+//! - `gen-test-clip <out.mp4> [--av-offset-ms X]`: clip di riferimento.
+//! - `bench-report <csv...>`: fps medi e 1% low da CSV PresentMon, confronto di due run.
+//! - `testwindow [--seconds N]`: finestra 640x360 con timecode QPC e lampo a ogni secondo.
 //! - `ffmpeg`: scarica in `third_party/ffmpeg` la build FFmpeg 9 LGPL condivisa di BtbN
 //!   (header, librerie di importazione, DLL). Usa `curl.exe` e `tar.exe` di Windows.
+
+mod testwindow;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
+use cliprec_tests::generate::{self, GenOptions};
+use cliprec_tests::probe::{self, Expect};
+use cliprec_tests::{bench, sync};
 
 const FFMPEG_URL: &str =
     "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n9.0-latest-win64-lgpl-shared-9.0.zip";
@@ -15,11 +25,81 @@ fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("ffmpeg") => ffmpeg(&root()?),
-        _ => {
-            eprintln!("uso: cargo xtask ffmpeg");
+        Some("probe") => finish("probe", probe_cmd(&args[1..])?),
+        Some("sync") => finish("sync", sync_cmd(&args[1..])?),
+        Some("gen-test-clip") => gen_cmd(&args[1..]),
+        Some("testwindow") => testwindow::run(opt(&args, "--seconds")?),
+        Some("bench-report") => {
+            let paths: Vec<&Path> = args[1..].iter().map(Path::new).collect();
+            print!("{}", bench::report(&paths)?);
             Ok(())
         }
+        _ => {
+            eprintln!("uso: cargo xtask ffmpeg | probe | sync | gen-test-clip | bench-report (vedi la testata di xtask/src/main.rs)");
+            std::process::exit(2);
+        }
     }
+}
+
+/// Stampa le violazioni ed esce con codice 1 se ce ne sono.
+fn finish(what: &str, violations: Vec<String>) -> Result<()> {
+    if violations.is_empty() {
+        println!("{what}: ok");
+        return Ok(());
+    }
+    for v in &violations {
+        eprintln!("{what}: VIOLAZIONE: {v}");
+    }
+    std::process::exit(1);
+}
+
+/// Valore di `--nome`, se presente.
+fn opt<T: std::str::FromStr>(args: &[String], name: &str) -> Result<Option<T>> {
+    match args.iter().position(|a| a == name) {
+        None => Ok(None),
+        Some(i) => {
+            let v = args.get(i + 1).with_context(|| format!("{name} senza valore"))?;
+            v.parse().map(Some).map_err(|_| anyhow::anyhow!("valore non valido per {name}: {v}"))
+        }
+    }
+}
+
+fn probe_cmd(args: &[String]) -> Result<Vec<String>> {
+    let path = Path::new(args.first().context("manca il file")?);
+    let expect = Expect {
+        min_duration: opt(args, "--duration")?,
+        audio_tracks: opt(args, "--tracks")?,
+        track_names: opt::<String>(args, "--names")?.map(|n| n.split(',').map(str::to_owned).collect()),
+        fps: opt(args, "--fps")?,
+        ..Expect::default()
+    };
+    if path.is_dir() { probe::check_audio_dir(path, &expect) } else { probe::check(path, &expect) }
+}
+
+fn sync_cmd(args: &[String]) -> Result<Vec<String>> {
+    let path = Path::new(args.first().context("manca il file")?);
+    let tol = opt(args, "--tolerance-ms")?.unwrap_or(20.0);
+    let mut r = sync::measure_sync(path)?;
+    println!("lampi: {}, bip per traccia: {:?}", r.flashes, r.bips);
+    for (i, (a, t)) in r.av.iter().zip(&r.inter_track).enumerate() {
+        println!(
+            "traccia {i}: A/V medio {:+.2} ms, max {:.2} ms ({} abbinati); vs traccia 0 medio {:+.2} ms, max {:.2} ms",
+            a.mean_ms, a.max_abs_ms, a.matched, t.mean_ms, t.max_abs_ms
+        );
+    }
+    // Senza video non c'è scarto A/V da giudicare.
+    if r.flashes == 0 {
+        r.av.clear();
+    }
+    Ok(r.violations(tol))
+}
+
+fn gen_cmd(args: &[String]) -> Result<()> {
+    let out = Path::new(args.first().context("manca il file di uscita")?);
+    let o = GenOptions { av_offset_ms: opt(args, "--av-offset-ms")?.unwrap_or(0.0), ..GenOptions::default() };
+    generate::gen_test_clip(out, &o)?;
+    println!("clip di prova in {}", out.display());
+    Ok(())
 }
 
 fn root() -> Result<PathBuf> {

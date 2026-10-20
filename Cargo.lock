@@ -166,7 +166,10 @@ dependencies = [
 name = "cliprec-tests"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "cliprec-core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -667,6 +670,8 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "cliprec-tests",
+ "windows",
 ]
 
 [[package]]
