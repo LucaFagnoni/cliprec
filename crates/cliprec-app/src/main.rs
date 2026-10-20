@@ -12,6 +12,7 @@ mod logging;
 mod notify;
 mod rawinput;
 mod shell;
+mod startup;
 mod supervisor;
 mod sys;
 
@@ -46,15 +47,10 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     };
 
-    let config_path = shell::config_path();
-    let config = if config_path.exists() {
-        Config::load(&config_path).unwrap_or_else(|e| {
-            tracing::error!("config.toml: {e}; uso i valori predefiniti");
-            Config::default()
-        })
-    } else {
-        first_run_config(&config_path)
-    };
+    i18n::set_from_config("auto");
+    let startup = startup::startup_config(&shell::config_path(), cliprec_audio::find_root_pid("Discord.exe").is_some());
+    let config = startup.config.clone();
+    open_settings_if_needed(startup.open_settings);
 
     let (cmd_tx, cmd_rx) = channel::<AppCommand>();
     for e in gamepad::set_from_config(&config) {
@@ -64,11 +60,15 @@ fn main() -> anyhow::Result<()> {
         tracing::warn!("thread del controller non avviato: {e}");
     }
     let (event_tx, event_rx) = channel::<EngineEvent>();
+    if let Some(e) = &startup.error {
+        // Il toast parte appena la shell è su: l'evento resta in coda nel canale.
+        let _ = event_tx.send(EngineEvent::Error(e.clone()));
+    }
     let status = Arc::new(Mutex::new(EngineStatus::default()));
 
     let engine = {
-        let (config, status) = (config.clone(), Arc::clone(&status));
-        supervisor::spawn_supervised("motore", move || engine::run(config.clone(), true, &cmd_rx, event_tx.clone(), Arc::clone(&status)))?
+        let (config, status, start_buffer) = (config.clone(), Arc::clone(&status), startup.start_buffer);
+        supervisor::spawn_supervised("motore", move || engine::run(config.clone(), start_buffer, &cmd_rx, event_tx.clone(), Arc::clone(&status)))?
     };
 
     let result = shell::run(shell::ShellIo { commands: cmd_tx, events: event_rx, status, config });
@@ -104,43 +104,14 @@ fn prova(args: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Primo avvio: predefiniti (video automatico, audio di sistema e microfono, hotkey assegnate),
-/// più Discord se è aperto; il file viene scritto così la finestra impostazioni lo ritrova.
-fn first_run_config(path: &std::path::Path) -> Config {
-    let config = first_run_defaults(cliprec_audio::find_root_pid("Discord.exe").is_some());
-    match config.save(path) {
-        Ok(()) => tracing::info!("primo avvio: configurazione scritta in {}", path.display()),
-        Err(e) => tracing::error!("primo avvio: {e}"),
-    }
-    // Primo avvio: si aprono le impostazioni (sorgenti proposte, hotkey, pulsante «Prova»).
+/// Primo avvio o config illeggibile: si apre la finestra impostazioni (non in modalità headless).
+fn open_settings_if_needed(open: bool) {
     let settings = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join("cliprec-settings.exe")));
-    if !notify::headless()
+    if open
+        && !notify::headless()
         && let Some(exe) = settings.filter(|p| p.exists())
         && let Err(e) = std::process::Command::new(exe).spawn()
     {
-        tracing::warn!("primo avvio: impostazioni non aperte: {e}");
-    }
-    config
-}
-
-fn first_run_defaults(discord_running: bool) -> Config {
-    let mut config = Config::default();
-    if discord_running {
-        config.audio.sources.push(cliprec_core::config::AudioSourceConfig::new(
-            "Discord",
-            cliprec_core::config::AudioSourceKind::App { exe: "Discord.exe".into() },
-        ));
-    }
-    config
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn first_run_adds_discord_only_when_open() {
-        assert_eq!(super::first_run_defaults(false).audio.sources.len(), 2);
-        let with = super::first_run_defaults(true);
-        assert_eq!(with.audio.sources.last().map(|s| s.name.as_str()), Some("Discord"));
-        assert_eq!(with.hotkeys.video, "Ctrl+Alt+F10");
+        tracing::warn!("impostazioni non aperte: {e}");
     }
 }
