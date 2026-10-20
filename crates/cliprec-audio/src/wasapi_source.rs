@@ -3,7 +3,7 @@
 //! a eventi con attesa massima di 10 ms; i vuoti diventano silenzio tramite [`Continuity`].
 
 use std::panic::AssertUnwindSafe;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -98,6 +98,22 @@ fn fail(e: WasapiError) -> SourceError {
 ///
 /// In ogni caso la sorgente consegna campioni continui: finché manca il dispositivo o l'app, o
 /// quando nulla suona, consegna silenzio.
+/// Come è stata aperta la cattura, per diagnostica e stato.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CaptureMode {
+    /// Loopback di un dispositivo d'uscita, o un dispositivo d'ingresso: endpoint WASAPI.
+    Endpoint,
+    /// Process loopback in modalità EXCLUDE sull'albero di ClipRec: tutto l'audio tranne il nostro.
+    ExcludeSelf,
+    /// Process loopback in modalità INCLUDE sull'albero di un'app (PID radice).
+    App(u32),
+}
+
+const MODE_NONE: u64 = 0;
+const MODE_ENDPOINT: u64 = 1;
+const MODE_EXCLUDE_SELF: u64 = 2;
+const MODE_APP: u64 = 3;
+
 pub struct WasapiSource {
     name: String,
     kind: AudioSourceKind,
@@ -106,6 +122,8 @@ pub struct WasapiSource {
     thread: Option<JoinHandle<()>>,
     /// Thread normale (non MMCSS) che cerca il PID dell'app ogni 3 s.
     watcher: Option<JoinHandle<()>>,
+    /// Modalità dell'ultima apertura riuscita: tipo nei 32 bit alti, PID nei bassi.
+    mode: Arc<AtomicU64>,
     /// Per i test: l'apertura fallisce con `AccessDenied` finché è vero.
     #[cfg(test)]
     fail_open: Arc<AtomicBool>,
@@ -120,6 +138,7 @@ impl WasapiSource {
             state: Arc::new(Mutex::new(SourceState::Stopped)),
             thread: None,
             watcher: None,
+            mode: Arc::new(AtomicU64::new(MODE_NONE)),
             #[cfg(test)]
             fail_open: Arc::new(AtomicBool::new(false)),
         }
@@ -140,6 +159,19 @@ fn watch_pid(exe: String, pid: Arc<AtomicU32>, flags: Arc<DeviceFlags>, stop: Ar
         let found = find_root_pid(&exe).unwrap_or(0);
         if pid.swap(found, Ordering::AcqRel) != found {
             flags.signal(true);
+        }
+    }
+}
+
+impl WasapiSource {
+    /// Modalità dell'ultima apertura riuscita (`None` finché non si è aperto nulla).
+    pub fn capture_mode(&self) -> Option<CaptureMode> {
+        let v = self.mode.load(Ordering::Acquire);
+        match v >> 32 {
+            MODE_ENDPOINT => Some(CaptureMode::Endpoint),
+            MODE_EXCLUDE_SELF => Some(CaptureMode::ExcludeSelf),
+            MODE_APP => Some(CaptureMode::App(v as u32)),
+            _ => None,
         }
     }
 }
@@ -181,6 +213,7 @@ impl AudioSource for WasapiSource {
             continuity: Continuity::new(),
             flags,
             pid,
+            mode: self.mode.clone(),
             #[cfg(test)]
             fail_open: self.fail_open.clone(),
         };
@@ -267,6 +300,7 @@ struct Capture {
     flags: Arc<DeviceFlags>,
     /// PID radice dell'app, aggiornato da `watch_pid` (0 = non in esecuzione).
     pid: Arc<AtomicU32>,
+    mode: Arc<AtomicU64>,
     #[cfg(test)]
     fail_open: Arc<AtomicBool>,
 }
@@ -375,7 +409,14 @@ impl Capture {
             return Err(OpenError::Fatal(SourceError::AccessDenied(MIC_PRIVACY.into())));
         }
         let classify = |e: WasapiError| classify(e, &self.kind);
-        let (mut client, channels, direction, pid) = match &self.kind {
+        let (mut client, channels, direction, pid, opened) = match &self.kind {
+            AudioSourceKind::Output { device: None } => {
+                // m7: tutto ciò che suona tranne ClipRec (il «ding» di salvataggio non finisce nelle
+                // clip). Process loopback in modalità EXCLUDE sul nostro albero di processi.
+                // ATTENZIONE: in wasapi 0.26 `include_tree = false` vuol dire proprio EXCLUDE.
+                let client = AudioClient::new_application_loopback_client(std::process::id(), false).map_err(classify)?;
+                (client, CHANNELS, Direction::Capture, None, MODE_EXCLUDE_SELF << 32)
+            }
             AudioSourceKind::App { exe } => {
                 let pid = self.pid.load(Ordering::Acquire);
                 if pid == 0 {
@@ -383,7 +424,7 @@ impl Capture {
                 }
                 // ATTENZIONE: in wasapi 0.26 `include_tree = false` vuol dire modalità EXCLUDE.
                 let client = AudioClient::new_application_loopback_client(pid, true).map_err(classify)?;
-                (client, CHANNELS, Direction::Capture, Some(pid))
+                (client, CHANNELS, Direction::Capture, Some(pid), (MODE_APP << 32) | u64::from(pid))
             }
             AudioSourceKind::Input { device } | AudioSourceKind::Output { device } => {
                 let input = matches!(self.kind, AudioSourceKind::Input { .. });
@@ -402,7 +443,7 @@ impl Capture {
                     Ok(f) if input && f.get_nchannels() == 1 => 1,
                     _ => CHANNELS,
                 };
-                (dev.get_iaudioclient().map_err(classify)?, channels, Direction::Capture, None)
+                (dev.get_iaudioclient().map_err(classify)?, channels, Direction::Capture, None, MODE_ENDPOINT << 32)
             }
         };
         let format = WaveFormat::new(32, 32, &SampleType::Float, SAMPLE_RATE as usize, channels, None);
@@ -422,6 +463,7 @@ impl Capture {
             ctl.register_session_notification(cb).ok()
         });
         client.start_stream().map_err(classify)?;
+        self.mode.store(opened, Ordering::Release);
         Ok(Session { client, capture, event, channels, pid, disconnect, _events: events })
     }
 
@@ -765,6 +807,32 @@ mod tests {
         assert_eq!(state, SourceState::Running);
         let last = chunks.lock().unwrap().last().unwrap().0;
         assert!(QpcTime::now().hns_since(last) < 5_000_000, "la cattura deve aver ripreso");
+    }
+
+    /// m7: «Sistema» sul dispositivo predefinito si apre in process loopback EXCLUDE sul nostro
+    /// albero di processi (il «ding» di salvataggio non entra nella clip); con un dispositivo
+    /// esplicito resta il loopback dell'endpoint. Nessun suono viene riprodotto.
+    #[test]
+    fn default_output_excludes_own_process() {
+        let mode_after_open = |kind: AudioSourceKind| {
+            let mut src = WasapiSource::new("test", kind);
+            src.start(Box::new(|_| {})).unwrap();
+            let t0 = Instant::now();
+            while src.capture_mode().is_none() && t0.elapsed() < Duration::from_secs(5) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let mode = src.capture_mode();
+            src.stop();
+            mode
+        };
+        let default = mode_after_open(AudioSourceKind::Output { device: None });
+        println!("uscita predefinita: {default:?}");
+        assert_eq!(default, Some(CaptureMode::ExcludeSelf));
+        if let Some((id, name)) = list_devices(false).unwrap().into_iter().next() {
+            let explicit = mode_after_open(AudioSourceKind::Output { device: Some(id) });
+            println!("uscita esplicita {name}: {explicit:?}");
+            assert_eq!(explicit, Some(CaptureMode::Endpoint));
+        }
     }
 
     /// Cattura reale dal microfono: solo a mano (`cargo test -- --ignored`), mai di notte.
