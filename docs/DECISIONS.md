@@ -61,3 +61,21 @@ Le voci [DEFAULT] e [PROPOSTA] di SPEC.md valgono come decise; qui ci sono quell
     `VideoStreamParams::bit_rate` è il tetto (maxrate).
 16. **AMF non verificato**: su questo PC non c'è una GPU AMD (`amfrt64.dll` assente). Le opzioni AMF
     sono scritte ma da provare su una Radeon.
+17. **`MinUpdateInterval` a 3/4 di periodo** (minimo 1 ms), non 1/fps: con 1/fps esatto, su questo
+    schermo a 60 Hz arrivavano circa 50 frame nuovi al secondo invece di 60 (misura di video-capture).
+18. **pts video = istante del tick, `CAPTURE_PTS_OFFSET = 0`**: WGC consegna il frame circa 10 ms prima
+    della sua visualizzazione e circa mezzo periodo dopo la produzione; lo scarto è dentro ±20 ms in
+    entrambi i casi. La costante in `cliprec-capture/src/source.rs` resta come manopola di taratura.
+19. **Tick persi del pacer**: il motore li riempie (fino a 100 ms per tick) ripetendo l'ultimo frame
+    codificato, tenuto in una copia GPU (`CopyResource` a ogni frame, nessuna copia su CPU), come i
+    frame duplicati di OBS. Oltre, il buco resta nel file come salto di timestamp.
+20. **RAM libera insufficiente all'avvio**: invece della proposta interattiva della specifica, il tetto
+    del buffer scende a metà della RAM libera e un avviso chiede di ridurre durata o qualità.
+21. **Arena video preallocata a 1/4 della stima** e cresciuta a blocchi da 4 MiB (bloccati e
+    riciclati) fino al tetto: con HEVC 1080p il buffer scende da 82 a 19 MB.
+22. **WAV a 24 bit interi** nelle clip audio (i campioni nel buffer sono già a 24 bit nel FLAC).
+23. **Encoder aperto su un thread a parte** al primo frame; i parametri del buffer li imposta solo la
+    sessione ancora viva; fallback con `open_after` e backoff da 1 a 30 s; video morto ritentato
+    da 5 a 60 s; un device perso o un cambio di GPU ricreano la sessione mantenendo il buffer.
+24. **`{game}` nel nome file** = nome dell'eseguibile catturato, ricavato dalla descrizione della
+    sorgente; «Desktop» per i monitor, «Audio» in modalità solo audio.
