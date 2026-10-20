@@ -278,6 +278,33 @@ fn open_errors_are_classified() {
     assert!(matches!(cliprec_encode::open(&gpu, &settings, "hevc_qsv").err(), Some(cliprec_core::EncodeError::Unsupported(_))));
 }
 
+/// Conteggio dei riferimenti COM del device (AddRef + Release).
+fn refcount(dev: &windows::Win32::Graphics::Direct3D11::ID3D11Device) -> u32 {
+    use windows::core::Interface;
+    // SAFETY: AddRef seguito da Release sullo stesso puntatore valido: il conteggio non cambia.
+    unsafe {
+        let vt = dev.vtable();
+        (vt.base__.AddRef)(dev.as_raw());
+        (vt.base__.Release)(dev.as_raw())
+    }
+}
+
+#[test]
+fn com_references_are_balanced() {
+    let Some(gpu) = device(NVIDIA).or_else(|| device(INTEL)) else { return };
+    let name = if gpu.adapter_name.contains("NVIDIA") { "hevc_nvenc" } else { "hevc_qsv" };
+    let settings = EncoderSettings::from_config(&Default::default(), 1920, 1080);
+    // Un giro a vuoto: il runtime D3D/driver può tenere oggetti alla prima apertura.
+    drop(cliprec_encode::open(&gpu, &settings, name).unwrap());
+    let before = refcount(&gpu.device);
+    for _ in 0..3 {
+        let mut enc = cliprec_encode::open(&gpu, &settings, name).unwrap();
+        run(&gpu, enc.as_mut(), &[(1920, 1080), (1280, 1024)], false);
+        assert!(refcount(&gpu.device) > before, "l'encoder deve tenere riferimenti al device");
+    }
+    assert_eq!(refcount(&gpu.device), before, "riferimenti al device non rilasciati");
+}
+
 #[test]
 fn open_best_and_probe() {
     let Some(gpu) = device(NVIDIA) else { return };
