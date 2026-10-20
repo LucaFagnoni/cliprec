@@ -8,7 +8,7 @@ mod engine;
 mod mixer;
 mod wasapi_source;
 
-pub use engine::{AudioEngine, MIX_LATENCY_HNS, MIX_TRACK_NAME};
+pub use engine::{AudioEngine, MAX_MIX_LATENCY_HNS, MIX_LATENCY_HNS, MIX_TRACK_NAME};
 pub use mixer::{MIX_BLOCK_FRAMES, MixInput, Mixer};
 pub use wasapi_source::{OPENING, WasapiSource, find_root_pid, list_devices};
 

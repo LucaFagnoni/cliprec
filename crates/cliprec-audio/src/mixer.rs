@@ -2,6 +2,10 @@
 //! frequenza reale è stimata con una regressione posizione/QPC e corretta con il resampler
 //! adattivo `rubato::Slip` prima della somma; dopo la somma c'è il limiter.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
+
+use cliprec_core::time::frames_to_hns;
 use cliprec_core::{AudioChunk, CHANNELS, QpcTime, SAMPLE_RATE, SourceError};
 use rtrb::{Consumer, Producer, RingBuffer};
 use rubato::audioadapter_buffers::direct::InterleavedSlice;
@@ -32,11 +36,26 @@ pub struct MixInput {
     pos: u64,
     /// Campioni persi perché la coda era piena (il mixer non consumava).
     pub dropped_frames: u64,
+    /// Picco (con lento oblio) dell'età dei dati all'arrivo: adesso − fine del blocco.
+    age_peak: i64,
+    last_push: Option<QpcTime>,
+    age: Arc<AtomicI64>,
 }
+
+/// Il picco dell'età cala di 10 ms al secondo.
+const AGE_DECAY: f64 = 0.01;
 
 impl MixInput {
     pub fn push(&mut self, chunk: AudioChunk<'_>) {
         let frames = chunk.samples.len() / CHANNELS;
+        let now = QpcTime::now();
+        if let Some(t) = self.last_push {
+            self.age_peak -= (now.hns_since(t).max(0) as f64 * AGE_DECAY) as i64;
+        }
+        self.last_push = Some(now);
+        let age = now.hns_since(chunk.qpc.add_hns(frames_to_hns(frames as i64)));
+        self.age_peak = self.age_peak.max(age).max(0);
+        self.age.store(self.age_peak, Ordering::Relaxed);
         let _ = self.timing.push(Timing { qpc: chunk.qpc, pos: self.pos });
         let fit = (self.samples.slots() / CHANNELS).min(frames);
         let _ = self.samples.push_partial_slice(&chunk.samples[..fit * CHANNELS]);
@@ -57,6 +76,7 @@ struct Lane {
     output: Vec<f32>,
     /// Ultimo scarto misurato in campioni (positivo = sorgente in anticipo).
     last_error: f64,
+    age: Arc<AtomicI64>,
 }
 
 /// Somma sincronizzata di più sorgenti. `render` non alloca.
@@ -77,6 +97,7 @@ impl Mixer {
             let slip = Slip::new(MIX_BLOCK_FRAMES, CHANNELS, FixedAsync::Output)
                 .map_err(|e| SourceError::Failed(format!("resampler del mixer: {e}")))?;
             let max_in = slip.input_frames_max();
+            let age = Arc::new(AtomicI64::new(0));
             lanes.push(Lane {
                 samples: sc,
                 timing: tc,
@@ -87,8 +108,9 @@ impl Mixer {
                 input: vec![0.0; max_in * CHANNELS],
                 output: vec![0.0; MIX_BLOCK_FRAMES * CHANNELS],
                 last_error: 0.0,
+                age: age.clone(),
             });
-            inputs.push(MixInput { samples: sp, timing: tp, pos: 0, dropped_frames: 0 });
+            inputs.push(MixInput { samples: sp, timing: tp, pos: 0, dropped_frames: 0, age_peak: 0, last_push: None, age });
         }
         Ok((Self { lanes, mix: vec![0.0; MIX_BLOCK_FRAMES * CHANNELS], limiter: Limiter::default() }, inputs))
     }
@@ -96,6 +118,12 @@ impl Mixer {
     /// Scarto attuale della corsia `i` in millisecondi (positivo = la sorgente è in anticipo).
     pub fn lane_error_ms(&self, i: usize) -> f64 {
         self.lanes.get(i).map_or(0.0, |l| l.last_error * 1000.0 / f64::from(SAMPLE_RATE))
+    }
+
+    /// Ritardo massimo con cui arrivano i dati degli ingressi (picco recente, in unità da 100 ns):
+    /// il mixer deve restare indietro almeno di tanto per non trovarli già «passati».
+    pub fn input_latency_hns(&self) -> i64 {
+        self.lanes.iter().map(|l| l.age.load(Ordering::Relaxed)).max().unwrap_or(0)
     }
 
     /// Frequenza stimata della corsia `i` in campioni per secondo di QPC.

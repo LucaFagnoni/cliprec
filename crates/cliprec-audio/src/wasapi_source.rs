@@ -459,7 +459,7 @@ impl Capture {
                     tracing::debug!("discontinuità nei dati WASAPI");
                 }
                 let qpc = (!info.flags.timestamp_error && info.timestamp != 0).then_some(QpcTime(info.timestamp as i64));
-                self.continuity.packet(qpc, stereo, &mut *self.on_chunk);
+                self.continuity.packet(qpc, stereo, QpcTime::now(), &mut *self.on_chunk);
             }
             self.continuity.idle(QpcTime::now(), &mut *self.on_chunk);
         }
@@ -585,13 +585,13 @@ mod tests {
         let total: usize = chunks.iter().map(|c| c.1).sum();
         let dur = total as f64 / 48_000.0;
         println!("{} blocchi, {dur:.3} s, picco {:.4}", chunks.len(), chunks.iter().fold(0.0f32, |m, c| m.max(c.2)));
-        // Il silenzio resta indietro di 50 ms rispetto ad adesso (IDLE_HOLDBACK_HNS); i timestamp del
+        // Il silenzio resta indietro di almeno 50 ms rispetto ad adesso (MIN_HOLDBACK_HNS); i timestamp del
         // loopback d'uscita invece sono avanti di circa la latenza di riproduzione (~45 ms misurati).
         assert!(dur > secs - 0.2 && dur <= secs + 0.1, "durata {dur} s invece di ~{secs} s");
         for w in chunks.windows(2) {
             let end = w[0].0.add_hns(frames_to_hns(w[0].1 as i64));
-            // Il timestamp di ogni pacchetto è quello vero: tolleranza di 2 ms come Continuity.
-            assert!(w[1].0.hns_since(end).abs() <= 20_000, "buco o sovrapposizione: {w:?}");
+            // Il timestamp di ogni pacchetto è quello vero: tolleranza di 15 ms come Continuity.
+            assert!(w[1].0.hns_since(end).abs() <= 150_000, "buco o sovrapposizione: {w:?}");
         }
     }
 

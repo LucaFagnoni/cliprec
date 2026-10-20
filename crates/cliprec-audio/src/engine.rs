@@ -6,7 +6,7 @@
 //!   produce blocchi da 10 ms su una griglia ancorata al QPC, con un ritardo fisso.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -17,9 +17,14 @@ use cliprec_core::{AudioChunk, AudioSource, AudioTrackSink, CHANNELS, HNS_PER_SE
 use crate::mixer::{MIX_BLOCK_FRAMES, MixInput, Mixer};
 use crate::wasapi_source::WasapiSource;
 
-/// Ritardo del mixer rispetto ad adesso: deve superare la latenza delle sorgenti più il
-/// trattenimento del riempimento di silenzio (50 ms).
+/// Ritardo minimo del mixer rispetto ad adesso. Cresce da solo fino a [`MAX_MIX_LATENCY_HNS`] se
+/// i dati di una sorgente arrivano più tardi (latenza del dispositivo, trattenimento del silenzio,
+/// ritardo negativo): il valore attuale è [`AudioEngine::mix_latency_hns`].
 pub const MIX_LATENCY_HNS: i64 = 1_500_000; // 150 ms
+/// Tetto del ritardo del mixer (le code degli ingressi tengono 2 s).
+pub const MAX_MIX_LATENCY_HNS: i64 = 18_000_000;
+/// Margine sopra l'età massima dei dati in arrivo.
+const MIX_LATENCY_MARGIN_HNS: i64 = 300_000;
 /// Nome della traccia con la somma di tutte le sorgenti.
 pub const MIX_TRACK_NAME: &str = "Mix";
 
@@ -61,6 +66,7 @@ pub struct AudioEngine {
     errors: Vec<Option<String>>,
     stop: Arc<AtomicBool>,
     mixer_thread: Option<JoinHandle<()>>,
+    mix_latency: Arc<AtomicI64>,
 }
 
 impl AudioEngine {
@@ -133,18 +139,25 @@ impl AudioEngine {
             Vec::new()
         };
         let stop = Arc::new(AtomicBool::new(false));
+        let mix_latency = Arc::new(AtomicI64::new(MIX_LATENCY_HNS));
         let mixer_thread = if mixer.is_some() || !silent.is_empty() {
-            let stop = stop.clone();
+            let (stop, latency) = (stop.clone(), mix_latency.clone());
             Some(
                 std::thread::Builder::new()
                     .name("mixer audio".into())
-                    .spawn(move || mixer_loop(mixer, silent, sink, stop))
+                    .spawn(move || mixer_loop(mixer, silent, sink, stop, latency))
                     .map_err(|e| SourceError::Failed(format!("thread del mixer: {e}")))?,
             )
         } else {
             None
         };
-        Ok(Self { sources, errors, stop, mixer_thread })
+        Ok(Self { sources, errors, stop, mixer_thread, mix_latency })
+    }
+
+    /// Ritardo attuale del mixer (traccia unica e «Mix») rispetto ad adesso, in unità da 100 ns:
+    /// i blocchi più recenti di questa traccia coprono fino a `adesso − mix_latency_hns()`.
+    pub fn mix_latency_hns(&self) -> i64 {
+        self.mix_latency.load(Ordering::Relaxed)
     }
 
     /// Nome e stato di ogni sorgente, nell'ordine di configurazione.
@@ -179,7 +192,13 @@ impl Drop for AudioEngine {
     }
 }
 
-fn mixer_loop(mut mixer: Option<Mixer>, silent: Vec<usize>, sink: Arc<dyn AudioTrackSink>, stop: Arc<AtomicBool>) {
+fn mixer_loop(
+    mut mixer: Option<Mixer>,
+    silent: Vec<usize>,
+    sink: Arc<dyn AudioTrackSink>,
+    stop: Arc<AtomicBool>,
+    latency: Arc<AtomicI64>,
+) {
     let mmcss = crate::wasapi_source::Mmcss::register();
     let zeros = vec![0.0f32; MIX_BLOCK_FRAMES * CHANNELS];
     // Griglia ancorata al secondo intero di QPC: i blocchi cadono su multipli esatti di 480 campioni.
@@ -188,7 +207,10 @@ fn mixer_loop(mut mixer: Option<Mixer>, silent: Vec<usize>, sink: Arc<dyn AudioT
     let block = MIX_BLOCK_FRAMES as i64;
     let mut k = hns_to_frames(now.add_hns(-MIX_LATENCY_HNS).hns_since(origin)).div_euclid(block);
     while !stop.load(Ordering::Acquire) {
-        let ready_until = QpcTime::now().add_hns(-MIX_LATENCY_HNS);
+        let needed = mixer.as_ref().map_or(0, |m| m.input_latency_hns() + MIX_LATENCY_MARGIN_HNS);
+        let current = needed.clamp(MIX_LATENCY_HNS, MAX_MIX_LATENCY_HNS);
+        latency.store(current, Ordering::Relaxed);
+        let ready_until = QpcTime::now().add_hns(-current);
         loop {
             let start = origin.add_hns(frames_to_hns(k * block));
             if origin.add_hns(frames_to_hns((k + 1) * block)) > ready_until {
@@ -353,6 +375,63 @@ mod tests {
         engine.stop();
         assert_eq!(states[0].1, SourceState::Running);
         assert!(matches!(states[2].1, SourceState::Waiting(ref m) if m.contains("non è in esecuzione")));
+    }
+
+    /// Sorgente che consegna blocchi di 0,5 costante con 300 ms di latenza (timestamp veri nel passato).
+    struct LateSource {
+        stop: Arc<AtomicBool>,
+        thread: Option<JoinHandle<()>>,
+    }
+
+    impl AudioSource for LateSource {
+        fn start(&mut self, mut on_chunk: cliprec_core::ChunkCallback) -> Result<(), SourceError> {
+            let stop = self.stop.clone();
+            self.thread = Some(std::thread::spawn(move || {
+                let buf = vec![0.5f32; 960];
+                let t0 = QpcTime::now().add_hns(-3_000_000);
+                let mut k = 0i64;
+                while !stop.load(Ordering::Acquire) {
+                    let qpc = t0.add_hns(frames_to_hns(k * 480));
+                    if QpcTime::now().hns_since(qpc) >= 3_000_000 + frames_to_hns(480) {
+                        on_chunk(AudioChunk { qpc, samples: &buf });
+                        k += 1;
+                    } else {
+                        std::thread::sleep(Duration::from_millis(2));
+                    }
+                }
+            }));
+            Ok(())
+        }
+        fn stop(&mut self) {
+            self.stop.store(true, Ordering::Release);
+            if let Some(t) = self.thread.take() {
+                t.join().unwrap();
+            }
+        }
+        fn state(&self) -> SourceState {
+            SourceState::Running
+        }
+        fn name(&self) -> &str {
+            "Lenta"
+        }
+    }
+
+    /// M3 nel mixer: una sorgente con latenza oltre MIX_LATENCY (es. microfono a 300 ms) deve
+    /// comparire nel Mix, non essere scartata come «passata».
+    #[test]
+    fn mix_keeps_late_source() {
+        let sink = Arc::new(TestSink::default());
+        let late: Box<dyn AudioSource> = Box::new(LateSource { stop: Arc::default(), thread: None });
+        let mut engine = AudioEngine::with_sources(vec![late], &[], TrackMode::Merged, false, sink.clone()).unwrap();
+        std::thread::sleep(Duration::from_millis(2000));
+        engine.stop();
+        let data = sink.data.lock().unwrap();
+        // Il primo mezzo secondo può essere silenzio di avvio; poi il segnale deve esserci.
+        let tail = &data[0][48_000..];
+        let audible = tail.iter().filter(|s| (**s - 0.5).abs() < 1e-3).count();
+        let ratio = audible as f64 / tail.len().max(1) as f64;
+        println!("Mix con sorgente a 300 ms: {:.1}% dei campioni con il segnale", ratio * 100.0);
+        assert!(ratio > 0.95, "{:.1}%", ratio * 100.0);
     }
 
     struct Denied;
