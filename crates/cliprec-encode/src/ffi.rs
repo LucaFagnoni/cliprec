@@ -340,7 +340,11 @@ impl HwEncoder {
                     opts.set("preset", SOFTWARE_PRESET);
                     opts.set("crf", (u32::from(q) * 63 / 51).clamp(1, 63));
                     // KEY_FRAME a GOP chiuso, non «forward keyframe»: punto di partenza valido.
-                    opts.set("svtav1-params", "irefresh-type=2");
+                    // lp=4: al più 4 livelli di parallelismo; con quello automatico (come lp=6 su 28 thread)
+                    // l'encoder tiene ~1 GB residente a 1080p, con 4 circa 660 MB e 90 fps a 1440p
+                    // sul rumore. pred-struct=1 e rtc=1 scendono sotto 100 MB ma ignorano il tetto
+                    // di bitrate e crollano sotto i 20 fps sul rumore (DECISIONS 31).
+                    opts.set("svtav1-params", "irefresh-type=2:lp=4");
                 }
             }
 

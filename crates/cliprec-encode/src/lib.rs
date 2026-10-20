@@ -134,6 +134,11 @@ pub fn open(device: &GpuDevice, settings: &EncoderSettings, encoder_name: &str) 
         (codec, Vendor::HARDWARE.into_iter().find(|v| v.suffix() == suffix).ok_or_else(unsupported)?)
     };
     let b_frames = match vendor {
+        // NVENC: FFmpeg tiene almeno 4 × (B + 1) superfici, ognuna con un buffer di bitstream in RAM
+        // di ~2,5 byte per pixel che il driver tiene residente; con 2 B-frame sono 12 (84 MB a 1080p
+        // contro 30 senza, `tests/memory.rs`). Il costo: ~15% di bitrate in più a qualità costante
+        // (DECISIONS 31).
+        Vendor::Nvenc => 0,
         // AMF: niente B-frame in HEVC su nessuna generazione VCN; in AV1 da verificare a runtime.
         Vendor::Amf if codec != VideoCodec::H264 => 0,
         Vendor::Software => 0,
@@ -148,7 +153,7 @@ pub fn open(device: &GpuDevice, settings: &EncoderSettings, encoder_name: &str) 
 const B_FRAMES: u32 = 2;
 
 /// Apre con `b_frames` B-frame; se `avcodec_open2` rifiuta la configurazione come non supportata
-/// (es. NVENC su Pascal/Maxwell: «Max B-frames 2 exceed 0», ENOSYS), riprova lo stesso encoder
+/// (es. un encoder senza B-frame su quella GPU: «Max B-frames 2 exceed 0», ENOSYS), riprova lo stesso encoder
 /// senza B-frame prima di lasciare il posto al candidato successivo. FFmpeg scrive il motivo solo
 /// nel log, quindi si riprova su ogni rifiuto di `avcodec_open2` di tipo `Unsupported`.
 fn with_bframe_fallback<T>(name: &str, b_frames: u32, mut open: impl FnMut(u32) -> Result<T, EncodeError>) -> Result<T, EncodeError> {
