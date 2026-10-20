@@ -16,8 +16,8 @@ mod ffi;
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime};
 
 use cliprec_core::config::{AudioClipFormat, VideoContainer};
 use cliprec_core::time::hns_to_frames;
@@ -41,6 +41,8 @@ pub enum MuxError {
     EncoderPanicked,
     #[error("memoria esaurita in FFmpeg")]
     OutOfMemory,
+    #[error("clip scritta ma non rinominata (resta in {part}): {source}")]
+    RenameFailed { part: PathBuf, source: std::io::Error },
     #[error("{op} {path}: {source}")]
     Io { op: &'static str, path: PathBuf, source: std::io::Error },
 }
@@ -83,51 +85,79 @@ fn ensure_space(target: &Path, needed: u64) -> Result<(), MuxError> {
     }
 }
 
-/// Serializza, nel processo, la riserva dei nomi finali e lo scambio segnaposto → `.part`.
-static NAMES: Mutex<()> = Mutex::new(());
 static PART_SEQ: AtomicU64 = AtomicU64::new(0);
+/// Tentativi di rinomina quando il file è tenuto aperto da altri (anteprima, indicizzatore,
+/// antivirus, OneDrive): 10 × 50 ms.
+const RENAME_TRIES: u32 = 10;
+const RENAME_WAIT: Duration = Duration::from_millis(50);
+/// Estensioni delle clip, per `cleanup_stale`.
+const CLIP_EXTENSIONS: [&str; 5] = ["mp4", "mkv", "flac", "wav", "mka"];
 
-/// Riserva il primo nome libero tra `base+suffix`, `base (2)+suffix`... creandolo vuoto (file
-/// con `create_new`, o cartella), scrive con `write` su un `.part` unico (PID + contatore) e alla
-/// fine lo rinomina sul nome riservato. Su errore non lascia né il `.part` né il segnaposto.
+/// Scrive con `write` su un `.part` univoco (`<base><suffix>.<PID>-<n>.part`) e solo a scrittura
+/// completa lo rinomina, senza mai sovrascrivere, sul primo nome libero tra `base+suffix`,
+/// `base (2)+suffix`... Finché la clip non è completa non esiste nessun file con il nome finale.
+/// Se la scrittura fallisce il `.part` viene tolto; se fallisce solo la rinomina il `.part` (una
+/// clip completa) resta e l'errore ne riporta il percorso.
 fn write_reserved(
     base: &Path,
     suffix: &str,
     dir: bool,
     write: impl FnOnce(&Path) -> Result<(), MuxError>,
 ) -> Result<PathBuf, MuxError> {
-    let mut n = 1u32;
-    let target = loop {
-        let target = if n == 1 { with_suffix(base, suffix) } else { with_suffix(base, &format!(" ({n}){suffix}")) };
-        let _names = NAMES.lock().unwrap_or_else(|e| e.into_inner());
-        let made = if dir {
-            std::fs::create_dir(&target)
-        } else {
-            std::fs::OpenOptions::new().write(true).create_new(true).open(&target).map(drop)
-        };
-        match made {
-            Ok(()) => break target,
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && n < 10_000 => n += 1,
-            Err(e) => return Err(io("riserva del nome", &target)(e)),
-        }
-    };
     let seq = PART_SEQ.fetch_add(1, Ordering::Relaxed);
-    let part = with_suffix(&target, &format!(".{}-{seq}.part", std::process::id()));
-    let remove = |p: &Path| if dir { std::fs::remove_dir_all(p) } else { std::fs::remove_file(p) };
-    let done = write(&part).and_then(|()| {
-        let _names = NAMES.lock().unwrap_or_else(|e| e.into_inner());
-        // Un file sostituisce il segnaposto con la rinomina; una cartella va tolta prima.
-        if dir {
-            std::fs::remove_dir(&target).map_err(io("rinomina", &target))?;
-        }
-        std::fs::rename(&part, &target).map_err(io("rinomina", &part))
-    });
-    if let Err(e) = done {
-        let _ = remove(&part);
-        let _ = remove(&target);
+    let part = with_suffix(base, &format!("{suffix}.{}-{seq}.part", std::process::id()));
+    if let Err(e) = write(&part) {
+        let _ = if dir { std::fs::remove_dir_all(&part) } else { std::fs::remove_file(&part) };
         return Err(e);
     }
-    Ok(target)
+    publish(&part, base, suffix, ffi::rename_no_replace)
+}
+
+/// Rinomina `part` sul primo nome libero, ritentando per circa mezzo secondo se il file è
+/// bloccato. Non cancella mai `part`.
+fn publish(
+    part: &Path,
+    base: &Path,
+    suffix: &str,
+    rename: impl Fn(&Path, &Path) -> std::io::Result<()>,
+) -> Result<PathBuf, MuxError> {
+    let mut n = 1u32;
+    let mut tries = 0;
+    loop {
+        let target = if n == 1 { with_suffix(base, suffix) } else { with_suffix(base, &format!(" ({n}){suffix}")) };
+        match rename(part, &target) {
+            Ok(()) => return Ok(target),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && n < 10_000 => n += 1,
+            Err(_) if tries + 1 < RENAME_TRIES => {
+                tries += 1;
+                std::thread::sleep(RENAME_WAIT);
+            }
+            Err(source) => return Err(MuxError::RenameFailed { part: part.to_path_buf(), source }),
+        }
+    }
+}
+
+/// Pulizia all'avvio di `dir` (la cartella delle clip): toglie i `.part` più vecchi di un'ora
+/// (scritture interrotte) e i file di clip da 0 byte. Restituisce quanti elementi ha tolto.
+pub fn cleanup_stale(dir: &Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
+    let hour_ago = SystemTime::now().checked_sub(Duration::from_secs(3600));
+    let mut removed = 0;
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        let Ok(meta) = entry.metadata() else { continue };
+        let ext = path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default();
+        let old = matches!((meta.modified(), hour_ago), (Ok(m), Some(h)) if m < h);
+        let gone = if ext == "part" && old {
+            if meta.is_dir() { std::fs::remove_dir_all(&path) } else { std::fs::remove_file(&path) }.is_ok()
+        } else if meta.is_file() && meta.len() == 0 && CLIP_EXTENSIONS.contains(&ext.as_str()) {
+            std::fs::remove_file(&path).is_ok()
+        } else {
+            false
+        };
+        removed += usize::from(gone);
+    }
+    removed
 }
 
 fn size_of(path: &Path) -> u64 {
@@ -252,6 +282,79 @@ mod tests {
         assert_eq!(frame_at(&s, -2, 1), [0.0, 0.0]);
         assert_eq!(frame_at(&s, -2, 11), [9.0, -9.0]);
         assert_eq!(frame_at(&s, -2, 12), [0.0, 0.0]);
+    }
+
+    #[test]
+    fn locked_rename_keeps_the_part() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/test-output/mux/rename");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let base = dir.join("clip");
+        let part = dir.join("clip.mp4.1-1.part");
+        std::fs::write(&part, b"clip").unwrap();
+        let locked = |_: &Path, _: &Path| Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        let t = std::time::Instant::now();
+        match publish(&part, &base, ".mp4", locked) {
+            Err(MuxError::RenameFailed { part: p, .. }) => assert_eq!(p, part),
+            other => panic!("atteso RenameFailed, avuto {other:?}"),
+        }
+        assert!(t.elapsed() >= Duration::from_millis(400), "ritenta per circa mezzo secondo");
+        assert!(part.exists(), "la clip non va cancellata");
+        // Bloccato per due tentativi, poi libero: riesce.
+        let calls = std::cell::Cell::new(0);
+        let flaky = |a: &Path, b: &Path| {
+            calls.set(calls.get() + 1);
+            if calls.get() <= 2 { Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)) } else { ffi::rename_no_replace(a, b) }
+        };
+        assert_eq!(publish(&part, &base, ".mp4", flaky).unwrap(), dir.join("clip.mp4"));
+        // Nome già preso: non sovrascrive, passa a « (2)».
+        std::fs::write(&part, b"altra").unwrap();
+        assert_eq!(publish(&part, &base, ".mp4", ffi::rename_no_replace).unwrap(), dir.join("clip (2).mp4"));
+        assert_eq!(std::fs::read(dir.join("clip.mp4")).unwrap(), b"clip");
+    }
+
+    #[test]
+    fn final_name_appears_only_when_complete() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/test-output/mux/reserve");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let base = dir.join("clip");
+        let saved = write_reserved(&base, ".mp4", false, |part| {
+            assert!(!dir.join("clip.mp4").exists(), "nessun file col nome finale durante la scrittura");
+            std::fs::write(part, b"clip").map_err(io("scrittura", part))
+        })
+        .unwrap();
+        assert_eq!(saved, dir.join("clip.mp4"));
+        // Scrittura fallita: niente .part né nome finale.
+        let failed = write_reserved(&base, ".mkv", false, |part| {
+            std::fs::write(part, b"mezza").unwrap();
+            Err(MuxError::Empty("prova"))
+        });
+        assert!(failed.is_err());
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn stale_files_are_cleaned() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/test-output/mux/stale");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("old.123-0.part")).unwrap();
+        std::fs::write(dir.join("old.mp4.1-0.part"), b"x").unwrap();
+        std::fs::write(dir.join("new.mp4.1-1.part"), b"x").unwrap();
+        std::fs::write(dir.join("vuota.mp4"), b"").unwrap();
+        std::fs::write(dir.join("buona.mp4"), b"x").unwrap();
+        std::fs::write(dir.join("vuoto.txt"), b"").unwrap();
+        let two_hours_ago = SystemTime::now() - Duration::from_secs(7200);
+        for p in ["old.123-0.part", "old.mp4.1-0.part"] {
+            use std::os::windows::fs::OpenOptionsExt;
+            // FILE_FLAG_BACKUP_SEMANTICS: serve per aprire anche una cartella.
+            let f = std::fs::File::options().write(true).custom_flags(0x0200_0000).open(dir.join(p)).unwrap();
+            f.set_modified(two_hours_ago).unwrap();
+        }
+        assert_eq!(cleanup_stale(&dir), 3);
+        let mut left: Vec<String> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        left.sort();
+        assert_eq!(left, ["buona.mp4", "new.mp4.1-1.part", "vuoto.txt"]);
     }
 
     #[test]
