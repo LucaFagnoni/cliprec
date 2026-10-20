@@ -869,6 +869,13 @@ fn private_bytes() -> usize {
 mod tests {
     use super::*;
 
+    /// I test end-to-end aprono sessioni NVENC e lanciano ffmpeg/ffprobe: in fila, così sotto carico
+    /// non falliscono per risorse del sistema (avvio di processi, sessioni dell'encoder).
+    fn heavy() -> std::sync::MutexGuard<'static, ()> {
+        static HEAVY: Mutex<()> = Mutex::new(());
+        HEAVY.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     #[test]
     fn clip_names_are_valid_file_names() {
         let n = clip_name("{game}_{date}_{time}", ClipKind::Video, Some("a:b".into()));
@@ -913,6 +920,7 @@ mod tests {
     /// Guasto: il video non parte. L'audio prosegue, un avviso lo dice e la clip audio si salva.
     #[test]
     fn video_failure_falls_back_to_audio_only() {
+        let _serial = heavy();
         let mut config = Config::default();
         config.clips.folder = Some(fault_dir("solo-audio"));
         let (tx, rx) = std::sync::mpsc::channel();
@@ -932,6 +940,7 @@ mod tests {
     /// Guasto: la cartella delle clip non si può creare. `ClipFailed`, nessun crash, nessun file.
     #[test]
     fn unwritable_folder_reports_clip_failed() {
+        let _serial = heavy();
         let dir = fault_dir("cartella");
         let blocker = dir.join("file.txt");
         std::fs::write(&blocker, b"non una cartella").unwrap();
@@ -950,6 +959,7 @@ mod tests {
     /// Due pressioni nello stesso secondo: due clip distinte e valide, mai un errore.
     #[test]
     fn two_saves_in_the_same_second_give_two_valid_clips() {
+        let _serial = heavy();
         use cliprec_tests::probe::{Expect, check};
         let mut config = Config::default();
         config.clips.folder = Some(fault_dir("doppia"));
@@ -1012,6 +1022,7 @@ mod tests {
     /// nuovo, quindi il lampo non compare in anticipo e la sincronia resta entro ±20 ms.
     #[test]
     fn lost_ticks_before_flash_keep_av_sync() {
+        let _serial = heavy();
         let mut config = Config::default();
         config.clips.folder = Some(fault_dir("tick-persi"));
         config.clips.video_seconds = 5;
@@ -1041,6 +1052,7 @@ mod tests {
     /// con il «Mix» in testa (tre tracce, la prima predefinita), con i bip ancora sincronizzati.
     #[test]
     fn merged_and_mix_track_modes_end_to_end() {
+        let _serial = heavy();
         use cliprec_tests::probe::{Expect, check};
         for (mode, add_mix, names) in [
             (TrackMode::Merged, false, vec!["Mix"]),
@@ -1097,6 +1109,7 @@ mod tests {
     /// della sincronia. Richiede una GPU con encoder hardware.
     #[test]
     fn vertical_chain_with_synthetic_sources() {
+        let _serial = heavy();
         use cliprec_tests::probe::{Expect, check, check_audio_dir};
         let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/test-output/e2e");
         let _ = std::fs::remove_dir_all(&out);
