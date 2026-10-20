@@ -167,7 +167,7 @@ fn check_packets(pkts: &[Pkt], codec: &str) {
 }
 
 fn ffprobe(path: &PathBuf) -> String {
-    let ffmpeg = std::env::var("FFMPEG_DIR").unwrap_or_else(|_| "D:/Repositories/cliprec/third_party/ffmpeg".into());
+    let ffmpeg = std::env::var("FFMPEG_TOOLS_DIR").unwrap_or_else(|_| "D:/Repositories/cliprec/third_party/ffmpeg".into());
     let out = Command::new(PathBuf::from(ffmpeg).join("bin").join("ffprobe.exe"))
         .args(["-v", "error", "-count_frames", "-select_streams", "v:0"])
         .args(["-show_entries", "stream=codec_name,width,height,nb_read_frames", "-of", "csv=p=0"])
@@ -184,7 +184,7 @@ fn ffprobe(path: &PathBuf) -> String {
 /// coincidere. SVT-AV1 a CRF 28 nei livelli temporali alti non codifica variazioni di 1-4 livelli
 /// su un campo piatto e ripete un frame di riferimento, anche successivo: misurato fino a 4.
 fn check_colors(path: &PathBuf, w: u32, h: u32, lag: usize, tol: i32) {
-    let ffmpeg = std::env::var("FFMPEG_DIR").unwrap_or_else(|_| "D:/Repositories/cliprec/third_party/ffmpeg".into());
+    let ffmpeg = std::env::var("FFMPEG_TOOLS_DIR").unwrap_or_else(|_| "D:/Repositories/cliprec/third_party/ffmpeg".into());
     let out = Command::new(PathBuf::from(ffmpeg).join("bin").join("ffmpeg.exe"))
         .args(["-v", "error", "-i"])
         .arg(path)
@@ -240,7 +240,7 @@ fn write_ivf(name: &str, w: u32, h: u32, extradata: &[u8], pkts: &[Pkt]) -> Path
 
 /// Indici dei frame decodificati marcati come chiave da ffprobe.
 fn probe_key_frames(path: &PathBuf) -> Vec<usize> {
-    let ffmpeg = std::env::var("FFMPEG_DIR").unwrap_or_else(|_| "D:/Repositories/cliprec/third_party/ffmpeg".into());
+    let ffmpeg = std::env::var("FFMPEG_TOOLS_DIR").unwrap_or_else(|_| "D:/Repositories/cliprec/third_party/ffmpeg".into());
     let out = Command::new(PathBuf::from(ffmpeg).join("bin").join("ffprobe.exe"))
         .args(["-v", "error", "-select_streams", "v:0", "-show_entries", "frame=key_frame", "-of", "csv=p=0"])
         .arg(path)
@@ -570,7 +570,7 @@ fn red_line_bleed(color_format: cliprec_core::config::ColorFormat) -> Option<(i3
     }
     enc.flush(&mut sink).unwrap();
     let path = write_stream(&format!("righe-rosse-{color_format:?}.hevc"), &extradata, &pkts);
-    let ffmpeg = std::env::var("FFMPEG_DIR").unwrap_or_else(|_| "D:/Repositories/cliprec/third_party/ffmpeg".into());
+    let ffmpeg = std::env::var("FFMPEG_TOOLS_DIR").unwrap_or_else(|_| "D:/Repositories/cliprec/third_party/ffmpeg".into());
     let bin = PathBuf::from(ffmpeg).join("bin");
     let out = Command::new(bin.join("ffmpeg.exe")).args(["-v", "error", "-i"]).arg(&path).args(["-f", "rawvideo", "-pix_fmt", "rgb24", "-"]).output().unwrap();
     assert!(out.status.success(), "ffmpeg: {}", String::from_utf8_lossy(&out.stderr));

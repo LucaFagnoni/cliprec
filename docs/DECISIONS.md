@@ -144,3 +144,24 @@ Le voci [DEFAULT] e [PROPOSTA] di SPEC.md valgono come decise; qui ci sono quell
     manca, lo scarica da `aka.ms/vs/17/release/vc_redist.x64.exe` con la pagina di download di
     Inno Setup e lo installa. Senza rete avvisa e prosegue: ClipRec usa le DLL del runtime nella
     sua cartella. Tolto `cargo xtask redist`.
+36. **FFmpeg ridotta compilata in casa** (20 ottobre; cambia il [DEFAULT] sulla build BtbN). ClipRec
+    linka e distribuisce una build LGPL 3 con i soli componenti usati, compilata da
+    `cargo xtask ffmpeg-ridotta` in `third_party/ffmpeg-ridotta` (`FFMPEG_DIR`): encoder NVENC, QSV
+    e AMF per H.264/HEVC/AV1, SVT-AV1, AAC, FLAC, PCM 24 bit e Opus; muxer MP4, Matroska, FLAC,
+    WAV e Opus; hwcontext D3D11VA e QSV; swresample. Niente avfilter, avdevice, swscale, decoder,
+    rete né programmi. Le DLL passano da 112 a 13,5 MiB. La build BtbN completa resta in
+    `third_party/ffmpeg` (`FFMPEG_TOOLS_DIR`) solo per ffmpeg/ffprobe nei test e in `xtask probe`/`sync`:
+    i suoi exe caricano le DLL della loro cartella, quindi le due build non si mescolano.
+    Toolchain fissata: MSYS2 base `msys2-base-x86_64-20260927.tar.xz` da repo.msys2.org
+    (SHA-256 `ea2f31a0b6ade63914ce441ffb022f0f6aa96982bfefa2326460a26d5fb01322`, firma GPG di
+    MSYS2 verificata), pacchetti UCRT64 installati per URL e versione esatta (pacman ne verifica la
+    firma): gcc 16.2.0-6, binutils 2.47-4, mingw-w64 crt/headers/winpthreads 14.0.0.r495, nasm
+    3.02-1, pkgconf 3.0.10-1, svt-av1 4.2.0-1, opus 1.6.1-2, libvpl 2.17.0-1, amf-headers 1.5.3-1,
+    ffnvcodec-headers 13.0.19.0-1 (elenco in `xtask/src/ridotta.rs`). Sorgente: lo stesso commit della
+    build BtbN precedente, `669f5ab083c7732c10f1ce9e4f1915960dd88457` (n9.0.2-28, ramo release/9.0),
+    archivio GitHub con SHA-256 `e5b24d5779f736b3ef8a985d52051d48fece48712f810af7037283ad707ecd67`.
+    Le librerie esterne e il runtime di gcc sono linkati staticamente (`-static`): le quattro DLL
+    importano solo DLL di Windows. Due ritocchi al configure: `-lstdc++` (il `.pc` di libvpl non lo
+    dichiara) e il parser HEVC (in una build minima `hevc/parse.o` resta senza le SEI e il link
+    fallisce). `FFmpeg-BUILD.txt` e `THIRD_PARTY_NOTICES.md` leggono `ffmpeg-version.txt`, scritto
+    dallo script al posto di `ffmpeg -version`.

@@ -8,7 +8,8 @@ stato in `docs/PROGRESS.md`.
 ## Comandi
 
 ```powershell
-cargo xtask ffmpeg                                   # una volta: FFmpeg 9 LGPL in third_party/ffmpeg
+cargo xtask ffmpeg-ridotta                           # una volta: FFmpeg 9 LGPL ridotta (MSYS2) in third_party/ffmpeg-ridotta
+cargo xtask ffmpeg                                   # una volta: FFmpeg completa (ffmpeg/ffprobe per i test) in third_party/ffmpeg
 cargo build --workspace                              # debug
 cargo build --workspace --release                    # release (lto fat)
 cargo test --workspace                               # test
@@ -29,7 +30,8 @@ scripts\pipe.ps1 Status TestClip Quit                # comandi al core sulla nam
 Variabili per prove e notte: `CLIPREC_CONFIG` (percorso di config.toml), `CLIPREC_LOG_DIR`,
 `CLIPREC_HEADLESS=1` (niente toast, suoni, registro, menu Start).
 
-`.cargo/config.toml` imposta `FFMPEG_DIR` e `LIBCLANG_PATH` (percorsi assoluti su questo PC).
+`.cargo/config.toml` imposta `FFMPEG_DIR` (build ridotta, linkata e distribuita), `FFMPEG_TOOLS_DIR`
+(build completa, solo ffmpeg/ffprobe per test e `xtask probe`/`sync`) e `LIBCLANG_PATH` (percorsi assoluti su questo PC).
 I `build.rs` di `cliprec-encode` e `cliprec-mux` copiano le DLL di FFmpeg accanto agli eseguibili.
 
 ## Crate
@@ -71,7 +73,7 @@ I `build.rs` di `cliprec-encode` e `cliprec-mux` copiano le DLL di FFmpeg accant
 - Fase 3 · Robustezza: tre revisioni avversarie corrette; test di guasto; sessione di 3,5 h senza
   crescita di memoria. Da fare di giorno: misura A/V con cattura reale, hotkey dal vivo, toast,
   controller, UAC, AMF, monitor oltre 60 Hz, gioco vero con PresentMon.
-- Fase 4 · Distribuzione: `xtask dist`, installer Inno Setup 7 compilato e provato (installa, clip, disinstalla), zip portable, README. Da fare: build
-  FFmpeg ridotta (`installer/FFMPEG-RIDOTTA.md`), firma del codice.
+- Fase 4 · Distribuzione: `xtask dist`, installer Inno Setup 7 compilato e provato (installa, clip, disinstalla), zip portable, README, build
+  FFmpeg ridotta (`installer/FFMPEG-RIDOTTA.md`): cartella 38,1 MiB, installer 12,6 MiB. Da fare: firma del codice.
 - Prove ripetibili senza schermo dell'utente: `scripts\prova-completa.ps1`.
 - Dettagli e misure in `docs/PROGRESS.md`.

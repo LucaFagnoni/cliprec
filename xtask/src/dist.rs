@@ -45,39 +45,38 @@ pub fn run_dist(root: &Path) -> Result<()> {
     let total = dir_size(&out)?;
     let mb = total as f64 / (1024.0 * 1024.0);
     let verdict = if total <= LIMIT_BYTES { "entro" } else { "OLTRE" };
-    println!("{}: {mb:.1} MB, {verdict} il limite di 40 MB (con la build FFmpeg completa; vedi installer/FFMPEG-RIDOTTA.md)", out.display());
+    println!("{}: {mb:.1} MB, {verdict} il limite di 40 MB", out.display());
     Ok(())
 }
 
 /// Versione e riga di configure della build FFmpeg, più il link al sorgente (LGPL 6).
 fn build_info(ffmpeg: &Path) -> Result<String> {
-    let o = Command::new(ffmpeg.join("bin").join("ffmpeg.exe")).arg("-version").output().context("ffmpeg -version")?;
-    if !o.status.success() {
-        bail!("ffmpeg -version fallito");
-    }
-    Ok(build_info_text(&String::from_utf8_lossy(&o.stdout)))
+    let path = ffmpeg.join("ffmpeg-version.txt");
+    let text = std::fs::read_to_string(&path).with_context(|| format!("{} (cargo xtask ffmpeg-ridotta?)", path.display()))?;
+    Ok(build_info_text(&text))
 }
 
-fn build_info_text(text: &str) -> String {
-    let version = text.lines().next().unwrap_or("");
-    // "ffmpeg version n9.0.2-28-g669f5ab083-20261019 Copyright ..."
-    let full = version.split_whitespace().nth(2).unwrap_or("");
-    let tag = full.split('-').next().unwrap_or("");
-    let commit = full.split("-g").nth(1).and_then(|s| s.split('-').next()).unwrap_or("");
-    let release = crate::FFMPEG_URL.split("/download/").nth(1).and_then(|s| s.split('/').next()).unwrap_or("");
+/// `version` è `ffmpeg-version.txt`, scritto da `scripts/ffmpeg-ridotta.sh` come le prime righe di
+/// `ffmpeg -version` (la build ridotta non ha programmi).
+fn build_info_text(version: &str) -> String {
+    use crate::ridotta::{FFMPEG_COMMIT, FFMPEG_SRC_SHA256, FFMPEG_SRC_URL, MSYS2_URL, PACKAGES};
+    // "ffmpeg version 9.0.2-cliprec Copyright ..."
+    let full = version.lines().next().and_then(|l| l.split_whitespace().nth(2)).unwrap_or("");
     format!(
         "Libreria FFmpeg inclusa in ClipRec: LGPL 3 (FFmpeg-LICENSE.txt, licenses/LGPL-3.0.txt, licenses/GPL-3.0.txt).\n\n\
-         Versione esatta: {full}\n\
-         Commit FFmpeg: {commit}\n\
-         Sorgente di FFmpeg: https://github.com/FFmpeg/FFmpeg/commit/{commit} (base: https://github.com/FFmpeg/FFmpeg/tree/{tag})\n\
-         Binari: BtbN FFmpeg-Builds, release https://github.com/BtbN/FFmpeg-Builds/releases/tag/{release}\n\
-         Archivio: {url}\n\
-         SHA-256: {sha}\n\
-         Script di build (sorgenti delle librerie incluse e opzioni): https://github.com/BtbN/FFmpeg-Builds\n\n\
-         {info}\n",
-        url = crate::FFMPEG_URL,
-        sha = crate::FFMPEG_SHA256,
-        info = text.lines().take(2).chain(text.lines().filter(|l| l.starts_with("configuration:"))).collect::<Vec<_>>().join("\n")
+         Versione: {full}\n\
+         Commit FFmpeg: {FFMPEG_COMMIT}\n\
+         Sorgente di FFmpeg: https://github.com/FFmpeg/FFmpeg/commit/{FFMPEG_COMMIT}\n\
+         Archivio del sorgente: {FFMPEG_SRC_URL}\n\
+         SHA-256 dell'archivio: {FFMPEG_SRC_SHA256}\n\n\
+         Build ridotta compilata dal progetto ClipRec con `cargo xtask ffmpeg-ridotta`\n\
+         (script: scripts/ffmpeg-ridotta.sh e xtask/src/ridotta.rs nel sorgente di ClipRec).\n\
+         Toolchain: MSYS2 UCRT64 ({MSYS2_URL}) con i pacchetti\n  {packages}\n\
+         I sorgenti dei pacchetti MSYS2 sono su https://packages.msys2.org e https://github.com/msys2/MINGW-packages.\n\
+         Linkate staticamente nelle DLL: SVT-AV1, Opus, libvpl (dispatcher Intel VPL), runtime di GCC\n\
+         (libgcc e libstdc++, GPL 3 con GCC Runtime Library Exception) e winpthreads di mingw-w64.\n\n\
+         {version}",
+        packages = PACKAGES.join("\n  "),
     )
 }
 
@@ -257,19 +256,15 @@ mod tests {
     }
 
     #[test]
-    fn ffmpeg_download_is_pinned() {
-        assert!(!crate::FFMPEG_URL.contains("latest"), "URL non fissato: {}", crate::FFMPEG_URL);
-        assert!(crate::FFMPEG_SHA256.len() == 64 && crate::FFMPEG_SHA256.bytes().all(|b| b.is_ascii_hexdigit()), "SHA-256 mancante");
-    }
-
-    #[test]
     fn build_info_names_exact_build() {
         let t = build_info_text(SAMPLE);
         for needle in [
-            "n9.0.2-28-g669f5ab083-20261019",
-            "https://github.com/FFmpeg/FFmpeg/commit/669f5ab083",
-            "https://github.com/BtbN/FFmpeg-Builds/releases/tag/autobuild-2026-10-19-13-06",
+            "Versione: 9.0.2-cliprec",
+            "https://github.com/FFmpeg/FFmpeg/commit/669f5ab083c7732c10f1ce9e4f1915960dd88457",
+            crate::ridotta::FFMPEG_SRC_SHA256,
+            "mingw-w64-ucrt-x86_64-svt-av1-4.2.0-1",
             "--enable-version3",
+            "--disable-everything",
         ] {
             assert!(t.contains(needle), "FFmpeg-BUILD.txt senza {needle:?}:
 {t}");

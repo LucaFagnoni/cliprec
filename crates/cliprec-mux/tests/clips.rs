@@ -1,16 +1,15 @@
-//! Pacchetti H.264 veri (libopenh264, software) → ReplayBuffer → snapshot → file, validati con ffprobe.
+//! Pacchetti H.264/HEVC veri (libopenh264/libkvazaar di ffmpeg.exe, software) → ReplayBuffer → snapshot → file, validati con ffprobe.
 #![allow(clippy::unwrap_used, clippy::expect_used)] // file di test: un panic è l'esito di un controllo fallito
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::ptr;
+use std::sync::OnceLock;
 
 use cliprec_buffer::{BufferConfig, ReplayBuffer};
 use cliprec_core::config::{AudioClipFormat, VideoContainer};
 use cliprec_core::time::frames_to_hns;
 use cliprec_core::{AudioTrackSink, ClipKind, HNS_PER_SEC, PacketRef, QpcTime, VideoCodec, VideoStreamParams};
 use cliprec_mux::{VideoClipOptions, write_audio_clip, write_video_clip};
-use ffmpeg_the_third::ffi::*;
 use serde_json::Value;
 
 const FPS: i64 = 30;
@@ -36,97 +35,97 @@ fn pts(frame: i64) -> QpcTime {
     QpcTime(ORIGIN + frame * HNS_PER_SEC / FPS)
 }
 
-/// Encoder software della build LGPL: libopenh264 (H.264 senza B-frame) o libkvazaar (HEVC con
-/// GOP gerarchico: frame riordinati e dts negativi come NVENC con B-frame).
+/// Encoder software della build FFmpeg completa: libopenh264 (H.264 senza B-frame) o libkvazaar
+/// (HEVC con GOP gerarchico: frame riordinati e dts negativi come NVENC con B-frame).
 #[derive(Clone, Copy)]
 enum Sw {
     OpenH264,
     Kvazaar,
 }
 
-/// Codifica `frames` frame sintetici e li passa al buffer.
-fn encode_into(buffer: &ReplayBuffer, frames: i64, sw: Sw) {
-    let (name, video_codec) = match sw {
-        Sw::OpenH264 => (c"libopenh264", VideoCodec::H264),
-        Sw::Kvazaar => (c"libkvazaar", VideoCodec::Hevc),
-    };
-    // SAFETY: uso standard dell'API di encoding; ogni oggetto viene liberato alla fine.
-    unsafe {
-        let codec = avcodec_find_encoder_by_name(name.as_ptr());
-        assert!(!codec.is_null(), "{name:?} assente");
-        let mut ctx = avcodec_alloc_context3(codec);
-        (*ctx).width = W;
-        (*ctx).height = H;
-        (*ctx).pix_fmt = AVPixelFormat::YUV420P;
-        (*ctx).time_base = AVRational { num: 1, den: FPS as i32 };
-        (*ctx).framerate = AVRational { num: FPS as i32, den: 1 };
-        (*ctx).gop_size = FPS as i32;
-        (*ctx).max_b_frames = 0;
-        (*ctx).bit_rate = 1_000_000;
-        (*ctx).flags |= AV_CODEC_FLAG_GLOBAL_HEADER as i32;
-        let mut opts: *mut AVDictionary = ptr::null_mut();
-        if let Sw::Kvazaar = sw {
-            // GOP chiuso (IDR) ogni 32 frame, GOP gerarchico da 8 con riordino.
-            av_dict_set(&mut opts, c"kvazaar-params".as_ptr(), c"preset=ultrafast,gop=8,period=32,open-gop=0".as_ptr(), 0);
-        }
-        assert!(avcodec_open2(ctx, codec, &mut opts) >= 0);
-        av_dict_free(&mut opts);
-        let extradata = std::slice::from_raw_parts((*ctx).extradata, (*ctx).extradata_size as usize).to_vec();
-        assert!(!extradata.is_empty(), "extradata (SPS/PPS) attesa");
-        buffer.set_video_params(VideoStreamParams {
-            codec: video_codec,
-            width: W as u32,
-            height: H as u32,
-            fps: FPS as u32,
-            extradata,
-            bit_rate: 1_000_000,
-            encoder_name: name.to_string_lossy().into_owned(),
-        });
+/// Video sintetico codificato: extradata Annex B e pacchetti (dati, pts, dts in frame, keyframe).
+struct Encoded {
+    extradata: Vec<u8>,
+    packets: Vec<(Vec<u8>, i64, i64, bool)>,
+}
 
-        let mut frame = av_frame_alloc();
-        (*frame).width = W;
-        (*frame).height = H;
-        (*frame).format = AVPixelFormat::YUV420P.0;
-        assert!(av_frame_get_buffer(frame, 0) >= 0);
-        let mut pkt = av_packet_alloc();
-        let drain = |ctx: *mut AVCodecContext| loop {
-            if avcodec_receive_packet(ctx, pkt) < 0 {
-                break;
-            }
-            let p = &*pkt;
-            let data = std::slice::from_raw_parts(p.data, p.size as usize);
-            buffer.push_video(PacketRef {
-                data,
-                pts: pts(p.pts),
-                dts: pts(p.dts),
-                duration: HNS_PER_SEC / FPS,
-                keyframe: p.flags & AV_PKT_FLAG_KEY != 0,
-            });
-            av_packet_unref(pkt);
-        };
-        for i in 0..frames {
-            assert!(av_frame_make_writable(frame) >= 0);
-            for plane in 0..3 {
-                let (w, h) = if plane == 0 { (W, H) } else { (W / 2, H / 2) };
-                let stride = (*frame).linesize[plane] as usize;
-                let data = (*frame).data[plane];
-                for y in 0..h as usize {
-                    for x in 0..w as usize {
-                        // Barra che scorre: ogni frame è diverso.
-                        let v = if plane == 0 { ((x as i64 + i * 4) % 256) as u8 } else { 128 };
-                        *data.add(y * stride + x) = v;
-                    }
-                }
-            }
-            (*frame).pts = i;
-            assert!(avcodec_send_frame(ctx, frame) >= 0);
-            drain(ctx);
-        }
-        avcodec_send_frame(ctx, ptr::null());
-        drain(ctx);
-        av_packet_free(&mut pkt);
-        av_frame_free(&mut frame);
-        avcodec_free_context(&mut ctx);
+const FRAMES: i64 = 6 * FPS;
+
+/// Codifica con `ffmpeg.exe` della build completa (`FFMPEG_TOOLS_DIR`): la build ridotta che ClipRec
+/// linka non ha encoder software H.264/HEVC. Il NUT conserva pacchetti Annex B ed extradata come
+/// escono dall'encoder (header globali); `ffprobe -show_data` li rilegge. Una volta per encoder.
+fn encoded(sw: Sw) -> &'static Encoded {
+    static H264: OnceLock<Encoded> = OnceLock::new();
+    static HEVC: OnceLock<Encoded> = OnceLock::new();
+    let (cell, name, extra): (_, _, &[&str]) = match sw {
+        Sw::OpenH264 => (&H264, "libopenh264", &[]),
+        // GOP chiuso (IDR) ogni 32 frame, GOP gerarchico da 8 con riordino.
+        Sw::Kvazaar => (&HEVC, "libkvazaar", &["-kvazaar-params", "preset=ultrafast,gop=8,period=32,open-gop=0"]),
+    };
+    cell.get_or_init(|| {
+        let bin = Path::new(option_env!("FFMPEG_TOOLS_DIR").unwrap_or(r"D:\Repositories\cliprec\third_party\ffmpeg")).join("bin");
+        let file = out_dir().join(format!("sorgente-{name}.nut"));
+        let src = format!("testsrc2=size={W}x{H}:rate={FPS}");
+        let st = Command::new(bin.join("ffmpeg.exe"))
+            .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-f", "lavfi", "-i", &src])
+            .args(["-frames:v", &FRAMES.to_string(), "-pix_fmt", "yuv420p", "-c:v", name])
+            .args(["-g", &FPS.to_string(), "-bf", "0", "-b:v", "1M"])
+            .args(extra)
+            .arg(&file)
+            .status()
+            .unwrap();
+        assert!(st.success(), "ffmpeg {name}");
+        let out = Command::new(bin.join("ffprobe.exe"))
+            .args(["-v", "error", "-show_streams", "-show_packets", "-show_data", "-of", "json"])
+            .arg(&file)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "ffprobe: {}", String::from_utf8_lossy(&out.stderr));
+        let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+        let extradata = unhex(v["streams"][0]["extradata"].as_str().unwrap_or(""));
+        assert!(!extradata.is_empty(), "extradata (SPS/PPS) attesa");
+        // pts in frame da 0; il NUT non conserva i dts iniziali: si ricostruiscono come sequenza
+        // crescente di un frame, anticipata quanto basta perché dts <= pts.
+        let raw: Vec<(Vec<u8>, i64, bool)> = v["packets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| {
+                let t: f64 = p["pts_time"].as_str().unwrap().parse().unwrap();
+                (unhex(p["data"].as_str().unwrap()), (t * FPS as f64).round() as i64, p["flags"].as_str().unwrap().starts_with('K'))
+            })
+            .collect();
+        let first = raw.iter().map(|p| p.1).min().unwrap();
+        let delay = raw.iter().enumerate().map(|(i, p)| i as i64 - (p.1 - first)).max().unwrap().max(0);
+        let packets = raw.into_iter().enumerate().map(|(i, (d, p, k))| (d, p - first, i as i64 - delay, k)).collect();
+        Encoded { extradata, packets }
+    })
+}
+
+/// Byte di un dump esadecimale di ffprobe: "00000000: 0000 0001 6742 ...  ascii".
+fn unhex(dump: &str) -> Vec<u8> {
+    let hex: String = dump.lines().flat_map(|l| l.get(10..51).unwrap_or("").split_whitespace()).collect();
+    (0..hex.len() / 2).map(|i| u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).unwrap()).collect()
+}
+
+/// Passa al buffer i pacchetti del video sintetico.
+fn encode_into(buffer: &ReplayBuffer, sw: Sw) {
+    let e = encoded(sw);
+    let (name, codec) = match sw {
+        Sw::OpenH264 => ("libopenh264", VideoCodec::H264),
+        Sw::Kvazaar => ("libkvazaar", VideoCodec::Hevc),
+    };
+    buffer.set_video_params(VideoStreamParams {
+        codec,
+        width: W as u32,
+        height: H as u32,
+        fps: FPS as u32,
+        extradata: e.extradata.clone(),
+        bit_rate: 1_000_000,
+        encoder_name: name.into(),
+    });
+    for (data, p, d, keyframe) in &e.packets {
+        buffer.push_video(PacketRef { data, pts: pts(*p), dts: pts(*d), duration: HNS_PER_SEC / FPS, keyframe: *keyframe });
     }
 }
 
@@ -153,7 +152,7 @@ fn filled_buffer() -> ReplayBuffer {
 fn filled_buffer_with(sw: Sw) -> ReplayBuffer {
     let b = ReplayBuffer::new(BufferConfig { video_seconds: 3.0, audio_seconds: 4.0, max_bytes: 256 << 20, lock_pages: false });
     b.set_tracks(&["Gioco".into(), "Discord".into()]);
-    encode_into(&b, 6 * FPS, sw);
+    encode_into(&b, sw);
     // «Gioco» da 0,5 s prima del video, «Discord» da 4 s: allineamenti diversi.
     push_tone(&b, 0, 440.0, -24_000, 6 * 48_000 + 24_000);
     push_tone(&b, 1, 660.0, 4 * 48_000, 2 * 48_000);
@@ -161,7 +160,7 @@ fn filled_buffer_with(sw: Sw) -> ReplayBuffer {
 }
 
 fn ffprobe(path: &Path, extra: &[&str]) -> Value {
-    let dir = option_env!("FFMPEG_DIR").unwrap_or(r"D:\Repositories\cliprec	hird_partyfmpeg");
+    let dir = option_env!("FFMPEG_TOOLS_DIR").unwrap_or(r"D:\Repositories\cliprec\third_party\ffmpeg");
     let exe = Path::new(dir).join("bin").join("ffprobe.exe");
     let out = Command::new(exe)
         .args(["-v", "error", "-show_streams", "-show_format", "-of", "json"])
@@ -175,7 +174,7 @@ fn ffprobe(path: &Path, extra: &[&str]) -> Value {
 
 /// Decodifica con ffmpeg in PCM s32 interleaved.
 fn decode_s32(path: &Path) -> Vec<i32> {
-    let dir = option_env!("FFMPEG_DIR").unwrap_or(r"D:\Repositories\cliprec	hird_partyfmpeg");
+    let dir = option_env!("FFMPEG_TOOLS_DIR").unwrap_or(r"D:\Repositories\cliprec\third_party\ffmpeg");
     let out = Command::new(Path::new(dir).join("bin").join("ffmpeg.exe"))
         .args(["-v", "error", "-i"])
         .arg(path)
