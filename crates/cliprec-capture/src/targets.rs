@@ -160,7 +160,7 @@ pub(crate) fn is_minimized(hwnd: HWND) -> bool {
     unsafe { IsIconic(hwnd) }.as_bool()
 }
 
-fn window_rect(hwnd: HWND) -> Option<RECT> {
+pub(crate) fn window_rect(hwnd: HWND) -> Option<RECT> {
     let mut r = RECT::default();
     // SAFETY: puntatore locale.
     unsafe { GetWindowRect(hwnd, &mut r) }.ok().map(|()| r)
