@@ -1,6 +1,7 @@
 //! Sorgente sintetica: bip di 50 ms che inizia esattamente a ogni secondo intero di [`QpcTime`]
 //! (come il lampo bianco della sorgente video sintetica), silenzio altrove.
 
+use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -53,10 +54,11 @@ pub fn render_beep(frequency: f32, frame: u64, out: &mut [f32]) {
 }
 
 fn set_state(state: &Mutex<SourceState>, s: SourceState) {
-    if let Ok(mut g) = state.lock() {
-        *g = s;
-    }
+    *state.lock().unwrap_or_else(|e| e.into_inner()) = s;
 }
+
+/// Attesa prima di riavviare il thread dopo un panic.
+const RESTART_WAIT: Duration = Duration::from_secs(1);
 
 impl AudioSource for BeepSource {
     fn start(&mut self, mut on_chunk: ChunkCallback) -> Result<(), SourceError> {
@@ -78,19 +80,35 @@ impl AudioSource for BeepSource {
                 let elapsed = cliprec_core::time::hns_to_frames(now.hns_since(origin)).max(0) as u64;
                 let mut frame = elapsed.div_ceil(BEEP_BLOCK_FRAMES as u64) * BEEP_BLOCK_FRAMES as u64;
                 let mut buf = vec![0.0f32; BEEP_BLOCK_FRAMES * CHANNELS];
-                set_state(&state, SourceState::Running);
                 while !stop.load(Ordering::Acquire) {
-                    // Consegna ogni blocco quando il suo ultimo campione è nel passato, come un dispositivo.
-                    let block_end = origin.add_hns(frames_to_hns((frame + BEEP_BLOCK_FRAMES as u64) as i64));
-                    let now = QpcTime::now();
-                    if now < block_end {
-                        let wait = block_end.hns_since(now).clamp(0, 50_000) as u64;
-                        std::thread::sleep(Duration::from_nanos(wait * 100));
-                        continue;
+                    set_state(&state, SourceState::Running);
+                    let run = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                        while !stop.load(Ordering::Acquire) {
+                            // Consegna ogni blocco quando il suo ultimo campione è nel passato, come un dispositivo.
+                            let block_end = origin.add_hns(frames_to_hns((frame + BEEP_BLOCK_FRAMES as u64) as i64));
+                            let now = QpcTime::now();
+                            if now < block_end {
+                                let wait = block_end.hns_since(now).clamp(0, 50_000) as u64;
+                                std::thread::sleep(Duration::from_nanos(wait * 100));
+                                continue;
+                            }
+                            render_beep(frequency, frame, &mut buf);
+                            on_chunk(AudioChunk { qpc: origin.add_hns(frames_to_hns(frame as i64)), samples: &buf });
+                            frame += BEEP_BLOCK_FRAMES as u64;
+                        }
+                    }));
+                    if let Err(p) = run {
+                        // Supervisione: stato d'errore, attesa, ripresa dal blocco successivo (i blocchi
+                        // persi nell'attesa si recuperano subito, i tempi restano esatti).
+                        let msg = crate::panic_message(p.as_ref());
+                        tracing::error!("panic nel thread del bip: {msg}");
+                        set_state(&state, SourceState::Error(format!("errore interno (panic): {msg}")));
+                        frame += BEEP_BLOCK_FRAMES as u64;
+                        let until = std::time::Instant::now() + RESTART_WAIT;
+                        while std::time::Instant::now() < until && !stop.load(Ordering::Acquire) {
+                            std::thread::sleep(Duration::from_millis(20));
+                        }
                     }
-                    render_beep(frequency, frame, &mut buf);
-                    on_chunk(AudioChunk { qpc: origin.add_hns(frames_to_hns(frame as i64)), samples: &buf });
-                    frame += BEEP_BLOCK_FRAMES as u64;
                 }
                 set_state(&state, SourceState::Stopped);
             })
@@ -107,7 +125,7 @@ impl AudioSource for BeepSource {
     }
 
     fn state(&self) -> SourceState {
-        self.state.lock().map(|g| g.clone()).unwrap_or(SourceState::Error("stato non leggibile".into()))
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     fn name(&self) -> &str {
@@ -162,6 +180,39 @@ mod tests {
             }
         }
         assert!(loud_seconds.len() >= 2, "bip trovati: {}", loud_seconds.len());
+    }
+
+    /// M9: un panic nel thread (qui nella callback) porta la sorgente in `Error`, poi riparte da
+    /// sola e i blocchi restano contigui.
+    #[test]
+    fn panic_in_thread_restarts_source() {
+        type Chunks = Arc<Mutex<Vec<QpcTime>>>;
+        let chunks: Chunks = Arc::default();
+        let sink = chunks.clone();
+        let mut calls = 0;
+        let mut src = BeepSource::new("bip", 1000.0);
+        src.start(Box::new(move |c| {
+            calls += 1;
+            if calls == 5 {
+                panic!("panic di prova nella callback");
+            }
+            sink.lock().unwrap().push(c.qpc);
+        }))
+        .unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        let after_panic = src.state();
+        std::thread::sleep(Duration::from_millis(1500));
+        let later = src.state();
+        src.stop();
+        println!("dopo il panic: {after_panic:?}, poi {later:?}");
+        assert!(matches!(after_panic, SourceState::Error(ref m) if m.contains("panic")), "{after_panic:?}");
+        assert_eq!(later, SourceState::Running);
+        let chunks = chunks.lock().unwrap();
+        let last = *chunks.last().unwrap();
+        assert!(QpcTime::now().hns_since(last) < 5_000_000, "il bip deve aver ripreso");
+        // Contiguità: manca solo il blocco consegnato alla callback che è andata in panic.
+        let holes = chunks.windows(2).filter(|w| w[1].hns_since(w[0]) > frames_to_hns(BEEP_BLOCK_FRAMES as i64) + 1).count();
+        assert!(holes <= 1, "{holes} buchi");
     }
 
     #[test]
