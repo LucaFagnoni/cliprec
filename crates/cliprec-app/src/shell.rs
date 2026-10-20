@@ -480,7 +480,13 @@ fn build_ui(app: &Arc<App>, hwnd: HWND) -> anyhow::Result<Ui> {
         }
     }));
     let icon = icon::tray_icon(IconState::Stopped).context("icona della tray")?;
-    let tray = TrayIconBuilder::new().with_menu(Box::new(menu)).with_icon(icon).with_tooltip("ClipRec").build()?;
+    // Menu solo col tasto destro: il clic sinistro (doppio) apre le impostazioni.
+    let tray = TrayIconBuilder::new()
+        .with_menu(Box::new(menu))
+        .with_menu_on_left_click(false)
+        .with_icon(icon)
+        .with_tooltip("ClipRec")
+        .build()?;
 
     let recent_paths: Arc<Mutex<Vec<PathBuf>>> = Arc::default();
     let (h_app, h_recent) = (Arc::clone(app), Arc::clone(&recent_paths));

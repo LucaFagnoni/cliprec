@@ -245,13 +245,16 @@ pub(crate) fn fullscreen_foreground() -> Option<(HWND, String)> {
     if matches!(class_name(hwnd).as_str(), "Progman" | "WorkerW" | "Shell_TrayWnd") || !is_capturable(hwnd) {
         return None;
     }
-    let r = window_rect(hwnd)?;
-    let m = monitor_rect(window_monitor(hwnd)?)?;
-    let covers = r.left <= m.left && r.top <= m.top && r.right >= m.right && r.bottom >= m.bottom;
-    if !covers {
+    if !covers_monitor(hwnd) {
         return None;
     }
     Some((hwnd, window_exe(hwnd).unwrap_or_default()))
+}
+
+/// La finestra copre tutto il suo monitor (schermo intero, esclusivo o senza bordi).
+pub(crate) fn covers_monitor(hwnd: HWND) -> bool {
+    let (Some(r), Some(m)) = (window_rect(hwnd), window_monitor(hwnd).and_then(monitor_rect)) else { return false };
+    r.left <= m.left && r.top <= m.top && r.right >= m.right && r.bottom >= m.bottom
 }
 
 #[cfg(test)]

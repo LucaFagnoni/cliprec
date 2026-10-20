@@ -16,7 +16,7 @@ use crate::dda::DdaCapture;
 use crate::health::Health;
 use crate::pacer::{FrameSlots, Pacer, PacerOptions, Stats};
 use crate::targets::{
-    adapter_luid_for_monitor, exe_matches, find_window_by_exe, find_window_by_title, fullscreen_foreground,
+    adapter_luid_for_monitor, covers_monitor, exe_matches, find_window_by_exe, find_window_by_title, fullscreen_foreground,
     is_foreground, is_minimized, is_window, monitor_pixels, monitors, primary_monitor, window_exe, window_monitor,
     window_title,
 };
@@ -319,6 +319,18 @@ pub const FIRST_FRAME_WAIT: Duration = Duration::from_millis(500);
 pub const ADAPTER_CHANGED: &str =
     "il bersaglio è su un monitor collegato a un'altra GPU: riapri la sorgente per catturare senza copie tra adattatori";
 
+/// Fullscreen esclusivo: la cattura WGC di una finestra a schermo intero esclusivo dà frame neri o
+/// fermi, Desktop Duplication del suo monitor no (come «Cattura schermo» di OBS, senza iniettare
+/// nulla nel gioco). `Some(true)`: passa a Desktop Duplication; `Some(false)`: torna a WGC appena
+/// il gioco non è più a schermo intero in primo piano (DDA vedrebbe il desktop).
+fn exclusive_switch(on_dda: bool, frames_bad: bool, fullscreen_foreground: bool) -> Option<bool> {
+    match (on_dda, frames_bad, fullscreen_foreground) {
+        (false, true, true) => Some(true),
+        (true, _, false) => Some(false),
+        _ => None,
+    }
+}
+
 /// Spostamento costante della griglia dei pts per le sorgenti catturate (unità da 100 ns, positivo =
 /// pts prima del tick). Manopola di taratura: va regolata con la misura end-to-end lampo/bip.
 ///
@@ -444,8 +456,37 @@ impl Watch {
                 }
             }
         };
+        let frames_bad = matches!(state, SourceState::Waiting(ref m) if m == crate::health::BLACK_MSG || m == crate::health::FROZEN_MSG);
         self.stats.set_state(state);
+        self.exclusive_fullscreen(frames_bad, now);
         Ok(())
+    }
+
+    /// Passa la finestra a Desktop Duplication del suo monitor quando è a schermo intero esclusivo,
+    /// e torna a WGC quando non lo è più ([`exclusive_switch`]).
+    fn exclusive_fullscreen(&mut self, frames_bad: bool, now: Instant) {
+        let Some((Resolved::Window(h), cap)) = &self.current else { return };
+        let (h, on_dda) = (*h, matches!(cap, Capture::Dda(_)));
+        let Some(to_dda) = exclusive_switch(on_dda, frames_bad, is_foreground(h) && covers_monitor(h)) else { return };
+        let r = Resolved::Window(h);
+        let opened = if to_dda {
+            match window_monitor(h) {
+                Some(m) => DdaCapture::start(m, self.slots.clone(), self.stats.clone(), self.cursor).map(Capture::Dda),
+                None => return,
+            }
+        } else {
+            self.open(r)
+        };
+        match opened {
+            Ok(cap) => {
+                let desc = format!("{} · {}", r.describe(), cap.backend());
+                tracing::info!(source = %desc, "schermo intero esclusivo: {}", if to_dda { "uso Desktop Duplication" } else { "torno a WGC" });
+                *lock(&self.description) = desc;
+                self.current = Some((r, cap));
+                self.health.reset(now);
+            }
+            Err(e) => tracing::warn!("cambio di cattura per lo schermo intero non riuscito: {e}"),
+        }
     }
 }
 
@@ -764,6 +805,19 @@ mod tests {
         // Stesso adattatore o adattatore ignoto: niente da fare, e nessuna prova di creazione.
         assert!(!should_reopen(Some(default_gpu), default_gpu, |_| unreachable!()));
         assert!(!should_reopen(None, default_gpu, |_| unreachable!()));
+    }
+
+    #[test]
+    fn exclusive_fullscreen_switches_to_dda_and_back() {
+        // WGC, frame neri o fermi, gioco a schermo intero in primo piano: Desktop Duplication.
+        assert_eq!(exclusive_switch(false, true, true), Some(true));
+        // Frame neri ma non a schermo intero (caricamento, finestra nera): resta WGC.
+        assert_eq!(exclusive_switch(false, true, false), None);
+        // Su DDA finché il gioco resta a schermo intero in primo piano, anche con frame buoni.
+        assert_eq!(exclusive_switch(true, false, true), None);
+        // Alt+Tab o modalità finestra: si torna a WGC (DDA vedrebbe il desktop).
+        assert_eq!(exclusive_switch(true, false, false), Some(false));
+        assert_eq!(exclusive_switch(false, false, true), None);
     }
 
     #[test]

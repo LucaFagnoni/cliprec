@@ -184,3 +184,14 @@ Le voci [DEFAULT] e [PROPOSTA] di SPEC.md valgono come decise; qui ci sono quell
     stesso encoder in VBR semplice senza B-frame, pre-analisi e VBAQ prima di scartarlo. Updater:
     download con avanzamento (dimensione dello zip dalla release, file misurato ogni 150 ms) e
     chiusura automatica della finestra quando il core riparte con un'altra versione.
+39. **Limiti noti risolti dove Windows lo permette** (20 ottobre, richiesta di Luca).
+    Fullscreen esclusivo: invece di un hook nel gioco (DECISIONS 27), la cattura di una finestra che
+    dà frame neri o fermi mentre copre il monitor in primo piano passa a Desktop Duplication di quel
+    monitor, e torna a WGC quando il gioco non è più a schermo intero in primo piano. «Uscita»
+    predefinita: torna al loopback del dispositivo predefinito, come «Audio del desktop» di OBS. Il
+    process loopback in esclusione (m7) registrava i flussi di tutti i processi, compreso il mix che
+    i router audio come SteelSeries Sonar ricostruiscono, microfono incluso: un tester lo sentiva
+    nella traccia «Sistema». Con il loopback dell'endpoint torna anche il segnale di modalità
+    esclusiva (R3). Prezzo: il suono di conferma, che parte dopo lo snapshot, può finire nelle clip
+    successive; chi non lo vuole lo spegne o usa «Tutto tranne un'app» su `cliprec-app.exe`. Bordo
+    giallo di WGC: permesso «senza bordo» chiesto una volta con `GraphicsCaptureAccess` (m16).

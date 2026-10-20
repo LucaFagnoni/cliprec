@@ -146,7 +146,7 @@ strings! {
     set_process_events: "Aggancio immediato delle app", "Hook apps immediately";
     set_process_events_desc: "Usa gli eventi di Windows quando un'app si apre o si chiude. Serve ClipRec avviato come amministratore; altrimenti controlla ogni mezzo secondo.", "Uses Windows events when an app opens or closes. Needs ClipRec running as administrator; otherwise it checks every half second.";
     set_add_source: "Aggiungi sorgente", "Add source";
-    set_sources_hint: "In ordine di traccia, fino a 8. «Tutto tranne un'app» registra l'audio del PC senza quel programma, per esempio il gioco senza Discord. «Mono» unisce i canali di un microfono che si sente da un lato solo.", "In track order, up to 8. \"Everything except an app\" records the PC audio without that program, for example the game without Discord. \"Mono\" merges the channels of a microphone heard on one side only.";
+    set_sources_hint: "In ordine di traccia, fino a 8. «Tutto tranne un'app» registra l'audio del PC senza quel programma, per esempio il gioco senza Discord. «Mono» unisce i canali di un microfono che si sente da un lato solo. Con SteelSeries Sonar o Voicemeeter scegli «Uscita» con il loro dispositivo (es. «Gaming»).", "In track order, up to 8. \"Everything except an app\" records the PC audio without that program, for example the game without Discord. \"Mono\" merges the channels of a microphone heard on one side only. With SteelSeries Sonar or Voicemeeter pick \"Output\" with their device (e.g. \"Gaming\").";
     set_kind_app: "App", "App";
     set_kind_input: "Microfono / ingresso", "Microphone / input";
     set_kind_output: "Uscita (ciò che senti)", "Output (what you hear)";

@@ -99,15 +99,23 @@ Per pubblicare una versione: alzare `version` in `Cargo.toml` del workspace, poi
 
 ## Limiti noti
 
-- **Fullscreen esclusivo non catturabile** (nessuna iniezione nel gioco): ClipRec avvisa e suggerisce
-  la modalità finestra senza bordi.
-- **AMF (AMD) non provato**: le opzioni sono scritte ma su questo PC non c'è una Radeon.
-- I toast e il collegamento nel menu Start non sono stati provati di notte; l'avvio automatico
-  scrive la chiave `HKCU\...\Run`.
-- Giochi avviati come amministratore: Windows può non consegnare le hotkey.
-- App che usano WASAPI esclusivo non sono catturabili in loopback.
-- La distribuzione pesa 38,1 MiB (installer 12,6 MiB, zip 16,2 MiB) con la build FFmpeg ridotta.
-  Nessun certificato di firma disponibile: gli exe non sono firmati.
+- **Fullscreen esclusivo**: se la finestra del gioco dà frame neri o fermi mentre è a schermo intero
+  in primo piano, ClipRec passa da solo alla Desktop Duplication del monitor e torna alla cattura
+  della finestra quando il gioco esce dallo schermo intero. Nessuna iniezione nel gioco, quindi
+  nessun rischio con gli anti-cheat; resta escluso solo ciò che Windows protegge (contenuti DRM).
+- **AMD (AMF)**: scritto e con un ripiego in VBR semplice, ma provato solo senza una Radeon. Se
+  l'encoder AMD non compare, il log (`%LOCALAPPDATA%\ClipRec\logs`) dice perché.
+- **Giochi avviati come amministratore**: Windows non consegna le hotkey a un programma non
+  elevato. ClipRec lo segnala; la soluzione è «Avvia come amministratore» (Impostazioni → Avanzate)
+  o «Riavvia come amministratore» dalla tray.
+- **Audio in modalità esclusiva** (WASAPI exclusive, es. osu!): Windows non lo passa dal mixer, quindi
+  nessun programma lo può registrare in loopback. ClipRec segnala quando un'uscita registrata viene
+  presa in esclusiva; nel gioco va scelta la modalità condivisa.
+- **Router audio** (SteelSeries Sonar, Voicemeeter, Wave Link): rifanno il mix su altri dispositivi.
+  Per l'audio del gioco va usata «Uscita» con il loro dispositivo (es. «Sonar - Gaming»); «Tutto
+  tranne un'app» registra i flussi di tutti i programmi e quindi anche il mix del router.
+- **Firma del codice**: gli exe non sono firmati (nessun certificato): al primo avvio SmartScreen
+  mostra «Editore sconosciuto».
 
 ## Licenze
 

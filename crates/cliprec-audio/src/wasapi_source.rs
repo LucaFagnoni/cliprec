@@ -105,8 +105,6 @@ fn fail(e: WasapiError) -> SourceError {
 pub enum CaptureMode {
     /// Loopback di un dispositivo d'uscita, o un dispositivo d'ingresso: endpoint WASAPI.
     Endpoint,
-    /// Process loopback in modalità EXCLUDE sull'albero di ClipRec: tutto l'audio tranne il nostro.
-    ExcludeSelf,
     /// Process loopback in modalità INCLUDE sull'albero di un'app (PID radice).
     App(u32),
     /// Process loopback in modalità EXCLUDE sull'albero di un'app (PID radice): tutto tranne l'app.
@@ -115,7 +113,6 @@ pub enum CaptureMode {
 
 const MODE_NONE: u64 = 0;
 const MODE_ENDPOINT: u64 = 1;
-const MODE_EXCLUDE_SELF: u64 = 2;
 const MODE_APP: u64 = 3;
 const MODE_EXCLUDE_APP: u64 = 4;
 
@@ -181,7 +178,6 @@ impl WasapiSource {
         let v = self.mode.load(Ordering::Acquire);
         match v >> 32 {
             MODE_ENDPOINT => Some(CaptureMode::Endpoint),
-            MODE_EXCLUDE_SELF => Some(CaptureMode::ExcludeSelf),
             MODE_APP => Some(CaptureMode::App(v as u32)),
             MODE_EXCLUDE_APP => Some(CaptureMode::ExcludeApp(v as u32)),
             _ => None,
@@ -423,13 +419,6 @@ impl Capture {
         }
         let classify = |e: WasapiError| classify(e, &self.kind);
         let (mut client, channels, direction, pid, opened) = match &self.kind {
-            AudioSourceKind::Output { device: None } => {
-                // m7: tutto ciò che suona tranne ClipRec (il «ding» di salvataggio non finisce nelle
-                // clip). Process loopback in modalità EXCLUDE sul nostro albero di processi.
-                // ATTENZIONE: in wasapi 0.26 `include_tree = false` vuol dire proprio EXCLUDE.
-                let client = AudioClient::new_application_loopback_client(std::process::id(), false).map_err(classify)?;
-                (client, CHANNELS, Direction::Capture, None, MODE_EXCLUDE_SELF << 32)
-            }
             AudioSourceKind::App { exe } => {
                 let pid = self.pid.load(Ordering::Acquire);
                 if pid == 0 {
@@ -863,7 +852,7 @@ mod tests {
     }
 
     #[test]
-    fn default_output_excludes_own_process() {
+    fn default_output_is_the_default_endpoint() {
         let mode_after_open = |kind: AudioSourceKind| {
             let mut src = WasapiSource::new("test", kind);
             src.start(Box::new(|_| {})).unwrap();
@@ -875,9 +864,12 @@ mod tests {
             src.stop();
             mode
         };
+        // L'uscita predefinita è il loopback del dispositivo predefinito, come «Audio del desktop» di
+        // OBS: non i flussi di tutti i processi, che con i router audio (SteelSeries Sonar,
+        // Voicemeeter) contengono anche il mix rifatto dal router, microfono compreso.
         let default = mode_after_open(AudioSourceKind::Output { device: None });
         println!("uscita predefinita: {default:?}");
-        assert_eq!(default, Some(CaptureMode::ExcludeSelf));
+        assert_eq!(default, Some(CaptureMode::Endpoint));
         // «Tutto tranne un'app»: esclude l'albero dell'app per PID, e finché manca resta aperta.
         let explorer = find_root_pid("explorer.exe").unwrap_or(0);
         let except = mode_after_open(AudioSourceKind::Except { exe: "explorer.exe".into() });

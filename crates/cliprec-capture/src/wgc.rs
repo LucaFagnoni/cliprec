@@ -36,6 +36,27 @@ pub(crate) fn has_min_update_interval() -> bool {
     property_present("MinUpdateInterval")
 }
 
+/// Una volta per processo: chiede a Windows il permesso di catturare senza il bordo giallo. Per
+/// un'app desktop non mostra dialoghi; nei test e in modalità headless non lo si chiede.
+fn borderless_allowed() -> bool {
+    use windows::Graphics::Capture::{GraphicsCaptureAccess, GraphicsCaptureAccessKind};
+    use windows::Security::Authorization::AppCapabilityAccess::AppCapabilityAccessStatus;
+    static ALLOWED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ALLOWED.get_or_init(|| {
+        if cfg!(test) || std::env::var_os("CLIPREC_HEADLESS").is_some_and(|v| v != "0") {
+            return false;
+        }
+        let status = GraphicsCaptureAccess::RequestAccessAsync(GraphicsCaptureAccessKind::Borderless).and_then(|op| op.join());
+        match status {
+            Ok(s) => s == AppCapabilityAccessStatus::Allowed,
+            Err(e) => {
+                tracing::debug!("permesso senza bordo non disponibile: {e}");
+                false
+            }
+        }
+    })
+}
+
 fn property_present(name: &str) -> bool {
     ApiInformation::IsPropertyPresent(&HSTRING::from(SESSION_CLASS), &HSTRING::from(name)).unwrap_or(false)
 }
@@ -120,8 +141,9 @@ impl WgcCapture {
         if let Err(e) = session.SetIsCursorCaptureEnabled(cursor) {
             tracing::debug!("IsCursorCaptureEnabled non disponibile: {e}");
         }
-        // Senza RequestAccessAsync può essere rifiutato: il bordo giallo resta, non è un errore.
+        // Il bordo giallo si toglie solo dopo il permesso «senza bordo», chiesto una volta (m16).
         if property_present("IsBorderRequired")
+            && borderless_allowed()
             && let Err(e) = session.SetIsBorderRequired(false)
         {
             tracing::debug!("bordo giallo non disattivato: {e}");
