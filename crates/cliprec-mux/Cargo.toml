@@ -1,0 +1,16 @@
+[package]
+name = "cliprec-mux"
+description = "Scrittura delle clip: MP4/MKV multitraccia con AAC, clip audio FLAC/WAV/MKA, file .part rinominato a fine scrittura."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+cliprec-core.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+ffmpeg-the-third.workspace = true
+
+[lints]
+workspace = true

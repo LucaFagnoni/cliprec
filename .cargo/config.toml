@@ -1,0 +1,8 @@
+# Percorsi assoluti: i worktree dei subagenti stanno in .claude/worktrees/ e devono vedere
+# la stessa FFmpeg preparata da `cargo xtask ffmpeg` nella radice del repository.
+[env]
+FFMPEG_DIR = "D:\\Repositories\\cliprec\\third_party\\ffmpeg"
+LIBCLANG_PATH = "C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Tools\\Llvm\\x64\\bin"
+
+[alias]
+xtask = "run --quiet --package xtask --"

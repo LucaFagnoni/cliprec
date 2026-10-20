@@ -1,0 +1,15 @@
+[package]
+name = "cliprec-buffer"
+description = "Ring buffer in RAM: pacchetti video a GOP interi, audio FLAC per traccia, pagine bloccate, snapshot senza copie."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+cliprec-core.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

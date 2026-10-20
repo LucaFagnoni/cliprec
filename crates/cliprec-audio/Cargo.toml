@@ -1,0 +1,15 @@
+[package]
+name = "cliprec-audio"
+description = "Motore audio: process loopback WASAPI, microfoni, loopback di uscita, silenzio, mix con correzione della deriva."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+cliprec-core.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

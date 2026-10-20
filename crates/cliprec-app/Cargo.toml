@@ -1,0 +1,15 @@
+[package]
+name = "cliprec-app"
+description = "Processo principale di ClipRec: tray, hotkey Raw Input, notifiche, supervisore, motore."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+cliprec-core.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

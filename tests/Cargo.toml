@@ -1,0 +1,13 @@
+[package]
+name = "cliprec-tests"
+description = "Test end-to-end di ClipRec con sorgenti sintetiche."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+cliprec-core.workspace = true
+
+[lints]
+workspace = true

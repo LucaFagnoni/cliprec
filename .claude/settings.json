@@ -1,0 +1,28 @@
+{
+  "worktree": { "baseRef": "head" },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File D:\\Repositories\\cliprec\\scripts\\check-crate.ps1",
+            "timeout": 600
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File D:\\Repositories\\cliprec\\scripts\\gate.ps1 -Hook",
+            "timeout": 900
+          }
+        ]
+      }
+    ]
+  }
+}

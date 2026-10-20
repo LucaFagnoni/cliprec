@@ -1,0 +1,54 @@
+//! Protocollo tra `cliprec-settings` e il core su named pipe locale.
+//!
+//! Il core è il server (`CreateNamedPipeW`, solo client locali dello stesso utente); le
+//! impostazioni sono il client (`std::fs::OpenOptions` sul nome della pipe). Ogni messaggio è
+//! una riga JSON terminata da `\n`; a ogni [`IpcRequest`] corrisponde una [`IpcResponse`].
+
+use crate::status::EngineStatus;
+
+/// Nome della pipe, per utente e sessione.
+pub fn pipe_name() -> String {
+    let user = std::env::var("USERNAME").unwrap_or_default();
+    format!(r"\\.\pipe\cliprec-{user}")
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum IpcRequest {
+    Status,
+    /// La configurazione è stata scritta: il core la rilegge.
+    ReloadConfig,
+    /// Pulsante «Prova»: salva una clip di 5 s.
+    TestClip,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum IpcResponse {
+    Status(EngineStatus),
+    Ok,
+    Error(String),
+}
+
+/// Serializza un messaggio come riga JSON.
+pub fn encode_line<T: serde::Serialize>(msg: &T) -> Result<String, serde_json::Error> {
+    let mut s = serde_json::to_string(msg)?;
+    s.push('\n');
+    Ok(s)
+}
+
+pub fn decode_line<T: serde::de::DeserializeOwned>(line: &str) -> Result<T, serde_json::Error> {
+    serde_json::from_str(line.trim_end())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lines_round_trip() {
+        let r = IpcResponse::Status(EngineStatus { video_seconds: 12.5, ..Default::default() });
+        let line = encode_line(&r).unwrap();
+        assert!(line.ends_with('\n') && !line[..line.len() - 1].contains('\n'));
+        assert_eq!(decode_line::<IpcResponse>(&line).unwrap(), r);
+        assert!(pipe_name().starts_with(r"\\.\pipe\cliprec-"));
+    }
+}

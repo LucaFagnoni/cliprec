@@ -1,0 +1,14 @@
+[package]
+name = "cliprec-settings"
+description = "Finestra impostazioni di ClipRec (Slint), processo separato."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+cliprec-core.workspace = true
+anyhow.workspace = true
+
+[lints]
+workspace = true

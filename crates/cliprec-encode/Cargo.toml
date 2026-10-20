@@ -1,0 +1,16 @@
+[package]
+name = "cliprec-encode"
+description = "Encoder hardware (NVENC, AMF, QSV) via FFmpeg 9 con frame D3D11 senza copie; conversione BGRA->NV12 su GPU."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+cliprec-core.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+ffmpeg-the-third.workspace = true
+
+[lints]
+workspace = true
