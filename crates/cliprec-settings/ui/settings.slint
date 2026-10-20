@@ -100,6 +100,9 @@ export global T {
     in property <string> process-events;
     in property <string> process-events-desc;
     in property <string> add-source;
+    in property <string> add-router;
+    in property <string> block-exclusive;
+    in property <string> block-exclusive-desc;
     in property <string> sources-hint;
     in property <string> kind-app;
     in property <string> kind-input;
@@ -204,6 +207,7 @@ export struct Form {
     audio-mode: int,
     add-mix: bool,
     process-events: bool,
+    block-exclusive: bool,
     hotkey-video: string,
     hotkey-audio: string,
     pad-video: string,
@@ -483,6 +487,8 @@ export component SettingsWindow inherits Window {
     callback language-changed();
     callback source-changed(int, SourceRow);
     callback source-add();
+    callback router-add();
+    in property <bool> router-available;
     callback source-remove(int);
     callback source-move(int, int);
     callback source-pick(int, int, int);
@@ -854,6 +860,7 @@ export component SettingsWindow inherits Window {
                     HorizontalLayout {
                         alignment: start;
                         Button { text: T.add-source; enabled: root.sources.length < 8; clicked => { root.source-add(); } }
+                        if root.router-available: Button { text: T.add-router; enabled: root.sources.length < 8; clicked => { root.router-add(); } }
                     }
                 }
                 SectionTitle { text: T.sec-apps; }
@@ -862,6 +869,11 @@ export component SettingsWindow inherits Window {
                         title: T.process-events;
                         description: T.process-events-desc;
                         Switch { checked <=> root.f.process-events; }
+                    }
+                    SettingRow {
+                        title: T.block-exclusive;
+                        description: T.block-exclusive-desc;
+                        Switch { checked <=> root.f.block-exclusive; }
                     }
                 }
             }

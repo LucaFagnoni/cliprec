@@ -56,6 +56,32 @@ pub fn device_pick<'a>(target: &str, ids: impl IntoIterator<Item = &'a str>) -> 
     ids.into_iter().position(|id| id == target).map_or(-1, |p| i32::try_from(p + 1).unwrap_or(-1))
 }
 
+/// Canali di un router audio (SteelSeries Sonar, Voicemeeter, Elgato Wave Link) da aggiungere come
+/// «Uscita», uno per traccia: le uscite virtuali del router, ognuna con le sue app e senza il
+/// microfono. `outputs`: (nome, ID) dei dispositivi d'uscita; `rows`: (tipo, bersaglio) delle
+/// sorgenti già presenti. Salta i canali già registrati (anche dall'«Uscita» predefinita, se il
+/// predefinito è un canale) e i mix «Stream» e «Monitor», che contengono il microfono.
+/// Restituisce (nome della traccia, ID).
+pub fn router_channels(outputs: &[(&str, &str)], default_output: Option<&str>, rows: &[(i32, &str)]) -> Vec<(String, String)> {
+    const ROUTERS: [&str; 5] = ["sonar", "voicemeeter", "wave link", "wave:link", "elgato virtual"];
+    const MIXES: [&str; 3] = ["stream", "monitor", "microphone"];
+    let recorded = |id: &str| {
+        rows.iter().any(|&(kind, target)| kind == 2 && (target == id || (target.trim().is_empty() && default_output == Some(id))))
+    };
+    outputs
+        .iter()
+        .filter(|(label, id)| {
+            let l = label.to_lowercase();
+            ROUTERS.iter().any(|r| l.contains(r)) && !MIXES.iter().any(|m| l.contains(m)) && !recorded(id)
+        })
+        .map(|(label, id)| {
+            // «SteelSeries Sonar - Chat (SteelSeries Sonar Virtual Audio Device)» → «Chat».
+            let base = label.split(" (").next().unwrap_or(label);
+            (base.rsplit(" - ").next().unwrap_or(base).trim().to_string(), id.to_string())
+        })
+        .collect()
+}
+
 pub fn to_form(c: &Config) -> (Form, Vec<SourceRow>) {
     let (source_kind, source_target) = match &c.video.source {
         VideoSourceConfig::Auto => (0, String::new()),
@@ -101,6 +127,7 @@ pub fn to_form(c: &Config) -> (Form, Vec<SourceRow>) {
         audio_mode: i32::from(c.audio.mode == TrackMode::Merged),
         add_mix: c.audio.add_mix_track,
         process_events: c.audio.process_events,
+        block_exclusive: c.audio.block_exclusive,
         hotkey_video: c.hotkeys.video.clone().into(),
         hotkey_audio: c.hotkeys.audio.clone().into(),
         pad_video: c.hotkeys.video_pad.clone().into(),
@@ -235,6 +262,7 @@ pub fn build_lenient(form: &Form, rows: &[SourceRow], base: &Config) -> (Config,
     // L'opzione vale solo in modalità separata: in traccia unica la si azzera.
     c.audio.add_mix_track = form.add_mix && c.audio.mode == TrackMode::Separate;
     c.audio.process_events = form.process_events;
+    c.audio.block_exclusive = form.block_exclusive;
     if rows.len() > MAX_AUDIO_SOURCES {
         problems.push(Problem::TooManySources);
     }
@@ -487,6 +515,7 @@ mod tests {
         c.video.games = vec!["a.exe".into(), "b.exe".into()];
         c.audio.add_mix_track = true;
         c.audio.process_events = true;
+        c.audio.block_exclusive = false;
         c.audio.sources = vec![
             AudioSourceConfig { volume: 0.5, ..AudioSourceConfig::new("Discord", AudioSourceKind::App { exe: "Discord.exe".into() }) },
             AudioSourceConfig { mono: true, ..AudioSourceConfig::new("Mic", AudioSourceKind::Input { device: Some("{id}".into()) }) },
@@ -536,6 +565,26 @@ mod tests {
         ] {
             assert!(p.contains(&expected), "manca {expected:?} in {p:?}");
         }
+    }
+
+    #[test]
+    fn router_channels_are_the_virtual_outputs_not_yet_recorded() {
+        let outputs = [
+            ("SteelSeries Sonar - Gaming (SteelSeries Sonar Virtual Audio Device)", "{gaming}"),
+            ("SteelSeries Sonar - Chat (SteelSeries Sonar Virtual Audio Device)", "{chat}"),
+            ("SteelSeries Sonar - Media (SteelSeries Sonar Virtual Audio Device)", "{media}"),
+            ("SteelSeries Sonar - Stream (SteelSeries Sonar Virtual Audio Device)", "{stream}"),
+            ("Voicemeeter AUX Input (VB-Audio Voicemeeter AUX VAIO)", "{aux}"),
+            ("Cuffie (Realtek(R) Audio)", "{phones}"),
+        ];
+        let names = |v: Vec<(String, String)>| v.into_iter().map(|(n, _)| n).collect::<Vec<_>>();
+        // «Uscita» predefinita sul canale Gaming e Chat già scelto: restano Media e l'AUX di
+        // Voicemeeter; mai la cuffia fisica né il mix «Stream» (contiene il microfono).
+        let rows = [(2, ""), (2, "{chat}"), (1, "")];
+        assert_eq!(names(router_channels(&outputs, Some("{gaming}"), &rows)), ["Media", "Voicemeeter AUX Input"]);
+        // Predefinita la cuffia: anche Gaming va aggiunto; senza router nulla.
+        assert_eq!(names(router_channels(&outputs, Some("{phones}"), &rows)), ["Gaming", "Media", "Voicemeeter AUX Input"]);
+        assert!(router_channels(&outputs[5..], Some("{phones}"), &[]).is_empty());
     }
 
     #[test]

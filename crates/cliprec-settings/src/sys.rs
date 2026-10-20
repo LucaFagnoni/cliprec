@@ -7,7 +7,7 @@ use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
 use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, RECT, TRUE};
 use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO, MONITORINFOEXW};
 use windows::Win32::Media::Audio::{
-    DEVICE_STATE_ACTIVE, EDataFlow, IMMDeviceEnumerator, MMDeviceEnumerator, eCapture, eRender,
+    DEVICE_STATE_ACTIVE, EDataFlow, IMMDeviceEnumerator, MMDeviceEnumerator, eCapture, eConsole, eRender,
 };
 use windows::Win32::System::Com::{
     CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree, STGM_READ,
@@ -168,6 +168,15 @@ pub fn input_devices() -> Vec<Choice> {
 /// Dispositivi d'uscita attivi (per il loopback).
 pub fn output_devices() -> Vec<Choice> {
     endpoints(eRender).unwrap_or_default()
+}
+
+/// ID dell'uscita predefinita di Windows.
+pub fn default_output() -> Option<String> {
+    // SAFETY: chiamate COM su interfacce ottenute qui; l'ID restituito è liberato da take_pwstr.
+    unsafe {
+        let en: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
+        en.GetDefaultAudioEndpoint(eRender, eConsole).and_then(|d| d.GetId()).ok().map(take_pwstr)
+    }
 }
 
 /// Selettore di cartelle di Windows; `None` se annullato o in caso di errore.

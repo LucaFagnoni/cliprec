@@ -40,7 +40,8 @@ pub const NOT_RUNNING: &str = "non è in esecuzione";
 
 const MIC_PRIVACY: &str = "Windows nega l'accesso al microfono: apri Impostazioni → Privacy e sicurezza → Microfono \
      e attiva «Consenti alle app desktop di accedere al microfono»";
-const EXCLUSIVE: &str = "un'altra app usa il dispositivo in modalità esclusiva: il suo audio non è catturabile";
+const EXCLUSIVE: &str = "un'altra app usa il dispositivo in modalità esclusiva: il suo audio non è catturabile. \
+     Con «Blocca la modalità esclusiva» (Impostazioni → Audio) basta riavviare quell'app";
 
 /// Registrazione del thread corrente in MMCSS («Pro Audio»), annullata quando viene distrutta.
 pub(crate) struct Mmcss(HANDLE);

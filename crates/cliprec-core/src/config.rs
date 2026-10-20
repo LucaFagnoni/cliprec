@@ -204,6 +204,9 @@ pub struct AudioConfig {
     /// Eventi di Windows per agganciare subito le app aperte o chiuse (serve ClipRec da
     /// amministratore). Spento: ricerca ogni mezzo secondo.
     pub process_events: bool,
+    /// Toglie il permesso di modalità esclusiva dai dispositivi registrati: un'app in esclusiva
+    /// scavalca il mixer di Windows e nessun loopback la sente.
+    pub block_exclusive: bool,
 }
 
 impl Default for AudioConfig {
@@ -212,6 +215,7 @@ impl Default for AudioConfig {
             mode: TrackMode::Separate,
             add_mix_track: false,
             process_events: false,
+            block_exclusive: true,
             sources: vec![
                 AudioSourceConfig::new("Sistema", AudioSourceKind::Output { device: None }),
                 AudioSourceConfig::new("Microfono", AudioSourceKind::Input { device: None }),

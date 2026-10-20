@@ -189,6 +189,9 @@ impl Session {
         };
 
         listen_process_events(config, &events);
+        if overrides.audio.is_none() {
+            block_exclusive(config, &events);
+        }
         let sink = buffer.clone() as Arc<dyn AudioTrackSink>;
         let audio = match overrides.audio {
             Some(sources) => cliprec_audio::AudioEngine::with_sources(
@@ -327,6 +330,7 @@ impl Session {
             return;
         }
         listen_process_events(&self.config, &self.events);
+        block_exclusive(&self.config, &self.events);
         let sink = self.buffer.clone() as Arc<dyn AudioTrackSink>;
         match cliprec_audio::AudioEngine::start(&self.config.audio, sink) {
             Ok(a) => self.audio = Some(a),
@@ -882,6 +886,17 @@ fn listen_process_events(config: &Config, events: &Sender<EngineEvent>) {
         && let Err(e) = cliprec_audio::procwatch::listen()
     {
         let _ = events.send(EngineEvent::Warning(e));
+    }
+}
+
+/// Toglie la modalità esclusiva dai dispositivi registrati (`audio.block_exclusive`) e avvisa per
+/// quelli cambiati. Mai nei test né senza interfaccia: è un'impostazione di Windows.
+fn block_exclusive(config: &Config, events: &Sender<EngineEvent>) {
+    if cfg!(test) || crate::notify::headless() || !config.audio.block_exclusive {
+        return;
+    }
+    for name in cliprec_audio::forbid_exclusive_mode(&config.audio.sources) {
+        let _ = events.send(EngineEvent::Warning(tr(K::EngExclusiveOff, &[&name])));
     }
 }
 

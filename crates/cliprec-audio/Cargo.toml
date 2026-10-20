@@ -22,6 +22,9 @@ windows = { workspace = true, features = [
     "Win32_System_Rpc",
     "Win32_System_Variant",
     "Win32_System_Wmi",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_UI_Shell_PropertiesSystem",
+    "Win32_Devices_FunctionDiscovery",
 ] }
 
 [lints]

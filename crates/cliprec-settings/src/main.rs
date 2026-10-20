@@ -348,6 +348,36 @@ fn main() -> anyhow::Result<()> {
             }
         }
     });
+    // Canali del router: uno per traccia, come «Uscita» sul dispositivo del canale.
+    let router = {
+        let lists = lists.clone();
+        let default_output = sys::default_output();
+        move |rows: &VecModel<SourceRow>| {
+            let outputs: Vec<(&str, &str)> = lists.outputs.iter().map(|c| (c.label.as_str(), c.value.as_str())).collect();
+            let present: Vec<SourceRow> = rows.iter().collect();
+            let present: Vec<(i32, &str)> = present.iter().map(|r| (r.kind, r.target.as_str())).collect();
+            model::router_channels(&outputs, default_output.as_deref(), &present)
+        }
+    };
+    ui.set_router_available(!router(&rows).is_empty());
+    ui.on_router_add({
+        let rows = rows.clone();
+        let lists = lists.clone();
+        let w = ui.as_weak();
+        let router = router.clone();
+        move || {
+            for (name, id) in router(&rows) {
+                if rows.row_count() >= cliprec_core::config::MAX_AUDIO_SOURCES {
+                    break;
+                }
+                let row = SourceRow { name: name.into(), kind: 2, target: id.into(), volume: 1.0, delay: 0, pick: 0, mono: false };
+                rows.push(with_pick(row, &lists));
+            }
+            if let Some(ui) = w.upgrade() {
+                ui.set_router_available(!router(&rows).is_empty());
+            }
+        }
+    });
     ui.on_source_remove({
         let rows = rows.clone();
         move |i| {
