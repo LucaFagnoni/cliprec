@@ -79,6 +79,10 @@ avviso invece della proposta interattiva (20); spegnimento del PC lasciato alla 
   agente».** Ho inoltrato la richiesta alla sessione «Pokewilds Godot iOS build setup» chiedendo di
   fermare il watcher (niente `shutdown /s` né alla scadenza delle 09:30) e, se partito, di eseguire
   `shutdown /a`. Sul PC non risultano operazioni pianificate di spegnimento.
+- **08:51: pokewilds conferma** che il suo watcher è terminato e verificato (nessuna copia rimasta) e
+  che nessun conto alla rovescia era partito (`shutdown /a`: «nessun arresto in corso»). Quindi **il PC
+  resta acceso**: nessuna delle due sessioni lo spegnerà. In `.coordinamento/` resta solo
+  `pokewilds-finito.txt`, un promemoria innocuo (la cartella è ignorata da git).
 
 - ClipRec non spegne e non riavvia il PC: lo vieta AVVIO.md, regola 6, e la decisione spetta a te.
 - La sessione «Pokewilds Godot iOS build setup» ha scritto (03:47) che le hai chiesto lo spegnimento
