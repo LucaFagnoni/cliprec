@@ -202,7 +202,9 @@ impl ReplayBuffer {
             last_end = Some(last_end.map_or(frame_end, |t: QpcTime| t.max(frame_end)));
         }
         let (stop, last_end) = (stop?, last_end?);
-        let target = last_end.add_hns(-secs_to_hns(seconds));
+        // 1 ms di tolleranza: i pts sulla griglia CFR sono interi troncati e la fine dell'ultimo
+        // frame può cadere un'unità prima del secondo esatto.
+        let target = last_end.add_hns(-secs_to_hns(seconds) + HNS_PER_SEC / 1000);
         let first = v
             .keyframes
             .iter()

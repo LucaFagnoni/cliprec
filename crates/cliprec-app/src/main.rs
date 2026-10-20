@@ -25,6 +25,12 @@ fn main() -> anyhow::Result<()> {
     if args.first().is_some_and(|a| a == "--prova") {
         return prova(&args[1..]);
     }
+    if args.first().is_some_and(|a| a == "--sessione-lunga") {
+        // `--sessione-lunga <minuti> <cartella>`: sorgenti sintetiche, CSV di memoria e frame.
+        let minutes = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(60);
+        let out = args.get(2).map_or_else(|| Config::default().clips.folder().join("sessione-lunga"), Into::into);
+        return engine::run_soak(Config::default(), minutes, out);
+    }
     let Some(_instance) = sys::acquire_single_instance(&sys::mutex_name())? else {
         tracing::info!("ClipRec è già in esecuzione: esco");
         return Ok(());

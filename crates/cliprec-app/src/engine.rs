@@ -371,6 +371,76 @@ pub fn run_test_clip(mut config: Config, seconds: u32, synthetic: bool, out: Pat
     Ok(saved)
 }
 
+/// Sessione lunga con sorgenti sintetiche (criterio «8 h senza crescita di memoria oltre i buffer
+/// né frame persi in modo sistematico»): ogni minuto una riga CSV in `out/sessione-lunga.csv` con
+/// memoria privata del processo, RAM del buffer, secondi coperti, frame persi e ripetuti; ogni
+/// 10 minuti salva una clip video.
+pub fn run_soak(mut config: Config, minutes: u32, out: PathBuf) -> anyhow::Result<()> {
+    use std::io::Write;
+    config.clips.folder = Some(out.clone());
+    std::fs::create_dir_all(&out)?;
+    let device = GpuDevice::create(None)?;
+    let video = cliprec_capture::SyntheticSource::new(device.clone(), 1920, 1080);
+    let overrides = SourceOverrides {
+        video: Some((device, Box::new(video))),
+        audio: Some(vec![
+            Box::new(cliprec_audio::BeepSource::new("Bip 1 kHz", 1000.0)) as Box<dyn cliprec_core::AudioSource>,
+            Box::new(cliprec_audio::BeepSource::new("Bip 1,5 kHz", 1500.0)),
+        ]),
+    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    let session = Session::start(&config, overrides, tx)?;
+    let mut csv = std::fs::File::create(out.join("sessione-lunga.csv"))?;
+    writeln!(csv, "minuto,memoria_privata_mb,buffer_mb,video_s,audio_s,frame_consegnati,frame_ripetuti,frame_persi,clip")?;
+    for minute in 1..=minutes {
+        std::thread::sleep(Duration::from_secs(60));
+        let clip = if minute % 10 == 0 {
+            session.save(ClipKind::Video, config.clips.video_seconds).map(|h| h.join().is_ok()).unwrap_or(false)
+        } else {
+            false
+        };
+        let st = session.status();
+        let cap = session.video.as_ref().map(|v| v.stats()).unwrap_or_default();
+        writeln!(
+            csv,
+            "{minute},{:.1},{:.1},{:.1},{:.1},{},{},{},{}",
+            private_bytes() as f64 / 1e6,
+            st.buffer_bytes as f64 / 1e6,
+            st.video_seconds,
+            st.audio_seconds,
+            cap.frames_delivered,
+            cap.frames_repeated,
+            cap.frames_dropped,
+            if clip { "salvata" } else { "" },
+        )?;
+        csv.flush()?;
+        for event in rx.try_iter() {
+            match event {
+                EngineEvent::ClipSaved(c) => tracing::info!("sessione lunga: clip {}", c.path.display()),
+                other => tracing::warn!(?other, "sessione lunga"),
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Memoria privata del processo (commit), in byte.
+fn private_bytes() -> usize {
+    use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX};
+    use windows::Win32::System::Threading::GetCurrentProcess;
+    let mut c = PROCESS_MEMORY_COUNTERS_EX::default();
+    // SAFETY: la struttura è valida e ne passiamo la dimensione esatta; lo pseudo-handle del
+    // processo corrente è sempre valido.
+    let ok = unsafe {
+        GetProcessMemoryInfo(
+            GetCurrentProcess(),
+            std::ptr::from_mut(&mut c).cast::<PROCESS_MEMORY_COUNTERS>(),
+            std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32,
+        )
+    };
+    if ok.is_ok() { c.PrivateUsage } else { 0 }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -209,6 +209,6 @@ mod tests {
         let mut line = String::new();
         reader.read_line(&mut line).unwrap();
         assert!(matches!(decode_line::<IpcResponse>(&line).unwrap(), IpcResponse::Error(_)));
-        assert_eq!(rx.try_recv().unwrap(), AppCommand::SaveVideoClip);
+        assert_eq!(rx.try_recv().unwrap(), AppCommand::SaveTestClip);
     }
 }
