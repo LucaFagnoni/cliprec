@@ -442,6 +442,9 @@ fn build_ui(app: &Arc<App>, hwnd: HWND) -> anyhow::Result<Ui> {
     items.extend([&sep2 as &dyn tray_icon::menu::IsMenuItem, &quit_item]);
     let menu = Menu::new();
     menu.append_items(&items)?;
+    // Senza gestore gli eventi dell'icona (ogni passaggio del mouse) si accumulano in un canale che
+    // nessuno legge. Va installato prima di creare l'icona: il primo valore impostato resta.
+    tray_icon::TrayIconEvent::set_event_handler(Some(|_| {}));
     let icon = icon::tray_icon(IconState::Stopped).context("icona della tray")?;
     let tray = TrayIconBuilder::new().with_menu(Box::new(menu)).with_icon(icon).with_tooltip("ClipRec").build()?;
 
