@@ -43,8 +43,10 @@ static START: OnceLock<Instant> = OnceLock::new();
 thread_local! {
     /// Codec che si aprono davvero sul PC, dall'ultimo stato ricevuto (vuoto = ignoti).
     static AVAILABLE: RefCell<Vec<VideoCodec>> = const { RefCell::new(Vec::new()) };
-    /// Opzioni e lingua con cui è stato riempito l'elenco dei codec.
-    static CODEC_SHOWN: RefCell<(Vec<i32>, bool)> = const { RefCell::new((Vec::new(), false)) };
+    /// Encoder che si aprono (es. `hevc_amf`), per scrivere la scheda accanto al codec.
+    static ENCODERS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    /// Opzioni, lingua ed encoder con cui è stato riempito l'elenco dei codec.
+    static CODEC_SHOWN: RefCell<(Vec<i32>, bool, Vec<String>)> = const { RefCell::new((Vec::new(), false, Vec::new())) };
     /// Ultimo `last_test` dello stato.
     static LAST_TEST: RefCell<Option<String>> = const { RefCell::new(None) };
     /// «Prova» in attesa: valore di `last_test` al clic e istante del clic.
@@ -77,11 +79,12 @@ fn check_pending_test(ui: &SettingsWindow) {
 fn refresh_codecs(ui: &SettingsWindow, lang: Lang) {
     let available = AVAILABLE.with(|a| a.borrow().clone());
     let opts = model::codec_options(&available);
-    let key = (opts.clone(), lang == Lang::En);
+    let encoders = ENCODERS.with(|e| e.borrow().clone());
+    let key = (opts.clone(), lang == Lang::En, encoders.clone());
     let changed = CODEC_SHOWN.with(|c| *c.borrow() != key);
     if changed {
-        let names = [lang.pick("Automatico", "Automatic"), "H.264", "HEVC", "AV1"];
-        let labels: Vec<SharedString> = opts.iter().filter_map(|&i| usize::try_from(i).ok().and_then(|i| names.get(i))).map(|n| SharedString::from(*n)).collect();
+        let auto = lang.pick("Automatico", "Automatic");
+        let labels: Vec<SharedString> = opts.iter().map(|&i| SharedString::from(model::codec_label(i, &encoders, auto))).collect();
         ui.set_codec_labels(ModelRc::new(VecModel::from(labels)));
         CODEC_SHOWN.with(|c| *c.borrow_mut() = key);
     }
@@ -96,6 +99,42 @@ fn refresh_codecs(ui: &SettingsWindow, lang: Lang) {
         ""
     };
     ui.set_codec_warning(warn.into());
+}
+
+/// Argomento della finestra riaperta dopo un aggiornamento: aspetta la vecchia e non si riapre più.
+const RELAUNCH_ARG: &str = "--dopo-aggiornamento";
+
+thread_local! {
+    /// Versione del core, dall'ultimo stato degli aggiornamenti.
+    static CORE_VERSION: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// Riapertura già decisa (o rimandata per modifiche non salvate): una volta sola.
+    static RELAUNCH_HANDLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Il core gira con un'altra versione (aggiornato mentre questa finestra era aperta): la finestra si
+/// riapre con l'eseguibile nuovo sulla stessa pagina; con modifiche non salvate avvisa soltanto.
+fn reopen_if_updated(ui: &SettingsWindow, dirty: bool, relaunched: bool) {
+    let Some(core) = CORE_VERSION.with(|c| c.borrow().clone()) else { return };
+    if relaunched || core.is_empty() || core == env!("CARGO_PKG_VERSION") || RELAUNCH_HANDLED.with(std::cell::Cell::get) {
+        return;
+    }
+    RELAUNCH_HANDLED.with(|h| h.set(true));
+    let lang = current_lang();
+    if dirty {
+        let text = format!(
+            "{} {core}: {}",
+            lang.pick("ClipRec è stato aggiornato alla versione", "ClipRec has been updated to version"),
+            lang.pick("salva o annulla le modifiche e riapri le impostazioni.", "save or discard your changes and reopen settings.")
+        );
+        set_message(ui, &text, false);
+        return;
+    }
+    let exe = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join("cliprec-settings.exe")));
+    if let Some(exe) = exe
+        && std::process::Command::new(exe).arg(RELAUNCH_ARG).env("CLIPREC_TAB", ui.get_page().to_string()).spawn().is_ok()
+    {
+        let _ = slint::quit_event_loop();
+    }
 }
 
 fn now_ms() -> u64 {
@@ -216,10 +255,23 @@ fn main() -> anyhow::Result<()> {
 
     let (form, rows_vec) = model::to_form(&base);
     let lang = Lang::resolve(form.language);
+    let args: Vec<String> = std::env::args().collect();
+    // Dopo un aggiornamento la finestra nuova aspetta che la vecchia si chiuda.
+    let wait = if args.iter().any(|a| a == RELAUNCH_ARG) { Duration::from_secs(10) } else { Duration::ZERO };
     // Aperta dal core quando trova una versione nuova, o dalla tray / da «Cerca aggiornamenti».
-    if std::env::args().any(|a| a == "--aggiornamento") {
+    if args.iter().any(|a| a == "--aggiornamento") {
+        let Some(_one) = sys::single_instance("Local\\ClipRec.Aggiornamento", wait) else {
+            sys::bring_to_front(&update_window::TITLES);
+            return Ok(());
+        };
         return update_window::run(lang);
     }
+    // Una sola finestra di impostazioni: un secondo avvio porta in primo piano quella aperta.
+    let Some(_one) = sys::single_instance("Local\\ClipRec.Impostazioni", wait) else {
+        sys::bring_to_front(&["ClipRec · Impostazioni", "ClipRec · Settings"]);
+        return Ok(());
+    };
+    let relaunched = args.iter().any(|a| a == RELAUNCH_ARG);
     let ui = SettingsWindow::new()?;
     ui.set_version(env!("CARGO_PKG_VERSION").into());
     set_lang(&ui, lang);
@@ -488,6 +540,7 @@ fn main() -> anyhow::Result<()> {
             check_pending_test(&ui);
             ui.set_ram_estimate(ram_text(lang, &c).into());
             ui.set_hotkey_warning(hotkey_warning(lang, &c).into());
+            reopen_if_updated(&ui, c != *base.borrow(), relaunched);
             // Il thread di stato è fermo (core che non risponde): mostra «non in esecuzione».
             if now_ms().saturating_sub(LAST_POLL_MS.load(Ordering::Relaxed)) > 4000 {
                 ui.set_status_online(false);
@@ -512,9 +565,13 @@ fn main() -> anyhow::Result<()> {
                 .upgrade_in_event_loop(move |ui| {
                     let lang = current_lang();
                     ui.set_update_line(update_line(lang, update.as_ref()).into());
+                    if let Some(u) = &update {
+                        CORE_VERSION.with(|c| *c.borrow_mut() = Some(u.current.clone()));
+                    }
                     match res {
                         Ok(IpcResponse::Status(s)) => {
                             AVAILABLE.with(|a| *a.borrow_mut() = s.available_codecs.clone());
+                            ENCODERS.with(|e| *e.borrow_mut() = s.available_encoders.clone());
                             LAST_TEST.with(|t| *t.borrow_mut() = s.last_test.clone());
                             check_pending_test(&ui);
                             ui.set_status_text(pipe::format_status(lang, &s).into());

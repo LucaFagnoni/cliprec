@@ -195,3 +195,10 @@ Le voci [DEFAULT] e [PROPOSTA] di SPEC.md valgono come decise; qui ci sono quell
     esclusiva (R3). Prezzo: il suono di conferma, che parte dopo lo snapshot, può finire nelle clip
     successive; chi non lo vuole lo spegne o usa «Tutto tranne un'app» su `cliprec-app.exe`. Bordo
     giallo di WGC: permesso «senza bordo» chiesto una volta con `GraphicsCaptureAccess` (m16).
+40. **Una sola finestra di impostazioni, riaperta dopo gli aggiornamenti** (20 ottobre, richiesta di
+    Luca). Impostazioni e finestra di aggiornamento hanno un mutex per sessione
+    (`Local\ClipRec.Impostazioni`, `Local\ClipRec.Aggiornamento`): un secondo avvio porta in primo
+    piano quella aperta ed esce. La finestra legge la versione del core: se è diversa dalla propria
+    (core aggiornato mentre era aperta) si riapre dall'eseguibile nuovo sulla stessa pagina, una
+    volta sola; con modifiche non salvate avvisa invece di chiudersi. Il menu dei codec scrive la
+    scheda che codifica («HEVC · AMD»): sulle RX 6000 non c'è AV1, quindi H.264 e HEVC sono già AMF.

@@ -474,7 +474,7 @@ export component SettingsWindow inherits Window {
     in-out property <int> codec-pos;
     in property <string> codec-warning;
     in property <string> version;
-    property <int> page: root.start-tab;
+    in-out property <int> page: root.start-tab;
 
     callback save();
     callback cancel();
@@ -1101,7 +1101,8 @@ export component SettingsWindow inherits Window {
 // Finestra di aggiornamento (`cliprec-settings --aggiornamento`): stesso tema delle impostazioni.
 // Testi e stato arrivano da Rust (src/update_window.rs), che segue il core sulla named pipe.
 export component UpdateWindow inherits Window {
-    title: "ClipRec";
+    in property <string> window-title: "ClipRec";
+    title: root.window-title;
     icon: @image-url("../../../assets/icon/cliprec-256.png");
     preferred-width: 560px;
     preferred-height: 480px;

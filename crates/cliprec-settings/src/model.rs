@@ -355,6 +355,31 @@ pub fn codec_options(available: &[VideoCodec]) -> Vec<i32> {
     (0..=3).filter(|&i| i == 0 || available.is_empty() || codec_of(i).is_some_and(|c| available.contains(&c))).collect()
 }
 
+/// Scheda che codifica un encoder FFmpeg (`hevc_amf` → AMD), `None` se software o sconosciuto.
+fn vendor_of(encoder: &str) -> Option<&'static str> {
+    match encoder.rsplit('_').next()? {
+        "nvenc" => Some("NVIDIA"),
+        "amf" => Some("AMD"),
+        "qsv" => Some("Intel"),
+        _ => None,
+    }
+}
+
+/// Etichetta di un codec nel menu (indice di `Form::codec`), con la scheda che lo codifica se il
+/// rilevamento la conosce: «HEVC · AMD». `auto` è il testo di «Automatico».
+pub fn codec_label(index: i32, encoders: &[String], auto: &str) -> String {
+    let (name, prefix) = match index {
+        1 => ("H.264", "h264_"),
+        2 => ("HEVC", "hevc_"),
+        3 => ("AV1", "av1_"),
+        _ => return auto.to_string(),
+    };
+    match encoders.iter().filter(|e| e.starts_with(prefix)).find_map(|e| vendor_of(e)) {
+        Some(v) => format!("{name} · {v}"),
+        None => name.to_string(),
+    }
+}
+
 fn codec_of(index: i32) -> Option<VideoCodec> {
     match index {
         1 => Some(VideoCodec::H264),
@@ -587,6 +612,17 @@ mod tests {
             let (f, r) = rows_of(&c);
             assert_eq!(build_config(&f, &r, &c).unwrap().clips.audio_format, fmt);
         }
+    }
+
+    #[test]
+    fn codec_labels_name_the_card_that_encodes() {
+        let amd: Vec<String> = ["h264_amf", "hevc_amf"].map(String::from).to_vec();
+        assert_eq!(codec_label(2, &amd, "Automatico"), "HEVC · AMD");
+        assert_eq!(codec_label(1, &amd, "Automatico"), "H.264 · AMD");
+        assert_eq!(codec_label(0, &amd, "Automatico"), "Automatico");
+        let nv: Vec<String> = ["hevc_nvenc", "hevc_qsv"].map(String::from).to_vec();
+        assert_eq!(codec_label(2, &nv, "Auto"), "HEVC · NVIDIA", "il primo encoder dell'elenco è quello usato");
+        assert_eq!(codec_label(3, &[], "Auto"), "AV1", "senza rilevamento solo il nome");
     }
 
     #[test]

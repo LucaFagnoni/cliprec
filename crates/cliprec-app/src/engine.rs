@@ -43,6 +43,8 @@ pub struct Shared {
     writing_peak: Arc<AtomicU32>,
     /// Codec che si aprono davvero su questo PC (`probe`), per lo stato e le impostazioni.
     available_codecs: Arc<Mutex<Vec<cliprec_core::VideoCodec>>>,
+    /// Nomi degli encoder che si aprono (es. `hevc_amf`), nello stesso rilevamento.
+    available_encoders: Arc<Mutex<Vec<String>>>,
     /// Esito dell'ultima clip di prova.
     last_test: Arc<Mutex<Option<String>>>,
     /// Rilevamento dei codec in corso (uno solo per processo).
@@ -268,12 +270,17 @@ impl Session {
         let spawned = std::thread::Builder::new().name("encoder-probe".into()).spawn(move || {
             lower_thread_priority();
             let mut codecs: Vec<cliprec_core::VideoCodec> = Vec::new();
+            let mut encoders: Vec<String> = Vec::new();
             // Un panic nel driver non lascia `probing` acceso per sempre.
             let probed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cliprec_encode::probe(&device)));
-            for (codec, _) in probed.unwrap_or_default() {
+            for (codec, name) in probed.unwrap_or_default() {
                 if !codecs.contains(&codec) {
                     codecs.push(codec);
                 }
+                encoders.push(name);
+            }
+            if let Ok(mut e) = shared.available_encoders.lock() {
+                *e = encoders;
             }
             if let Ok(mut c) = shared.available_codecs.lock() {
                 *c = codecs;
@@ -370,6 +377,7 @@ impl Session {
                 problem
             },
             available_codecs: self.shared.available_codecs.lock().map(|c| c.clone()).unwrap_or_default(),
+            available_encoders: self.shared.available_encoders.lock().map(|e| e.clone()).unwrap_or_default(),
             last_test: self.shared.last_test.lock().map(|t| t.clone()).unwrap_or_default(),
         }
     }
@@ -1087,6 +1095,7 @@ pub fn run(
             *st = session.as_ref().map(Session::status).unwrap_or_else(|| EngineStatus {
                 recent_clips: shared.recent.lock().map(|r| r.iter().cloned().collect()).unwrap_or_default(),
                 available_codecs: shared.available_codecs.lock().map(|c| c.clone()).unwrap_or_default(),
+                available_encoders: shared.available_encoders.lock().map(|e| e.clone()).unwrap_or_default(),
                 last_test: shared.last_test.lock().map(|t| t.clone()).unwrap_or_default(),
                 ..Default::default()
             });

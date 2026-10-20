@@ -26,6 +26,7 @@ windows = { workspace = true, features = [
     "Win32_System_Com_StructuredStorage",
     "Win32_System_Variant",
     "Win32_System_Pipes",
+    "Win32_Security",
 ] }
 
 [build-dependencies]

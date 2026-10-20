@@ -183,8 +183,74 @@ pub fn pick_folder() -> Option<String> {
     }
 }
 
+/// Istanza unica: finché vive, un altro processo con lo stesso nome non parte.
+pub struct InstanceGuard(windows::Win32::Foundation::HANDLE);
+
+impl Drop for InstanceGuard {
+    fn drop(&mut self) {
+        // SAFETY: handle del mutex creato da `single_instance`, chiuso una sola volta.
+        let _ = unsafe { CloseHandle(self.0) };
+    }
+}
+
+/// Prende il mutex `name` (per sessione). `None` se un'altra istanza lo tiene ancora dopo `wait`
+/// (dopo un aggiornamento la finestra nuova aspetta che la vecchia si chiuda).
+pub fn single_instance(name: &str, wait: std::time::Duration) -> Option<InstanceGuard> {
+    use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError};
+    use windows::Win32::System::Threading::CreateMutexW;
+    let wide: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        // SAFETY: nome terminato da NUL che vive per la chiamata; nessun attributo di sicurezza.
+        let handle = unsafe { CreateMutexW(None, false, windows::core::PCWSTR(wide.as_ptr())) }.ok()?;
+        // SAFETY: letto subito dopo CreateMutexW sullo stesso thread.
+        if unsafe { GetLastError() } != ERROR_ALREADY_EXISTS {
+            return Some(InstanceGuard(handle));
+        }
+        // SAFETY: handle appena restituito da CreateMutexW.
+        let _ = unsafe { CloseHandle(handle) };
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+/// Porta in primo piano la finestra con uno di questi titoli (l'istanza già aperta).
+pub fn bring_to_front(titles: &[&str]) {
+    use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, IsIconic, SW_RESTORE, SetForegroundWindow, ShowWindow};
+    for t in titles {
+        let wide: Vec<u16> = t.encode_utf16().chain(Some(0)).collect();
+        // SAFETY: titolo terminato da NUL che vive per la chiamata; classe non indicata.
+        if let Ok(hwnd) = unsafe { FindWindowW(windows::core::PCWSTR::null(), windows::core::PCWSTR(wide.as_ptr())) } {
+            // SAFETY: handle valido appena trovato; le chiamate non trattengono puntatori.
+            unsafe {
+                if IsIconic(hwnd).as_bool() {
+                    let _ = ShowWindow(hwnd, SW_RESTORE);
+                }
+                let _ = SetForegroundWindow(hwnd);
+            }
+            return;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::single_instance;
+    use std::time::Duration;
+
+    /// Una sola finestra di impostazioni: la seconda istanza non parte finché vive la prima.
+    #[test]
+    fn only_one_instance_until_the_first_closes() {
+        let name = format!("Local\\ClipRec.Test.{}", std::process::id());
+        let first = single_instance(&name, Duration::ZERO);
+        assert!(first.is_some());
+        assert!(single_instance(&name, Duration::ZERO).is_none(), "seconda istanza");
+        drop(first);
+        assert!(single_instance(&name, Duration::from_millis(500)).is_some(), "dopo la chiusura della prima");
+    }
+
     #[test]
     fn window_label_shows_the_executable() {
         assert_eq!(super::window_label("Documento - Blocco note", "notepad.exe"), "Documento - Blocco note  ·  notepad.exe");

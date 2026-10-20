@@ -54,6 +54,8 @@ pub struct EngineStatus {
     pub last_error: Option<String>,
     /// Codec che si aprono davvero su questo PC (rilevati all'avvio con `probe`).
     pub available_codecs: Vec<crate::video::VideoCodec>,
+    /// Encoder che si aprono davvero (nomi FFmpeg, es. `hevc_amf`), per mostrare chi codifica.
+    pub available_encoders: Vec<String>,
     /// Esito dell'ultima clip di prova («Prova»): audio non silenzioso, video non nero.
     pub last_test: Option<String>,
 }

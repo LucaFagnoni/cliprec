@@ -9,6 +9,9 @@ use slint::ComponentHandle;
 use crate::i18n::Lang;
 use crate::{UpdateWindow, pipe};
 
+/// Titoli della finestra (per portarla in primo piano da un secondo avvio).
+pub const TITLES: [&str; 2] = ["ClipRec · Aggiornamenti", "ClipRec · Updates"];
+
 /// Cosa mostra la finestra in un dato momento.
 #[derive(Debug, Default, PartialEq)]
 pub struct View {
@@ -149,6 +152,7 @@ fn show(ui: &UpdateWindow, v: View, lang: Lang) {
 /// Apre la finestra e la aggiorna due volte al secondo fino alla chiusura.
 pub fn run(lang: Lang) -> anyhow::Result<()> {
     let ui = UpdateWindow::new()?;
+    ui.set_window_title(lang.pick(TITLES[0], TITLES[1]).into());
     show(&ui, view(lang, None, &mut Tracker::default()), lang);
     ui.on_dismiss(|| {
         let _ = slint::quit_event_loop();
