@@ -272,3 +272,77 @@ fn audio_keeps_only_the_longest_duration() {
     let st = b.stats();
     assert!(st.audio_seconds >= 2.0 && st.audio_seconds < 2.5, "{st:?}");
 }
+
+/// Come `push_track`, ma con `start` spostato di `jitter(k)` hns sul pezzo `k`.
+fn push_track_with(b: &ReplayBuffer, track: usize, from: i64, frames: i64, jitter: impl Fn(i64) -> i64) {
+    let mut f = from;
+    let mut k = 0;
+    while f < from + frames {
+        let n = (480 + (k * 37) % 300).min(from + frames - f);
+        let s: Vec<f32> = (f..f + n).flat_map(|g| [signal(track, g, 0), signal(track, g, 1)]).collect();
+        b.push(track, at(f).add_hns(jitter(k)), &s);
+        f += n;
+        k += 1;
+    }
+}
+
+/// Ritardo costante (in frame) con cui `got` riproduce il segnale della traccia.
+fn lag_of(got: &[f32], track: usize, from: i64) -> i64 {
+    let probe = 2000;
+    (-96..=96)
+        .find(|&lag| {
+            (0..64).all(|i| {
+                let want = audio::quantize(signal(track, from + probe + i + lag, 0)) as f32 / 8_388_607.0;
+                (got[(probe + i) as usize * 2] - want).abs() < 1e-6
+            })
+        })
+        .unwrap_or(i64::MAX)
+}
+
+#[test]
+fn qpc_jitter_does_not_break_contiguity() {
+    let b = buffer(2.0, 64 * MB);
+    b.set_tracks(&["A".into(), "B".into()]);
+    // ±2 ms di jitter pseudo-casuale sullo start di ogni pacchetto (il primo esatto).
+    let jitter = |k: i64| if k == 0 { 0 } else { ((k * 7919) % 41 - 20) * 1_000 };
+    push_track_with(&b, 0, 0, 96_000, jitter);
+    push_track_with(&b, 1, 0, 96_000, |k| jitter(k + 3) * i64::from(k != 0));
+    for from in [0, 30_011] {
+        let to = 90_000;
+        let s = b.snapshot_audio(at(from), at(to)).unwrap();
+        for (t, track) in s.tracks.iter().enumerate() {
+            // Nessun buco né campione ripetuto: tutto il tratto è il segnale con un ritardo
+            // costante entro 1 ms (esatto quando si parte dal primo campione del segmento).
+            let lag = lag_of(&track.samples, t, from);
+            assert!(lag.abs() <= 48, "traccia {t} da {from}: ritardo {lag}");
+            if from == 0 {
+                assert_eq!(lag, 0);
+            }
+            for i in 0..(to - from - 96) as usize {
+                assert_sample(track.samples[i * 2], t, from + i as i64 + lag, 0);
+            }
+        }
+    }
+}
+
+#[test]
+fn long_gap_opens_a_new_segment_filled_with_silence() {
+    let b = buffer(4.0, 64 * MB);
+    b.set_tracks(&["A".into(), "B".into()]);
+    // A: 1 s, poi un vuoto di 0,5 s (oltre i 100 ms), poi 1 s. B continua senza vuoti.
+    push_track(&b, 0, 0, 48_000, 480);
+    push_track(&b, 0, 72_000, 48_000, 480);
+    push_track(&b, 1, 0, 120_000, 480);
+    let s = b.snapshot_audio(at(0), at(120_000)).unwrap();
+    assert_eq!(s.tracks[0].samples.len(), s.tracks[1].samples.len());
+    let a = &s.tracks[0].samples;
+    for f in 0..120_000i64 {
+        let i = f as usize * 2;
+        if !(48_000 - 32..72_000).contains(&f) {
+            assert_sample(a[i], 0, f, 0);
+        } else if f >= 48_000 {
+            assert_eq!(a[i], 0.0, "silenzio nel vuoto, frame {f}");
+        }
+        assert_sample(s.tracks[1].samples[i], 1, f, 0);
+    }
+}

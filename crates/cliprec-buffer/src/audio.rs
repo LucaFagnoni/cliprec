@@ -15,8 +15,12 @@ use crate::arena::ChunkRing;
 pub(crate) const BLOCK_FRAMES: usize = 4096;
 const BITS: usize = 24;
 const SCALE: f32 = 8_388_607.0; // 2^23 - 1
-/// Scarto massimo tra l'istante QPC di un blocco e quello atteso per considerarlo contiguo.
-const CONTIGUOUS_HNS: i64 = 200_000; // 20 ms
+/// Oltre questo scarto tra lo `start` ricevuto e quello atteso c'è una discontinuità (vuoto,
+/// sospensione): si apre un nuovo segmento. Sotto, i campioni sono contigui e lo scarto è
+/// jitter del QPC dei pacchetti (±2 ms) o deriva del clock del dispositivo.
+const DISCONTINUITY_HNS: i64 = 1_000_000; // 100 ms
+/// Peso di ogni nuovo scarto nella media mobile della deriva (jitter ±2 ms → ~0,2 ms residui).
+const DRIFT_SMOOTHING: f64 = 1.0 / 64.0;
 const AUDIO_CHUNK: usize = 1 << 20;
 
 pub(crate) struct BlockMeta {
@@ -33,8 +37,11 @@ pub(crate) struct Track {
     /// Campioni interleaved a 24 bit non ancora compressi (meno di un blocco).
     pending: Vec<i32>,
     pending_start: QpcTime,
-    /// Istante subito dopo l'ultimo campione ricevuto; `None` prima del primo.
-    end: Option<QpcTime>,
+    /// Segmento corrente: istante del primo campione (`None` prima del primo `push`), campioni
+    /// ricevuti da allora e scarto medio (hns) tra gli `start` ricevuti e il conteggio.
+    anchor: Option<QpcTime>,
+    count: i64,
+    drift: f64,
     pub ring: ChunkRing<BlockMeta>,
 }
 
@@ -63,7 +70,9 @@ impl Track {
             frame_no: 0,
             pending: Vec::with_capacity(BLOCK_FRAMES * CHANNELS),
             pending_start: QpcTime(0),
-            end: None,
+            anchor: None,
+            count: 0,
+            drift: 0.0,
             ring: ChunkRing::new(AUDIO_CHUNK, lock_pages, max_bytes),
         })
     }
@@ -74,23 +83,34 @@ impl Track {
         if frames == 0 {
             return;
         }
-        // Un salto nei timestamp (riavvio della sorgente): chiude il blocco parziale e riparte.
-        if let Some(end) = self.end
-            && start.hns_since(end).abs() > CONTIGUOUS_HNS
-        {
-            self.encode_pending(enc);
+        // I campioni sono contigui: l'istante di ognuno viene dal conteggio dall'inizio del
+        // segmento, corretto dalla media degli scarti (deriva); `start` serve solo ad ancorare.
+        match self.anchor {
+            Some(anchor) => {
+                let error = start.hns_since(anchor.add_hns(frames_to_hns(self.count))) as f64;
+                if (error - self.drift).abs() > DISCONTINUITY_HNS as f64 {
+                    // Vuoto o salto: nuovo segmento; allo snapshot il vuoto diventa silenzio.
+                    self.encode_pending(enc);
+                    self.anchor = Some(start);
+                    self.count = 0;
+                    self.drift = 0.0;
+                } else {
+                    self.drift += (error - self.drift) * DRIFT_SMOOTHING;
+                }
+            }
+            None => self.anchor = Some(start),
         }
-        for (i, frame) in samples.chunks_exact(CHANNELS).enumerate() {
+        for frame in samples.chunks_exact(CHANNELS) {
             if self.pending.is_empty() {
-                self.pending_start = start.add_hns(frames_to_hns(i as i64));
+                self.pending_start = self.time_at(self.count);
             }
             self.pending.extend(frame.iter().map(|&x| quantize(x)));
+            self.count += 1;
             if self.pending.len() == BLOCK_FRAMES * CHANNELS {
                 self.encode_pending(enc);
             }
         }
-        let end = start.add_hns(frames_to_hns(frames as i64));
-        self.end = Some(end);
+        let end = self.time_at(self.count);
         let oldest = end.add_hns(-keep_hns);
         while self.ring.front().is_some_and(|b| b.meta.start.add_hns(frames_to_hns(b.meta.frames as i64)) <= oldest) {
             self.ring.pop_front();
@@ -129,6 +149,12 @@ impl Track {
         self.pending.clear();
     }
 
+    /// Istante del campione `n` del segmento corrente.
+    fn time_at(&self, n: i64) -> QpcTime {
+        let anchor = self.anchor.unwrap_or_default();
+        anchor.add_hns(frames_to_hns(n) + self.drift.round() as i64)
+    }
+
     /// Istante del primo campione conservato.
     pub fn first(&self) -> Option<QpcTime> {
         self.ring.front().map(|b| b.meta.start).or((!self.pending.is_empty()).then_some(self.pending_start))
@@ -136,7 +162,7 @@ impl Track {
 
     /// Istante subito dopo l'ultimo campione conservato.
     pub fn end(&self) -> Option<QpcTime> {
-        self.end
+        self.anchor.map(|_| self.time_at(self.count))
     }
 
     /// Riferimenti ai blocchi che toccano `[start, end)` e copia dei campioni non ancora compressi.
@@ -159,8 +185,8 @@ impl Track {
 
 impl TrackCopy {
     /// Decomprime e posiziona i campioni su `frames` frame a partire da `start`; silenzio dove
-    /// mancano dati. I blocchi contigui si accodano al campione, senza ricalcolare la posizione
-    /// dal loro QPC (che ha il jitter dei pacchetti WASAPI).
+    /// mancano dati. Il primo blocco di ogni tratto contiguo si posiziona dal suo istante, i
+    /// successivi si accodano al campione (niente buchi né sovrapposizioni da arrotondamenti).
     pub fn render(self, start: QpcTime, frames: usize) -> AudioTrackPcm {
         let mut out = Placer { out: vec![0.0f32; frames * CHANNELS], start, next: None };
         let mut buf = Vec::new();
@@ -192,7 +218,7 @@ struct Placer {
 impl Placer {
     fn place(&mut self, at: QpcTime, n: usize, sample: impl Fn(usize, usize) -> i32) {
         let offset = match self.next {
-            Some((t, off)) if at.hns_since(t).abs() <= CONTIGUOUS_HNS => off,
+            Some((t, off)) if at.hns_since(t).abs() <= DISCONTINUITY_HNS => off,
             _ => hns_to_frames(at.hns_since(self.start)),
         };
         let frames = self.out.len() / CHANNELS;
