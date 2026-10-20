@@ -390,6 +390,7 @@ mod tests {
     fn monitor_wgc_60_and_144_fps() {
         let _anim = TestWindow::open("cliprec-test-anim", 320, 240);
         let (mw, mh) = rect_size(monitor_rect(primary_monitor()).unwrap());
+        println!("MinUpdateInterval disponibile: {}", wgc::has_min_update_interval());
         for fps in [60u32, 144] {
             let device = crate::device_for_monitor(0).unwrap();
             let mut src = CaptureSource::new(device, Target::Monitor(0), false);
