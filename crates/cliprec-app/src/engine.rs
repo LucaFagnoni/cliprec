@@ -252,18 +252,22 @@ impl Session {
                     return None;
                 };
                 let start = video.start().unwrap_or(end);
-                let audio = self.buffer.snapshot_audio(start, end);
+                // Sotto lock solo i riferimenti ai blocchi FLAC; la decompressione è nel thread di salvataggio.
+                let audio = self.buffer.snapshot_audio_refs(start, end);
                 let opts = cliprec_mux::VideoClipOptions { container: self.config.clips.container, ..Default::default() };
-                Box::new(move || cliprec_mux::write_video_clip(&path, &video, audio.as_ref(), &opts).map_err(|e| e.to_string()))
+                Box::new(move || {
+                    let audio = audio.map(cliprec_buffer::AudioRefs::render);
+                    cliprec_mux::write_video_clip(&path, &video, audio.as_ref(), &opts).map_err(|e| e.to_string())
+                })
             }
             ClipKind::Audio => {
                 let start = end.add_hns(-i64::from(seconds) * cliprec_core::HNS_PER_SEC);
-                let Some(audio) = self.buffer.snapshot_audio(start, end) else {
+                let Some(audio) = self.buffer.snapshot_audio_refs(start, end) else {
                     fail(&events, "il buffer audio è ancora vuoto".into());
                     return None;
                 };
                 let format = self.config.clips.audio_format;
-                Box::new(move || cliprec_mux::write_audio_clip(&path, &audio, format).map_err(|e| e.to_string()))
+                Box::new(move || cliprec_mux::write_audio_clip(&path, &audio.render(), format).map_err(|e| e.to_string()))
             }
         };
         let snapshot_ms = pressed.elapsed().as_secs_f64() * 1000.0;
@@ -415,25 +419,13 @@ fn open_encoder(
     buffer: &ReplayBuffer,
     encoder_name: &Mutex<String>,
 ) -> Opened {
-    let mut errors = Vec::new();
-    for (_, name) in cliprec_encode::candidates(settings.codec) {
-        if skip.contains(&name) {
-            continue;
-        }
-        match cliprec_encode::open(device, settings, &name) {
-            Ok(e) => {
-                buffer.set_video_params(e.params().clone());
-                if let Ok(mut n) = encoder_name.lock() {
-                    n.clone_from(&e.params().encoder_name);
-                }
-                tracing::info!(encoder = %name, "encoder video pronto");
-                return Ok(e);
-            }
-            Err(EncodeError::Unsupported(_)) => {}
-            Err(e) => errors.push(format!("{name}: {e}")),
-        }
+    let e = cliprec_encode::open_after(device, settings, skip).map_err(|e| e.to_string())?;
+    buffer.set_video_params(e.params().clone());
+    if let Ok(mut n) = encoder_name.lock() {
+        n.clone_from(&e.params().encoder_name);
     }
-    Err(if errors.is_empty() { "nessun encoder hardware disponibile".into() } else { errors.join("; ") })
+    tracing::info!(encoder = %e.params().encoder_name, "encoder video pronto");
+    Ok(e)
 }
 
 fn lower_thread_priority() {

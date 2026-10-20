@@ -21,6 +21,7 @@ use cliprec_core::{AppCommand, Config, EngineEvent, EngineStatus};
 
 fn main() -> anyhow::Result<()> {
     let _log = logging::init()?;
+    cliprec_encode::quiet_ffmpeg_logs();
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().is_some_and(|a| a == "--prova") {
         return prova(&args[1..]);
