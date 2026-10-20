@@ -17,7 +17,8 @@ const GOP_SECONDS: f64 = 2.0;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Problem {
-    TooManySources,
+    /// Elenco delle sorgenti (0 = clip video, 1 = clip audio) con più di 8 sorgenti.
+    TooManySources(u8),
     VideoSecondsZero,
     AudioSecondsZero,
     /// 0 = video, 1 = audio.
@@ -27,14 +28,14 @@ pub enum Problem {
     BadPad(u8),
     SamePad,
     /// Ritardo di una sorgente audio fuori da -1000..=1000 ms (indice della riga).
-    BadDelay(usize),
+    BadDelay(u8, usize),
     BadBitrate,
     BadTargetBitrate,
     BadMaxMb,
     BadMonitor,
     EmptyVideoTarget,
-    EmptySourceName(usize),
-    EmptyAppExe(usize),
+    EmptySourceName(u8, usize),
+    EmptyAppExe(u8, usize),
     EmptyTemplate,
 }
 
@@ -46,7 +47,7 @@ fn trimmed(s: &slint::SharedString) -> String {
 pub const AUDIO_BITRATES: [u32; 6] = [96, 128, 160, 192, 256, 320];
 
 /// Config -> (form, righe audio).
-/// Posizione di un dispositivo nel menu della scheda Audio, che ha il predefinito di Windows in
+/// Posizione di un dispositivo nel menu di un elenco di sorgenti, che ha il predefinito di Windows in
 /// testa: 0 per il predefinito (`target` vuoto), -1 se il dispositivo non è collegato.
 pub fn device_pick<'a>(target: &str, ids: impl IntoIterator<Item = &'a str>) -> i32 {
     let target = target.trim();
@@ -78,6 +79,70 @@ pub fn router_channels(outputs: &[(&str, &str)], default_output: Option<&str>, r
             // «SteelSeries Sonar - Chat (SteelSeries Sonar Virtual Audio Device)» → «Chat».
             let base = label.split(" (").next().unwrap_or(label);
             (base.rsplit(" - ").next().unwrap_or(base).trim().to_string(), id.to_string())
+        })
+        .collect()
+}
+
+/// Sorgenti dall'elenco `list` (0 = clip video, 1 = clip audio) della finestra.
+fn parse_sources(list: u8, rows: &[SourceRow], problems: &mut Vec<Problem>) -> Vec<AudioSourceConfig> {
+    if rows.len() > MAX_AUDIO_SOURCES {
+        problems.push(Problem::TooManySources(list));
+    }
+    rows
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let name = trimmed(&r.name);
+            let t = trimmed(&r.target);
+            if name.is_empty() {
+                problems.push(Problem::EmptySourceName(list, i));
+            }
+            let device = (!t.is_empty()).then(|| t.clone());
+            let kind = match r.kind {
+                1 => AudioSourceKind::Input { device },
+                2 => AudioSourceKind::Output { device },
+                3 => {
+                    if t.is_empty() {
+                        problems.push(Problem::EmptyAppExe(list, i));
+                    }
+                    AudioSourceKind::Except { exe: t }
+                }
+                _ => {
+                    if t.is_empty() {
+                        problems.push(Problem::EmptyAppExe(list, i));
+                    }
+                    AudioSourceKind::App { exe: t }
+                }
+            };
+            if !(-1000..=1000).contains(&r.delay) {
+                problems.push(Problem::BadDelay(list, i));
+            }
+            AudioSourceConfig {
+                volume: r.volume.clamp(0.0, 2.0),
+                delay_ms: r.delay.clamp(-1000, 1000),
+                mono: r.mono,
+                ..AudioSourceConfig::new(name, kind)
+            }
+        })
+        .collect()
+}
+
+/// Righe dell'elenco delle sorgenti delle clip solo audio (quelle delle clip video se non ha un
+/// elenco suo).
+pub fn audio_rows(c: &Config) -> Vec<SourceRow> {
+    rows_from(c.audio.sources_for(ClipKind::Audio))
+}
+
+fn rows_from(list: &[AudioSourceConfig]) -> Vec<SourceRow> {
+    list.iter()
+        .map(|s| {
+            let (kind, target) = match &s.kind {
+                AudioSourceKind::App { exe } => (0, exe.clone()),
+                AudioSourceKind::Input { device } => (1, device.clone().unwrap_or_default()),
+                AudioSourceKind::Output { device } => (2, device.clone().unwrap_or_default()),
+                AudioSourceKind::Except { exe } => (3, exe.clone()),
+            };
+            SourceRow { name: s.name.clone().into(), kind, target: target.into(), volume: s.volume, delay: s.delay_ms, pick: 0, mono: s.mono }
         })
         .collect()
 }
@@ -162,32 +227,18 @@ pub fn to_form(c: &Config) -> (Form, Vec<SourceRow>) {
         notifications: c.general.notifications,
         check_updates: c.general.check_updates,
     };
-    let rows = c
-        .audio
-        .sources
-        .iter()
-        .map(|s| {
-            let (kind, target) = match &s.kind {
-                AudioSourceKind::App { exe } => (0, exe.clone()),
-                AudioSourceKind::Input { device } => (1, device.clone().unwrap_or_default()),
-                AudioSourceKind::Output { device } => (2, device.clone().unwrap_or_default()),
-                AudioSourceKind::Except { exe } => (3, exe.clone()),
-            };
-            SourceRow { name: s.name.clone().into(), kind, target: target.into(), volume: s.volume, delay: s.delay_ms, pick: 0, mono: s.mono }
-        })
-        .collect();
-    (form, rows)
+    (form, rows_from(&c.audio.sources))
 }
 
 /// (form, righe) -> Config, partendo da `base` per i campi che la UI non espone.
-pub fn build_config(form: &Form, rows: &[SourceRow], base: &Config) -> Result<Config, Vec<Problem>> {
-    let (c, problems) = build_lenient(form, rows, base);
+pub fn build_config(form: &Form, rows: &[SourceRow], audio_rows: &[SourceRow], base: &Config) -> Result<Config, Vec<Problem>> {
+    let (c, problems) = build_lenient(form, rows, audio_rows, base);
     if problems.is_empty() { Ok(c) } else { Err(problems) }
 }
 
 /// Come [`build_config`] ma restituisce sempre una configurazione (con i campi errati ai valori
 /// di riserva) più i problemi: serve alla stima dal vivo mentre l'utente sta ancora scrivendo.
-pub fn build_lenient(form: &Form, rows: &[SourceRow], base: &Config) -> (Config, Vec<Problem>) {
+pub fn build_lenient(form: &Form, rows: &[SourceRow], audio_rows: &[SourceRow], base: &Config) -> (Config, Vec<Problem>) {
     let mut problems = Vec::new();
     let mut c = base.clone();
 
@@ -275,46 +326,13 @@ pub fn build_lenient(form: &Form, rows: &[SourceRow], base: &Config) -> (Config,
     }
     c.audio.process_events = form.process_events;
     c.audio.block_exclusive = form.block_exclusive;
-    if rows.len() > MAX_AUDIO_SOURCES {
-        problems.push(Problem::TooManySources);
+    c.audio.sources = parse_sources(0, rows, &mut problems);
+    let audio_sources = parse_sources(1, audio_rows, &mut problems);
+    // Come per le tracce: una configurazione senza elenco proprio per le clip audio resta senza
+    // finché coincide con quello delle clip video.
+    if c.audio.audio_clip_sources.is_some() || audio_sources != c.audio.sources {
+        c.audio.audio_clip_sources = Some(audio_sources);
     }
-    c.audio.sources = rows
-        .iter()
-        .enumerate()
-        .map(|(i, r)| {
-            let name = trimmed(&r.name);
-            let t = trimmed(&r.target);
-            if name.is_empty() {
-                problems.push(Problem::EmptySourceName(i));
-            }
-            let device = (!t.is_empty()).then(|| t.clone());
-            let kind = match r.kind {
-                1 => AudioSourceKind::Input { device },
-                2 => AudioSourceKind::Output { device },
-                3 => {
-                    if t.is_empty() {
-                        problems.push(Problem::EmptyAppExe(i));
-                    }
-                    AudioSourceKind::Except { exe: t }
-                }
-                _ => {
-                    if t.is_empty() {
-                        problems.push(Problem::EmptyAppExe(i));
-                    }
-                    AudioSourceKind::App { exe: t }
-                }
-            };
-            if !(-1000..=1000).contains(&r.delay) {
-                problems.push(Problem::BadDelay(i));
-            }
-            AudioSourceConfig {
-                volume: r.volume.clamp(0.0, 2.0),
-                delay_ms: r.delay.clamp(-1000, 1000),
-                mono: r.mono,
-                ..AudioSourceConfig::new(name, kind)
-            }
-        })
-        .collect();
 
     c.hotkeys.video = trimmed(&form.hotkey_video);
     c.hotkeys.audio = trimmed(&form.hotkey_audio);
@@ -485,7 +503,7 @@ pub fn estimate_ram_mb(c: &Config) -> f64 {
     };
     // Il buffer audio copre il maggiore tra N e M (solo M senza video).
     let audio_secs = if c.video.enabled { n.max(m) } else { m };
-    let tracks = c.audio.sources.len() as f64;
+    let tracks = c.audio.plan().tracks.len() as f64;
     let audio = tracks * AUDIO_MB_PER_MIN_PER_TRACK * audio_secs / 60.0;
     video + audio
 }
@@ -502,7 +520,7 @@ mod tests {
     fn default_config_round_trips() {
         let c = Config::default();
         let (f, r) = rows_of(&c);
-        assert_eq!(build_config(&f, &r, &c).unwrap(), c);
+        assert_eq!(build_config(&f, &r, &audio_rows(&c), &c).unwrap(), c);
     }
 
     #[test]
@@ -542,7 +560,7 @@ mod tests {
         c.general.start_as_admin = true;
         c.general.gpu_priority = "normal".into();
         let (f, r) = rows_of(&c);
-        assert_eq!(build_config(&f, &r, &c).unwrap(), c);
+        assert_eq!(build_config(&f, &r, &audio_rows(&c), &c).unwrap(), c);
     }
 
     #[test]
@@ -551,7 +569,7 @@ mod tests {
         c.audio.add_mix_track = true;
         let (mut f, r) = rows_of(&c);
         f.audio_mode = 1;
-        assert!(!build_config(&f, &r, &c).unwrap().audio.add_mix_track);
+        assert!(!build_config(&f, &r, &audio_rows(&c), &c).unwrap().audio.add_mix_track);
     }
 
     #[test]
@@ -566,14 +584,14 @@ mod tests {
         for _ in 0..7 {
             r.push(SourceRow { name: "x".into(), kind: 1, target: "".into(), volume: 1.0, delay: 0, pick: 0, mono: false });
         }
-        let p = build_config(&f, &r, &c).unwrap_err();
+        let p = build_config(&f, &r, &audio_rows(&c), &c).unwrap_err();
         for expected in [
             Problem::VideoSecondsZero,
             Problem::AudioSecondsZero,
             Problem::SameHotkey,
             Problem::BadBitrate,
             Problem::BadMaxMb,
-            Problem::TooManySources,
+            Problem::TooManySources(0),
         ] {
             assert!(p.contains(&expected), "manca {expected:?} in {p:?}");
         }
@@ -585,15 +603,34 @@ mod tests {
         let (mut f, r) = to_form(&c);
         // Clip audio in traccia unica: si scrive.
         f.audio_clip_mode = 1;
-        let saved = build_config(&f, &r, &c).unwrap();
+        let saved = build_config(&f, &r, &audio_rows(&c), &c).unwrap();
         assert_eq!(saved.audio.audio_clip, Some(TrackLayout { mode: TrackMode::Merged, add_mix_track: false }));
         assert_eq!(saved.audio.mode, TrackMode::Separate);
         // Cambia solo la video: la clip audio resta com'era nella finestra, non segue la video.
         let (mut f, r) = to_form(&c);
         f.audio_mode = 1;
-        let saved = build_config(&f, &r, &c).unwrap();
+        let saved = build_config(&f, &r, &audio_rows(&c), &c).unwrap();
         assert_eq!(saved.audio.layout(ClipKind::Audio).mode, TrackMode::Separate);
         assert_eq!(saved.audio.layout(ClipKind::Video).mode, TrackMode::Merged);
+    }
+
+    #[test]
+    fn audio_clip_sources_are_saved_only_when_they_differ() {
+        let c = Config::default();
+        let (f, r) = to_form(&c);
+        // Elenco audio uguale a quello video: la configurazione resta senza elenco proprio.
+        assert_eq!(build_config(&f, &r, &audio_rows(&c), &c).unwrap().audio.audio_clip_sources, None);
+        // Solo il microfono nelle clip audio: si scrive l'elenco proprio.
+        let saved = build_config(&f, &r, &audio_rows(&c)[1..], &c).unwrap();
+        let names = |l: &[AudioSourceConfig]| l.iter().map(|s| s.name.clone()).collect::<Vec<_>>();
+        assert_eq!(names(saved.audio.sources_for(ClipKind::Audio)), ["Microfono"]);
+        assert_eq!(names(saved.audio.sources_for(ClipKind::Video)), ["Sistema", "Microfono"]);
+        // Riaperta, la finestra mostra i due elenchi com'erano.
+        assert_eq!(audio_rows(&saved).len(), 1);
+        // Errori nell'elenco audio indicati come tali.
+        let mut bad = audio_rows(&c);
+        bad[0].name = "".into();
+        assert!(build_config(&f, &r, &bad, &c).unwrap_err().contains(&Problem::EmptySourceName(1, 0)));
     }
 
     #[test]
@@ -631,13 +668,13 @@ mod tests {
         f.source_kind = 3;
         f.source_target = "  ".into();
         r.push(SourceRow { name: " ".into(), kind: 0, target: "".into(), volume: 1.0, delay: 0, pick: 0, mono: false });
-        let p = build_config(&f, &r, &c).unwrap_err();
+        let p = build_config(&f, &r, &audio_rows(&c), &c).unwrap_err();
         assert!(p.contains(&Problem::EmptyVideoTarget));
-        assert!(p.contains(&Problem::EmptySourceName(2)));
-        assert!(p.contains(&Problem::EmptyAppExe(2)));
+        assert!(p.contains(&Problem::EmptySourceName(0, 2)));
+        assert!(p.contains(&Problem::EmptyAppExe(0, 2)));
         f.source_kind = 1;
         f.source_target = "x".into();
-        assert!(build_config(&f, &r, &c).unwrap_err().contains(&Problem::BadMonitor));
+        assert!(build_config(&f, &r, &audio_rows(&c), &c).unwrap_err().contains(&Problem::BadMonitor));
     }
 
     #[test]
@@ -646,18 +683,18 @@ mod tests {
         c.hotkeys.video_pad = "Back+A".into();
         c.hotkeys.audio_pad = "LB+RB+Y".into();
         let (f, r) = rows_of(&c);
-        assert_eq!(build_config(&f, &r, &c).unwrap(), c);
+        assert_eq!(build_config(&f, &r, &audio_rows(&c), &c).unwrap(), c);
         let (mut f, r) = rows_of(&Config::default());
-        assert!(build_config(&f, &r, &c).is_ok(), "campi vuoti ammessi");
+        assert!(build_config(&f, &r, &audio_rows(&c), &c).is_ok(), "campi vuoti ammessi");
         f.pad_video = "dpadup+Start".into();
-        assert!(build_config(&f, &r, &c).is_ok(), "maiuscole indifferenti");
+        assert!(build_config(&f, &r, &audio_rows(&c), &c).is_ok(), "maiuscole indifferenti");
         f.pad_video = "Back+Z".into();
-        assert!(build_config(&f, &r, &c).unwrap_err().contains(&Problem::BadPad(0)));
+        assert!(build_config(&f, &r, &audio_rows(&c), &c).unwrap_err().contains(&Problem::BadPad(0)));
         f.pad_video = "Back+A".into();
         f.pad_audio = "a+BACK".into();
-        assert!(build_config(&f, &r, &c).unwrap_err().contains(&Problem::SamePad));
+        assert!(build_config(&f, &r, &audio_rows(&c), &c).unwrap_err().contains(&Problem::SamePad));
         f.pad_audio = "Back+".into();
-        assert!(build_config(&f, &r, &c).unwrap_err().contains(&Problem::BadPad(1)));
+        assert!(build_config(&f, &r, &audio_rows(&c), &c).unwrap_err().contains(&Problem::BadPad(1)));
     }
 
     #[test]
@@ -667,12 +704,12 @@ mod tests {
         c.audio.sources[1].delay_ms = 1000;
         let (f, mut r) = rows_of(&c);
         assert_eq!((r[0].delay, r[1].delay), (-250, 1000));
-        assert_eq!(build_config(&f, &r, &c).unwrap(), c);
+        assert_eq!(build_config(&f, &r, &audio_rows(&c), &c).unwrap(), c);
         r[0].delay = -1001;
-        assert!(build_config(&f, &r, &c).unwrap_err().contains(&Problem::BadDelay(0)));
+        assert!(build_config(&f, &r, &audio_rows(&c), &c).unwrap_err().contains(&Problem::BadDelay(0, 0)));
         r[0].delay = 0;
         r[1].delay = 1001;
-        assert!(build_config(&f, &r, &c).unwrap_err().contains(&Problem::BadDelay(1)));
+        assert!(build_config(&f, &r, &audio_rows(&c), &c).unwrap_err().contains(&Problem::BadDelay(0, 1)));
     }
 
     #[test]
@@ -688,7 +725,7 @@ mod tests {
             let mut c = Config::default();
             c.clips.audio_format = fmt;
             let (f, r) = rows_of(&c);
-            assert_eq!(build_config(&f, &r, &c).unwrap().clips.audio_format, fmt);
+            assert_eq!(build_config(&f, &r, &audio_rows(&c), &c).unwrap().clips.audio_format, fmt);
         }
     }
 

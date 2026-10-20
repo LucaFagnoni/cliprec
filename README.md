@@ -114,13 +114,13 @@ Per pubblicare una versione: alzare `version` in `Cargo.toml` del workspace, poi
 - **Giochi avviati come amministratore**: mentre un programma elevato è in primo piano le hotkey
   della tastiera passano a `RegisterHotKey`, che Windows consegna anche da lì. Restano scoperte le
   hotkey col mouse (o una combinazione già presa da un altro programma): ClipRec lo segnala, e la
-  soluzione è «Avvia come amministratore» (Impostazioni → Avanzate) o «Riavvia come amministratore».
+  soluzione è «Avvia come amministratore» (Impostazioni → Generale) o «Riavvia come amministratore».
 - **Audio in modalità esclusiva** (WASAPI exclusive, es. osu!): l'audio esclusivo non passa dal
   mixer e nessun programma lo può registrare. Con «Blocca la modalità esclusiva» (attiva di
   serie) ClipRec toglie ai dispositivi che registra il permesso di essere presi in esclusiva, così
   il gioco usa la modalità condivisa; un gioco già aperto va riavviato una volta.
 - **Router audio** (SteelSeries Sonar, Voicemeeter, Wave Link): rifanno il mix su dispositivi
-  virtuali. «Aggiungi i canali del router» (Impostazioni → Audio) registra ogni canale (gioco, chat,
+  virtuali. «Aggiungi i canali del router» (Impostazioni → Clip video o Clip audio, «Sorgenti audio») registra ogni canale (gioco, chat,
   media) in una traccia, senza il microfono. «Tutto tranne un'app» registra i flussi di tutti i
   programmi e quindi anche il mix del router: con un router meglio i canali.
 - **Firma del codice**: gli exe non sono firmati (nessun certificato): al primo avvio SmartScreen

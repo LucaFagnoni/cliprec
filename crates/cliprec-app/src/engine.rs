@@ -194,9 +194,17 @@ impl Session {
         }
         let sink = buffer.clone() as Arc<dyn AudioTrackSink>;
         let audio = match overrides.audio {
-            // Sorgenti di prova al posto di quelle catturate dal piano della configurazione.
+            // Sorgenti di prova al posto di quelle catturate dal piano della configurazione; se sono
+            // in numero diverso, una traccia per sorgente o un mix come le clip video.
             Some(sources) => {
-                cliprec_audio::AudioEngine::with_plan(sources, &[], &[], &[], &config.audio.plan().tracks, sink).map(Some)
+                let plan = config.audio.plan();
+                if plan.captures.len() == sources.len() {
+                    cliprec_audio::AudioEngine::with_plan(sources, &[], &[], &[], &plan.tracks, sink)
+                } else {
+                    let layout = config.audio.layout(ClipKind::Video);
+                    cliprec_audio::AudioEngine::with_sources(sources, &[], &[], &[], layout.mode, layout.add_mix_track, sink)
+                }
+                .map(Some)
             }
             None if !config.audio.plan().captures.is_empty() => cliprec_audio::AudioEngine::start(&config.audio, sink).map(Some),
             None => Ok(None),

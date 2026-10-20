@@ -162,7 +162,7 @@ struct Lists {
     outputs: Vec<Choice>,
 }
 
-/// Menu della scheda Audio con la prima voce nella lingua attuale: «Scegli…» in testa alle app, il
+/// Menu degli elenchi delle sorgenti con la prima voce nella lingua attuale: «Scegli…» in testa alle app, il
 /// predefinito di Windows in testa ai dispositivi (le righe mostrano il nome, non l'ID).
 fn set_audio_menus(ui: &SettingsWindow, lists: &Lists) {
     let t = ui.global::<T>();
@@ -295,8 +295,11 @@ fn main() -> anyhow::Result<()> {
     set_lang(&ui, lang);
     ui.set_f(form);
     refresh_codecs(&ui, lang);
-    let rows = Rc::new(VecModel::from(rows_vec));
-    ui.set_sources(ModelRc::from(rows.clone()));
+    // Elenchi delle sorgenti: [clip video, clip solo audio], come il primo argomento dei callback.
+    let lists_rows: Rc<[Rc<VecModel<SourceRow>>; 2]> =
+        Rc::new([Rc::new(VecModel::from(rows_vec)), Rc::new(VecModel::from(model::audio_rows(&base)))]);
+    ui.set_sources(ModelRc::from(lists_rows[0].clone()));
+    ui.set_audio_sources(ModelRc::from(lists_rows[1].clone()));
     if let Some(e) = load_error {
         set_message(&ui, &e, true);
     }
@@ -312,9 +315,11 @@ fn main() -> anyhow::Result<()> {
     ui.set_windows_list(labels(&lists.windows));
     ui.set_apps(labels(&lists.apps));
     set_audio_menus(&ui, &lists);
-    for i in 0..rows.row_count() {
-        if let Some(r) = rows.row_data(i) {
-            rows.set_row_data(i, with_pick(r, &lists));
+    for rows in lists_rows.iter() {
+        for i in 0..rows.row_count() {
+            if let Some(r) = rows.row_data(i) {
+                rows.set_row_data(i, with_pick(r, &lists));
+            }
         }
     }
 
@@ -331,18 +336,24 @@ fn main() -> anyhow::Result<()> {
         }
     });
 
+    // Elenco del callback: 0 = clip video, 1 = clip solo audio.
+    let list_of = {
+        let lists_rows = lists_rows.clone();
+        move |list: i32| lists_rows[usize::from(list == 1)].clone()
+    };
     ui.on_source_changed({
-        let rows = rows.clone();
+        let list_of = list_of.clone();
         let lists = lists.clone();
-        move |i, row| {
+        move |list, i, row| {
             if let Ok(i) = usize::try_from(i) {
-                rows.set_row_data(i, with_pick(row, &lists));
+                list_of(list).set_row_data(i, with_pick(row, &lists));
             }
         }
     });
     ui.on_source_add({
-        let rows = rows.clone();
-        move || {
+        let list_of = list_of.clone();
+        move |list| {
+            let rows = list_of(list);
             if rows.row_count() < cliprec_core::config::MAX_AUDIO_SOURCES {
                 rows.push(SourceRow { name: "".into(), kind: 0, target: "".into(), volume: 1.0, delay: 0, pick: 0, mono: false });
             }
@@ -359,13 +370,23 @@ fn main() -> anyhow::Result<()> {
             model::router_channels(&outputs, default_output.as_deref(), &present)
         }
     };
-    ui.set_router_available(!router(&rows).is_empty());
+    let show_router = {
+        let lists_rows = lists_rows.clone();
+        let router = router.clone();
+        move |ui: &SettingsWindow| {
+            ui.set_router_available(!router(&lists_rows[0]).is_empty());
+            ui.set_router_available_audio(!router(&lists_rows[1]).is_empty());
+        }
+    };
+    show_router(&ui);
     ui.on_router_add({
-        let rows = rows.clone();
+        let list_of = list_of.clone();
         let lists = lists.clone();
         let w = ui.as_weak();
         let router = router.clone();
-        move || {
+        let show_router = show_router.clone();
+        move |list| {
+            let rows = list_of(list);
             for (name, id) in router(&rows) {
                 if rows.row_count() >= cliprec_core::config::MAX_AUDIO_SOURCES {
                     break;
@@ -374,13 +395,14 @@ fn main() -> anyhow::Result<()> {
                 rows.push(with_pick(row, &lists));
             }
             if let Some(ui) = w.upgrade() {
-                ui.set_router_available(!router(&rows).is_empty());
+                show_router(&ui);
             }
         }
     });
     ui.on_source_remove({
-        let rows = rows.clone();
-        move |i| {
+        let list_of = list_of.clone();
+        move |list, i| {
+            let rows = list_of(list);
             if let Ok(i) = usize::try_from(i)
                 && i < rows.row_count()
             {
@@ -389,8 +411,9 @@ fn main() -> anyhow::Result<()> {
         }
     });
     ui.on_source_move({
-        let rows = rows.clone();
-        move |i, delta| {
+        let list_of = list_of.clone();
+        move |list, i, delta| {
+            let rows = list_of(list);
             let (Ok(a), Ok(b)) = (usize::try_from(i), usize::try_from(i + delta)) else { return };
             if let (Some(ra), Some(rb)) = (rows.row_data(a), rows.row_data(b)) {
                 rows.set_row_data(a, rb);
@@ -399,18 +422,19 @@ fn main() -> anyhow::Result<()> {
         }
     });
     ui.on_source_pick({
-        let rows = rows.clone();
+        let list_of = list_of.clone();
         let lists = lists.clone();
         // `idx` è la voce del menu: la prima è «Scegli…» per le app e il predefinito per i dispositivi.
-        move |i, kind, idx| {
-            let list = match kind {
+        move |list, i, kind, idx| {
+            let rows = list_of(list);
+            let choices = match kind {
                 1 => &lists.inputs,
                 2 => &lists.outputs,
                 _ => &lists.apps,
             };
             let (Ok(i), Ok(idx)) = (usize::try_from(i), usize::try_from(idx)) else { return };
             let Some(mut row) = rows.row_data(i) else { return };
-            match idx.checked_sub(1).and_then(|k| list.get(k)) {
+            match idx.checked_sub(1).and_then(|k| choices.get(k)) {
                 Some(choice) => {
                     row.target = choice.value.as_str().into();
                     if row.name.trim().is_empty() {
@@ -501,13 +525,13 @@ fn main() -> anyhow::Result<()> {
 
     ui.on_save({
         let w = ui.as_weak();
-        let rows = rows.clone();
+        let lists_rows = lists_rows.clone();
         let base = base.clone();
         let path = path.clone();
         move || {
             let Some(ui) = w.upgrade() else { return };
             let lang = current_lang();
-            let cfg = match model::build_config(&ui.get_f(), &current_sources(&rows), &base.borrow()) {
+            let cfg = match model::build_config(&ui.get_f(), &current_sources(&lists_rows[0]), &current_sources(&lists_rows[1]), &base.borrow()) {
                 Ok(c) => c,
                 Err(problems) => {
                     let text: Vec<String> = problems.iter().map(|p| i18n::problem_text(lang, p)).collect();
@@ -580,12 +604,12 @@ fn main() -> anyhow::Result<()> {
     let tick = Timer::default();
     tick.start(TimerMode::Repeated, Duration::from_millis(400), {
         let w = ui.as_weak();
-        let rows = rows.clone();
+        let lists_rows = lists_rows.clone();
         let base = base.clone();
         move || {
             let Some(ui) = w.upgrade() else { return };
             let lang = current_lang();
-            let (c, _) = model::build_lenient(&ui.get_f(), &current_sources(&rows), &base.borrow());
+            let (c, _) = model::build_lenient(&ui.get_f(), &current_sources(&lists_rows[0]), &current_sources(&lists_rows[1]), &base.borrow());
             refresh_codecs(&ui, lang);
             check_pending_test(&ui);
             ui.set_ram_estimate(ram_text(lang, &c).into());

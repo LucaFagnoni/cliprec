@@ -9,26 +9,23 @@ export global T {
     in property <string> app-subtitle;
     in property <string> tab-video;
     in property <string> tab-audio;
-    in property <string> tab-hotkeys;
-    in property <string> tab-saving;
-    in property <string> tab-advanced;
     in property <string> tab-about;
     in property <string> video-subtitle;
     in property <string> audio-subtitle;
-    in property <string> hotkeys-subtitle;
-    in property <string> saving-subtitle;
-    in property <string> advanced-subtitle;
     in property <string> about-subtitle;
     in property <string> sec-recording;
     in property <string> sec-quality;
     in property <string> sec-capture;
-    in property <string> sec-tracks;
-    in property <string> sec-tracks-audio;
+    in property <string> sec-tracks-short;
+    in property <string> sec-length-files;
+    in property <string> sec-length-format;
+    in property <string> sec-shortcuts;
+    in property <string> tab-audio-clip;
+    in property <string> audio-clip-subtitle;
+    in property <string> tab-general;
+    in property <string> general-subtitle;
     in property <string> sec-sources;
     in property <string> sec-apps;
-    in property <string> sec-keyboard;
-    in property <string> sec-controller;
-    in property <string> sec-length;
     in property <string> sec-files;
     in property <string> sec-startup;
     in property <string> sec-notify;
@@ -452,6 +449,130 @@ component HotkeyField inherits Rectangle {
     }
 }
 
+// Elenco di sorgenti audio (clip video o clip solo audio), usato due volte.
+component SourceList inherits VerticalLayout {
+    in property <[SourceRow]> rows;
+    in property <[string]> app-choices;
+    in property <[string]> inputs;
+    in property <[string]> outputs;
+    in property <bool> router-available;
+    callback changed(int, SourceRow);
+    callback add();
+    callback remove(int);
+    callback move(int, int);
+    callback pick(int, int, int);
+    callback router-add();
+    padding-top: 6px;
+    spacing: 8px;
+    for r[i] in root.rows: Card {
+        VerticalLayout {
+            padding: 14px;
+            spacing: 10px;
+            HorizontalLayout {
+                spacing: 8px;
+                Rectangle {
+                    width: 24px;
+                    height: 24px;
+                    y: (parent.height - self.height) / 2;
+                    border-radius: 12px;
+                    background: Theme.selected;
+                    Text { text: i + 1; font-size: 12px; color: Theme.text-secondary; }
+                }
+                LineEdit {
+                    text: r.name;
+                    placeholder-text: T.placeholder-name;
+                    width: 220px;
+                    edited(t) => { root.changed(i, { name: t, kind: r.kind, target: r.target, volume: r.volume, delay: r.delay, pick: r.pick, mono: r.mono }); }
+                }
+                ComboBox {
+                    model: [T.kind-app, T.kind-input, T.kind-output, T.kind-except];
+                    current-index: r.kind;
+                    width: 220px;
+                    selected(v) => {
+                        root.changed(i, { name: r.name, kind: self.current-index, target: "", volume: r.volume, delay: r.delay, pick: 0, mono: r.mono });
+                    }
+                }
+                Rectangle { horizontal-stretch: 1; }
+                IconButton { icon: "\u{E70E}"; enabled: i > 0; clicked => { root.move(i, -1); } }
+                IconButton { icon: "\u{E70D}"; enabled: i < root.rows.length - 1; clicked => { root.move(i, 1); } }
+                IconButton { icon: "\u{E74D}"; clicked => { root.remove(i); } }
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                // App e «tutto tranne un'app»: eseguibile scritto o scelto tra le app aperte.
+                if r.kind == 0 || r.kind == 3: HorizontalLayout {
+                    spacing: 8px;
+                    horizontal-stretch: 1;
+                    LineEdit {
+                        text: r.target;
+                        placeholder-text: T.placeholder-app;
+                        horizontal-stretch: 1;
+                        edited(t) => { root.changed(i, { name: r.name, kind: r.kind, target: t, volume: r.volume, delay: r.delay, pick: r.pick, mono: r.mono }); }
+                    }
+                    ComboBox {
+                        model: root.app-choices;
+                        current-index: 0;
+                        width: 200px;
+                        selected(v) => {
+                            if (self.current-index > 0) {
+                                root.pick(i, r.kind, self.current-index);
+                            }
+                            self.current-index = 0;
+                        }
+                    }
+                }
+                // Ingresso e uscita: il dispositivo per nome, il predefinito di Windows in testa.
+                if r.kind == 1 || r.kind == 2: HorizontalLayout {
+                    spacing: 8px;
+                    horizontal-stretch: 1;
+                    ComboBox {
+                        model: r.kind == 1 ? root.inputs : root.outputs;
+                        current-index: r.pick;
+                        horizontal-stretch: 1;
+                        selected(v) => { root.pick(i, r.kind, self.current-index); }
+                    }
+                    if r.pick < 0: Text { text: T.device-missing; color: Theme.error; vertical-alignment: center; }
+                }
+            }
+            // Volume e ritardo.
+            HorizontalLayout {
+                spacing: 8px;
+                Text { text: T.col-volume; color: Theme.text-secondary; vertical-alignment: center; }
+                Slider {
+                    minimum: 0;
+                    maximum: 200;
+                    value: r.volume * 100;
+                    width: 200px;
+                    changed(v) => { root.changed(i, { name: r.name, kind: r.kind, target: r.target, volume: Math.round(v) / 100, delay: r.delay, pick: r.pick, mono: r.mono }); }
+                }
+                Text { text: Math.round(r.volume * 100) + "%"; width: 40px; color: Theme.text; vertical-alignment: center; }
+                Rectangle { horizontal-stretch: 1; }
+                Text { text: T.mono; color: Theme.text-secondary; vertical-alignment: center; }
+                Switch {
+                    checked: r.mono;
+                    toggled => { root.changed(i, { name: r.name, kind: r.kind, target: r.target, volume: r.volume, delay: r.delay, pick: r.pick, mono: self.checked }); }
+                }
+                Rectangle { width: 16px; }
+                Text { text: T.col-delay; color: Theme.text-secondary; vertical-alignment: center; }
+                SpinBox {
+                    minimum: -1000;
+                    maximum: 1000;
+                    step-size: 10;
+                    value: r.delay;
+                    width: 110px;
+                    edited(v) => { root.changed(i, { name: r.name, kind: r.kind, target: r.target, volume: r.volume, delay: v, pick: r.pick, mono: r.mono }); }
+                }
+                Text { text: "ms"; color: Theme.text-secondary; vertical-alignment: center; }
+            }
+        }
+    }
+    HorizontalLayout {
+        alignment: start;
+        Button { text: T.add-source; enabled: root.rows.length < 8; clicked => { root.add(); } }
+        if root.router-available: Button { text: T.add-router; enabled: root.rows.length < 8; clicked => { root.router-add(); } }
+    }
+}
+
 export component SettingsWindow inherits Window {
     title: T.window-title;
     icon: @image-url("../../../assets/icon/cliprec-256.png");
@@ -462,7 +583,9 @@ export component SettingsWindow inherits Window {
     background: Theme.window;
 
     in-out property <Form> f;
+    // Sorgenti delle clip video e delle clip solo audio.
     in-out property <[SourceRow]> sources;
+    in-out property <[SourceRow]> audio-sources;
     in property <[string]> monitors;
     in property <[string]> windows-list;
     in property <[string]> apps;
@@ -488,13 +611,15 @@ export component SettingsWindow inherits Window {
     callback test-clip();
     callback browse-folder();
     callback language-changed();
-    callback source-changed(int, SourceRow);
-    callback source-add();
-    callback router-add();
+    // Il primo argomento è l'elenco: 0 = clip video, 1 = clip solo audio.
+    callback source-changed(int, int, SourceRow);
+    callback source-add(int);
+    callback router-add(int);
     in property <bool> router-available;
-    callback source-remove(int);
-    callback source-move(int, int);
-    callback source-pick(int, int, int);
+    in property <bool> router-available-audio;
+    callback source-remove(int, int);
+    callback source-move(int, int, int);
+    callback source-pick(int, int, int, int);
     callback video-target-pick(int);
     callback codec-picked(int);
     callback hotkey-key(int, string, bool, bool, bool, bool) -> bool;
@@ -525,11 +650,10 @@ export component SettingsWindow inherits Window {
                 }
             }
             NavItem { icon: "\u{E714}"; text: T.tab-video; selected: root.page == 0; clicked => { root.page = 0; } }
-            NavItem { icon: "\u{E767}"; text: T.tab-audio; selected: root.page == 1; clicked => { root.page = 1; } }
-            NavItem { icon: "\u{E765}"; text: T.tab-hotkeys; selected: root.page == 2; clicked => { root.page = 2; } }
-            NavItem { icon: "\u{E74E}"; text: T.tab-saving; selected: root.page == 3; clicked => { root.page = 3; } }
-            NavItem { icon: "\u{E713}"; text: T.tab-advanced; selected: root.page == 4; clicked => { root.page = 4; } }
-            NavItem { icon: "\u{E946}"; text: T.tab-about; selected: root.page == 5; clicked => { root.page = 5; } }
+            NavItem { icon: "\u{E8D6}"; text: T.tab-audio-clip; selected: root.page == 1; clicked => { root.page = 1; } }
+            NavItem { icon: "\u{E767}"; text: T.tab-audio; selected: root.page == 2; clicked => { root.page = 2; } }
+            NavItem { icon: "\u{E713}"; text: T.tab-general; selected: root.page == 3; clicked => { root.page = 3; } }
+            NavItem { icon: "\u{E946}"; text: T.tab-about; selected: root.page == 4; clicked => { root.page = 4; } }
             Rectangle { vertical-stretch: 1; }
             // Stato dal vivo (named pipe verso il core) e clip di prova.
             Card {
@@ -732,13 +856,28 @@ export component SettingsWindow inherits Window {
                         Switch { checked <=> root.f.adaptive-quantization; }
                     }
                 }
-            }
-
-            if root.page == 1: Page {
-                vertical-stretch: 1;
-                title: T.tab-audio;
-                subtitle: T.audio-subtitle;
-                SectionTitle { text: T.sec-tracks; }
+                SectionTitle { text: T.sec-length-files; }
+                Card {
+                    SettingRow {
+                        title: T.clip-video-seconds;
+                        description: T.clip-video-seconds-desc;
+                        SpinBox { minimum: 1; maximum: 3600; value <=> root.f.video-seconds; width: 140px; }
+                        Text { text: T.seconds; color: Theme.text-secondary; vertical-alignment: center; }
+                    }
+                    Divider { }
+                    SettingRow {
+                        title: T.container;
+                        description: T.container-desc;
+                        ComboBox { model: ["MP4", "MKV"]; current-index <=> root.f.container; width: 240px; }
+                    }
+                    Divider { }
+                    SettingRow {
+                        title: T.audio-bitrate;
+                        description: T.audio-bitrate-desc;
+                        ComboBox { model: ["96 kbit/s", "128 kbit/s", "160 kbit/s", "192 kbit/s", "256 kbit/s", "320 kbit/s"]; current-index <=> root.f.audio-bitrate; width: 240px; }
+                    }
+                }
+                SectionTitle { text: T.sec-tracks-short; }
                 Card {
                     SettingRow {
                         title: T.audio-mode;
@@ -753,7 +892,63 @@ export component SettingsWindow inherits Window {
                         Switch { checked <=> root.f.add-mix; enabled: root.f.audio-mode == 0; }
                     }
                 }
-                SectionTitle { text: T.sec-tracks-audio; }
+                SectionTitle { text: T.sec-sources; }
+                Text { text: T.sources-hint; font-size: 12px; color: Theme.text-secondary; wrap: word-wrap; }
+                SourceList {
+                    rows: root.sources;
+                    app-choices: root.app-choices;
+                    inputs: root.inputs;
+                    outputs: root.outputs;
+                    router-available: root.router-available;
+                    changed(i, r) => { root.source-changed(0, i, r); }
+                    add => { root.source-add(0); }
+                    remove(i) => { root.source-remove(0, i); }
+                    move(i, d) => { root.source-move(0, i, d); }
+                    pick(i, k, x) => { root.source-pick(0, i, k, x); }
+                    router-add => { root.router-add(0); }
+                }
+                SectionTitle { text: T.sec-shortcuts; }
+                Card {
+                    SettingRow {
+                        title: T.hotkey-video;
+                        description: T.hotkey-video-desc;
+                        HotkeyField {
+                            value: root.f.hotkey-video;
+                            key(t, c, a, s, m) => { root.hotkey-key(0, t, c, a, s, m) }
+                            mouse(b, c, a, s, m) => { root.hotkey-mouse(0, b, c, a, s, m) }
+                        }
+                        IconButton { icon: "\u{E711}"; enabled: root.f.hotkey-video != ""; clicked => { root.f.hotkey-video = ""; } }
+                    }
+                    Divider { }
+                    SettingRow {
+                        title: T.pad-video;
+                        LineEdit { text <=> root.f.pad-video; placeholder-text: "Back+A"; width: 220px; }
+                    }
+                }
+                Text { text: T.hotkey-hint; font-size: 12px; color: Theme.text-secondary; wrap: word-wrap; }
+                if root.hotkey-warning != "": Text { text: root.hotkey-warning; font-size: 12px; color: Theme.warning; wrap: word-wrap; }
+                Text { text: T.pad-hint; font-size: 12px; color: Theme.text-secondary; wrap: word-wrap; }
+            }
+
+            if root.page == 1: Page {
+                vertical-stretch: 1;
+                title: T.tab-audio-clip;
+                subtitle: T.audio-clip-subtitle;
+                SectionTitle { text: T.sec-length-format; }
+                Card {
+                    SettingRow {
+                        title: T.clip-audio-seconds;
+                        description: T.clip-audio-seconds-desc;
+                        SpinBox { minimum: 1; maximum: 7200; value <=> root.f.audio-seconds; width: 140px; }
+                        Text { text: T.seconds; color: Theme.text-secondary; vertical-alignment: center; }
+                    }
+                    Divider { }
+                    SettingRow {
+                        title: T.audio-format;
+                        ComboBox { model: [T.fmt-flac, T.fmt-wav, T.fmt-mka, T.fmt-polywav, T.fmt-opus, T.fmt-aac, T.fmt-mp3]; current-index <=> root.f.audio-format; width: 240px; }
+                    }
+                }
+                SectionTitle { text: T.sec-tracks-short; }
                 Card {
                     SettingRow {
                         title: T.audio-mode;
@@ -770,117 +965,46 @@ export component SettingsWindow inherits Window {
                 }
                 SectionTitle { text: T.sec-sources; }
                 Text { text: T.sources-hint; font-size: 12px; color: Theme.text-secondary; wrap: word-wrap; }
-                VerticalLayout {
-                    padding-top: 6px;
-                    spacing: 8px;
-                    for r[i] in root.sources: Card {
-                        VerticalLayout {
-                            padding: 14px;
-                            spacing: 10px;
-                            HorizontalLayout {
-                                spacing: 8px;
-                                Rectangle {
-                                    width: 24px;
-                                    height: 24px;
-                                    y: (parent.height - self.height) / 2;
-                                    border-radius: 12px;
-                                    background: Theme.selected;
-                                    Text { text: i + 1; font-size: 12px; color: Theme.text-secondary; }
-                                }
-                                LineEdit {
-                                    text: r.name;
-                                    placeholder-text: T.placeholder-name;
-                                    width: 220px;
-                                    edited(t) => { root.source-changed(i, { name: t, kind: r.kind, target: r.target, volume: r.volume, delay: r.delay, pick: r.pick, mono: r.mono }); }
-                                }
-                                ComboBox {
-                                    model: [T.kind-app, T.kind-input, T.kind-output, T.kind-except];
-                                    current-index: r.kind;
-                                    width: 220px;
-                                    selected(v) => {
-                                        root.source-changed(i, { name: r.name, kind: self.current-index, target: "", volume: r.volume, delay: r.delay, pick: 0, mono: r.mono });
-                                    }
-                                }
-                                Rectangle { horizontal-stretch: 1; }
-                                IconButton { icon: "\u{E70E}"; enabled: i > 0; clicked => { root.source-move(i, -1); } }
-                                IconButton { icon: "\u{E70D}"; enabled: i < root.sources.length - 1; clicked => { root.source-move(i, 1); } }
-                                IconButton { icon: "\u{E74D}"; clicked => { root.source-remove(i); } }
-                            }
-                            HorizontalLayout {
-                                spacing: 8px;
-                                // App e «tutto tranne un'app»: eseguibile scritto o scelto tra le app aperte.
-                                if r.kind == 0 || r.kind == 3: HorizontalLayout {
-                                    spacing: 8px;
-                                    horizontal-stretch: 1;
-                                    LineEdit {
-                                        text: r.target;
-                                        placeholder-text: T.placeholder-app;
-                                        horizontal-stretch: 1;
-                                        edited(t) => { root.source-changed(i, { name: r.name, kind: r.kind, target: t, volume: r.volume, delay: r.delay, pick: r.pick, mono: r.mono }); }
-                                    }
-                                    ComboBox {
-                                        model: root.app-choices;
-                                        current-index: 0;
-                                        width: 200px;
-                                        selected(v) => {
-                                            if (self.current-index > 0) {
-                                                root.source-pick(i, r.kind, self.current-index);
-                                            }
-                                            self.current-index = 0;
-                                        }
-                                    }
-                                }
-                                // Ingresso e uscita: il dispositivo per nome, il predefinito di Windows in testa.
-                                if r.kind == 1 || r.kind == 2: HorizontalLayout {
-                                    spacing: 8px;
-                                    horizontal-stretch: 1;
-                                    ComboBox {
-                                        model: r.kind == 1 ? root.inputs : root.outputs;
-                                        current-index: r.pick;
-                                        horizontal-stretch: 1;
-                                        selected(v) => { root.source-pick(i, r.kind, self.current-index); }
-                                    }
-                                    if r.pick < 0: Text { text: T.device-missing; color: Theme.error; vertical-alignment: center; }
-                                }
-                            }
-                            // Volume e ritardo.
-                            HorizontalLayout {
-                                spacing: 8px;
-                                Text { text: T.col-volume; color: Theme.text-secondary; vertical-alignment: center; }
-                                Slider {
-                                    minimum: 0;
-                                    maximum: 200;
-                                    value: r.volume * 100;
-                                    width: 200px;
-                                    changed(v) => { root.source-changed(i, { name: r.name, kind: r.kind, target: r.target, volume: Math.round(v) / 100, delay: r.delay, pick: r.pick, mono: r.mono }); }
-                                }
-                                Text { text: Math.round(r.volume * 100) + "%"; width: 40px; color: Theme.text; vertical-alignment: center; }
-                                Rectangle { horizontal-stretch: 1; }
-                                Text { text: T.mono; color: Theme.text-secondary; vertical-alignment: center; }
-                                Switch {
-                                    checked: r.mono;
-                                    toggled => { root.source-changed(i, { name: r.name, kind: r.kind, target: r.target, volume: r.volume, delay: r.delay, pick: r.pick, mono: self.checked }); }
-                                }
-                                Rectangle { width: 16px; }
-                                Text { text: T.col-delay; color: Theme.text-secondary; vertical-alignment: center; }
-                                SpinBox {
-                                    minimum: -1000;
-                                    maximum: 1000;
-                                    step-size: 10;
-                                    value: r.delay;
-                                    width: 110px;
-                                    edited(v) => { root.source-changed(i, { name: r.name, kind: r.kind, target: r.target, volume: r.volume, delay: v, pick: r.pick, mono: r.mono }); }
-                                }
-                                Text { text: "ms"; color: Theme.text-secondary; vertical-alignment: center; }
-                            }
+                SourceList {
+                    rows: root.audio-sources;
+                    app-choices: root.app-choices;
+                    inputs: root.inputs;
+                    outputs: root.outputs;
+                    router-available: root.router-available-audio;
+                    changed(i, r) => { root.source-changed(1, i, r); }
+                    add => { root.source-add(1); }
+                    remove(i) => { root.source-remove(1, i); }
+                    move(i, d) => { root.source-move(1, i, d); }
+                    pick(i, k, x) => { root.source-pick(1, i, k, x); }
+                    router-add => { root.router-add(1); }
+                }
+                SectionTitle { text: T.sec-shortcuts; }
+                Card {
+                    SettingRow {
+                        title: T.hotkey-audio;
+                        description: T.hotkey-audio-desc;
+                        HotkeyField {
+                            value: root.f.hotkey-audio;
+                            key(t, c, a, s, m) => { root.hotkey-key(1, t, c, a, s, m) }
+                            mouse(b, c, a, s, m) => { root.hotkey-mouse(1, b, c, a, s, m) }
                         }
+                        IconButton { icon: "\u{E711}"; enabled: root.f.hotkey-audio != ""; clicked => { root.f.hotkey-audio = ""; } }
                     }
-                    HorizontalLayout {
-                        alignment: start;
-                        Button { text: T.add-source; enabled: root.sources.length < 8; clicked => { root.source-add(); } }
-                        if root.router-available: Button { text: T.add-router; enabled: root.sources.length < 8; clicked => { root.router-add(); } }
+                    Divider { }
+                    SettingRow {
+                        title: T.pad-audio;
+                        LineEdit { text <=> root.f.pad-audio; placeholder-text: "LB+RB+Y"; width: 220px; }
                     }
                 }
+                Text { text: T.hotkey-hint; font-size: 12px; color: Theme.text-secondary; wrap: word-wrap; }
+                if root.hotkey-warning != "": Text { text: root.hotkey-warning; font-size: 12px; color: Theme.warning; wrap: word-wrap; }
+                Text { text: T.pad-hint; font-size: 12px; color: Theme.text-secondary; wrap: word-wrap; }
+            }
+
+            if root.page == 2: Page {
+                vertical-stretch: 1;
+                title: T.tab-audio;
+                subtitle: T.audio-subtitle;
                 SectionTitle { text: T.sec-apps; }
                 Card {
                     SettingRow {
@@ -896,71 +1020,10 @@ export component SettingsWindow inherits Window {
                 }
             }
 
-            if root.page == 2: Page {
-                vertical-stretch: 1;
-                title: T.tab-hotkeys;
-                subtitle: T.hotkeys-subtitle;
-                SectionTitle { text: T.sec-keyboard; }
-                Card {
-                    SettingRow {
-                        title: T.hotkey-video;
-                        description: T.hotkey-video-desc;
-                        HotkeyField {
-                            value: root.f.hotkey-video;
-                            key(t, c, a, s, m) => { root.hotkey-key(0, t, c, a, s, m) }
-                            mouse(b, c, a, s, m) => { root.hotkey-mouse(0, b, c, a, s, m) }
-                        }
-                        IconButton { icon: "\u{E711}"; enabled: root.f.hotkey-video != ""; clicked => { root.f.hotkey-video = ""; } }
-                    }
-                    Divider { }
-                    SettingRow {
-                        title: T.hotkey-audio;
-                        description: T.hotkey-audio-desc;
-                        HotkeyField {
-                            value: root.f.hotkey-audio;
-                            key(t, c, a, s, m) => { root.hotkey-key(1, t, c, a, s, m) }
-                            mouse(b, c, a, s, m) => { root.hotkey-mouse(1, b, c, a, s, m) }
-                        }
-                        IconButton { icon: "\u{E711}"; enabled: root.f.hotkey-audio != ""; clicked => { root.f.hotkey-audio = ""; } }
-                    }
-                }
-                Text { text: T.hotkey-hint; font-size: 12px; color: Theme.text-secondary; wrap: word-wrap; }
-                if root.hotkey-warning != "": Text { text: root.hotkey-warning; font-size: 12px; color: Theme.warning; wrap: word-wrap; }
-                SectionTitle { text: T.sec-controller; }
-                Card {
-                    SettingRow {
-                        title: T.pad-video;
-                        LineEdit { text <=> root.f.pad-video; placeholder-text: "Back+A"; width: 220px; }
-                    }
-                    Divider { }
-                    SettingRow {
-                        title: T.pad-audio;
-                        LineEdit { text <=> root.f.pad-audio; placeholder-text: "LB+RB+Y"; width: 220px; }
-                    }
-                }
-                Text { text: T.pad-hint; font-size: 12px; color: Theme.text-secondary; wrap: word-wrap; }
-            }
-
             if root.page == 3: Page {
                 vertical-stretch: 1;
-                title: T.tab-saving;
-                subtitle: T.saving-subtitle;
-                SectionTitle { text: T.sec-length; }
-                Card {
-                    SettingRow {
-                        title: T.clip-video-seconds;
-                        description: T.clip-video-seconds-desc;
-                        SpinBox { minimum: 1; maximum: 3600; value <=> root.f.video-seconds; width: 140px; }
-                        Text { text: T.seconds; color: Theme.text-secondary; vertical-alignment: center; }
-                    }
-                    Divider { }
-                    SettingRow {
-                        title: T.clip-audio-seconds;
-                        description: T.clip-audio-seconds-desc;
-                        SpinBox { minimum: 1; maximum: 7200; value <=> root.f.audio-seconds; width: 140px; }
-                        Text { text: T.seconds; color: Theme.text-secondary; vertical-alignment: center; }
-                    }
-                }
+                title: T.tab-general;
+                subtitle: T.general-subtitle;
                 SectionTitle { text: T.sec-files; }
                 Card {
                     SettingRow {
@@ -974,30 +1037,7 @@ export component SettingsWindow inherits Window {
                         description: T.template-hint;
                         LineEdit { text <=> root.f.template; width: 320px; }
                     }
-                    Divider { }
-                    SettingRow {
-                        title: T.container;
-                        description: T.container-desc;
-                        ComboBox { model: ["MP4", "MKV"]; current-index <=> root.f.container; width: 240px; }
-                    }
-                    Divider { }
-                    SettingRow {
-                        title: T.audio-bitrate;
-                        description: T.audio-bitrate-desc;
-                        ComboBox { model: ["96 kbit/s", "128 kbit/s", "160 kbit/s", "192 kbit/s", "256 kbit/s", "320 kbit/s"]; current-index <=> root.f.audio-bitrate; width: 240px; }
-                    }
-                    Divider { }
-                    SettingRow {
-                        title: T.audio-format;
-                        ComboBox { model: [T.fmt-flac, T.fmt-wav, T.fmt-mka, T.fmt-polywav, T.fmt-opus, T.fmt-aac, T.fmt-mp3]; current-index <=> root.f.audio-format; width: 240px; }
-                    }
                 }
-            }
-
-            if root.page == 4: Page {
-                vertical-stretch: 1;
-                title: T.tab-advanced;
-                subtitle: T.advanced-subtitle;
                 SectionTitle { text: T.sec-startup; }
                 Card {
                     SettingRow {
@@ -1068,7 +1108,7 @@ export component SettingsWindow inherits Window {
                 }
             }
 
-            if root.page == 5: Page {
+            if root.page == 4: Page {
                 vertical-stretch: 1;
                 title: T.tab-about;
                 subtitle: T.about-subtitle;

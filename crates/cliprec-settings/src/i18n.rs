@@ -53,28 +53,25 @@ macro_rules! strings {
 strings! {
     set_window_title: "ClipRec · Impostazioni", "ClipRec · Settings";
     set_app_subtitle: "Impostazioni", "Settings";
-    set_tab_video: "Video", "Video";
+    set_tab_video: "Clip video", "Video clips";
+    set_tab_audio_clip: "Clip audio", "Audio clips";
     set_tab_audio: "Audio", "Audio";
-    set_tab_hotkeys: "Scorciatoie", "Shortcuts";
-    set_tab_saving: "Salvataggio", "Saving";
-    set_tab_advanced: "Avanzate", "Advanced";
+    set_tab_general: "Generale", "General";
     set_tab_about: "Informazioni", "About";
-    set_video_subtitle: "Cosa registrare e con quale qualità.", "What to record and at what quality.";
-    set_audio_subtitle: "Le sorgenti audio diventano tracce separate o un unico mix.", "Audio sources become separate tracks or a single mix.";
-    set_hotkeys_subtitle: "Le combinazioni che salvano gli ultimi secondi.", "The shortcuts that save the last seconds.";
-    set_saving_subtitle: "Durata delle clip, cartella e formati dei file.", "Clip length, folder and file formats.";
-    set_advanced_subtitle: "Avvio, notifiche, memoria e lingua.", "Startup, notifications, memory and language.";
+    set_video_subtitle: "Cosa registrare, con quale qualità, con quale audio e con quali scorciatoie.", "What to record, at what quality, with which audio and which shortcuts.";
+    set_audio_clip_subtitle: "Clip solo audio: durata, formato, tracce, sorgenti e scorciatoie.", "Audio-only clips: length, format, tracks, sources and shortcuts.";
+    set_audio_subtitle: "Opzioni comuni a tutte le sorgenti audio.", "Options shared by all audio sources.";
+    set_general_subtitle: "Cartella, avvio, notifiche, memoria e lingua.", "Folder, startup, notifications, memory and language.";
     set_about_subtitle: "Registratore replay sempre attivo per Windows.", "Always-on replay recorder for Windows.";
     set_sec_recording: "Registrazione", "Recording";
     set_sec_quality: "Qualità", "Quality";
     set_sec_capture: "Cattura", "Capture";
-    set_sec_tracks: "Tracce delle clip video", "Video clip tracks";
-    set_sec_tracks_audio: "Tracce delle clip solo audio", "Audio-only clip tracks";
-    set_sec_sources: "Sorgenti", "Sources";
-    set_sec_apps: "App registrate", "Recorded apps";
-    set_sec_keyboard: "Tastiera e mouse", "Keyboard and mouse";
-    set_sec_controller: "Controller", "Controller";
-    set_sec_length: "Durata", "Length";
+    set_sec_sources: "Sorgenti audio", "Audio sources";
+    set_sec_apps: "App e dispositivi", "Apps and devices";
+    set_sec_tracks_short: "Tracce", "Tracks";
+    set_sec_length_files: "Durata e file", "Length and file";
+    set_sec_length_format: "Durata e formato", "Length and format";
+    set_sec_shortcuts: "Scorciatoie", "Shortcuts";
     set_sec_files: "File", "Files";
     set_sec_startup: "Avvio", "Startup";
     set_sec_notify: "Notifiche", "Notifications";
@@ -131,14 +128,14 @@ strings! {
     set_lookahead_desc: "Analizza i fotogrammi in anticipo per distribuire meglio i bit.", "Analyses frames ahead to spread the bits better.";
     set_aq: "Quantizzazione adattiva", "Adaptive quantization";
     set_aq_desc: "Più dettaglio dove l'occhio lo nota (ottimizzazione psicovisiva).", "More detail where the eye notices it (psycho-visual tuning).";
-    set_audio_bitrate: "Bitrate audio delle clip video", "Video clip audio bitrate";
+    set_audio_bitrate: "Bitrate audio", "Audio bitrate";
     set_audio_bitrate_desc: "AAC, per ogni traccia.", "AAC, per track.";
     set_capture_cursor: "Mostra il cursore del mouse", "Show the mouse cursor";
     set_any_fullscreen: "Qualsiasi app a schermo intero", "Any full-screen app";
     set_any_fullscreen_desc: "In automatico registra anche le app a schermo intero che non sono giochi riconosciuti.", "In automatic mode, also record full-screen apps that are not recognised games.";
     set_games: "Giochi riconosciuti", "Recognised games";
     set_games_hint: "Eseguibili separati da virgola", "Comma-separated executables";
-    set_audio_mode: "Tracce audio", "Audio tracks";
+    set_audio_mode: "Disposizione", "Layout";
     set_audio_mode_desc: "Separate: ogni sorgente nella sua traccia, da mixare dopo.", "Separate: each source on its own track, to mix later.";
     set_mode_separate: "Una traccia per sorgente", "One track per source";
     set_mode_merged: "Traccia unica (mix)", "Single track (mix)";
@@ -166,20 +163,20 @@ strings! {
     set_move_up: "Su", "Up";
     set_move_down: "Giù", "Down";
     set_remove: "Rimuovi", "Remove";
-    set_hotkey_video: "Clip video", "Video clip";
+    set_hotkey_video: "Tastiera e mouse", "Keyboard and mouse";
     set_hotkey_video_desc: "Salva gli ultimi secondi di video e audio.", "Saves the last seconds of video and audio.";
-    set_hotkey_audio: "Clip audio", "Audio clip";
+    set_hotkey_audio: "Tastiera e mouse", "Keyboard and mouse";
     set_hotkey_audio_desc: "Salva solo l'audio, anche più lungo del video.", "Saves the audio only, even longer than the video.";
     set_hotkey_hint: "Clicca il campo e premi un tasto, da solo o con Ctrl, Alt, Shift o Win; vanno bene anche F13-F24 e i tasti laterali del mouse. Esc annulla.", "Click the field and press a key, alone or with Ctrl, Alt, Shift or Win; F13-F24 and the side mouse buttons work too. Esc cancels.";
     set_hotkey_press: "Premi la combinazione…", "Press the shortcut…";
     set_hotkey_clear: "Cancella", "Clear";
     set_hotkey_empty: "Nessuna", "None";
-    set_pad_video: "Clip video", "Video clip";
-    set_pad_audio: "Clip audio", "Audio clip";
+    set_pad_video: "Controller", "Controller";
+    set_pad_audio: "Controller", "Controller";
     set_pad_hint: "Facoltativo. Tasti separati da +: A B X Y LB RB LS RS Back Start DPadUp DPadDown DPadLeft DPadRight.", "Optional. Buttons separated by +: A B X Y LB RB LS RS Back Start DPadUp DPadDown DPadLeft DPadRight.";
-    set_clip_video_seconds: "Clip video", "Video clip";
+    set_clip_video_seconds: "Durata", "Length";
     set_clip_video_seconds_desc: "Secondi salvati dalla scorciatoia video.", "Seconds saved by the video shortcut.";
-    set_clip_audio_seconds: "Clip audio", "Audio clip";
+    set_clip_audio_seconds: "Durata", "Length";
     set_clip_audio_seconds_desc: "Secondi salvati dalla scorciatoia audio.", "Seconds saved by the audio shortcut.";
     set_seconds: "s", "s";
     set_folder: "Cartella", "Folder";
@@ -189,7 +186,7 @@ strings! {
     set_template_hint: "Segnaposto: {game} {date} {time} {kind}", "Placeholders: {game} {date} {time} {kind}";
     set_container: "Formato video", "Video format";
     set_container_desc: "MP4 si apre ovunque; MKV regge meglio un'interruzione.", "MP4 opens everywhere; MKV copes better with an interruption.";
-    set_audio_format: "Formato clip audio", "Audio clip format";
+    set_audio_format: "Formato", "Format";
     set_fmt_flac: "FLAC, un file per traccia", "FLAC, one file per track";
     set_fmt_wav: "WAV, un file per traccia", "WAV, one file per track";
     set_fmt_mka: "MKA unico multitraccia", "Single multi-track MKA";
@@ -231,25 +228,33 @@ strings! {
 }
 
 /// Testo di un problema di validazione.
+/// «delle clip video» / «delle clip audio» per i problemi di un elenco di sorgenti.
+fn list_name(lang: Lang, list: u8) -> &'static str {
+    match list {
+        0 => lang.pick("delle clip video.", "of the video clips."),
+        _ => lang.pick("delle clip audio.", "of the audio clips."),
+    }
+}
+
 pub fn problem_text(lang: Lang, p: &Problem) -> String {
     let t = |it: &str, en: &str| lang.pick(it, en).to_string();
     match p {
-        Problem::TooManySources => t("Al massimo 8 sorgenti audio.", "At most 8 audio sources."),
+        Problem::TooManySources(l) => format!("{} {}", t("Al massimo 8 sorgenti audio", "At most 8 audio sources"), list_name(lang, *l)),
         Problem::VideoSecondsZero => t("La durata della clip video deve essere maggiore di 0.", "The video clip length must be greater than 0."),
         Problem::AudioSecondsZero => t("La durata della clip audio deve essere maggiore di 0.", "The audio clip length must be greater than 0."),
         Problem::HotkeyEmpty(0) => t("Manca la hotkey della clip video.", "The video clip hotkey is missing."),
         Problem::HotkeyEmpty(_) => t("Manca la hotkey della clip audio.", "The audio clip hotkey is missing."),
         Problem::BadPad(_) => t("Combinazione del controller non valida: usa solo A B X Y LB RB LS RS Back Start DPadUp DPadDown DPadLeft DPadRight separati da +.", "Invalid controller combination: use only A B X Y LB RB LS RS Back Start DPadUp DPadDown DPadLeft DPadRight separated by +."),
         Problem::SamePad => t("Le due combinazioni del controller devono essere diverse.", "The two controller combinations must be different."),
-        Problem::BadDelay(i) => format!("{} {}", t("Il ritardo deve stare tra -1000 e 1000 ms nella sorgente audio", "The delay must be between -1000 and 1000 ms in audio source"), i + 1),
+        Problem::BadDelay(l, i) => format!("{} {} {}", t("Il ritardo deve stare tra -1000 e 1000 ms nella sorgente audio", "The delay must be between -1000 and 1000 ms in audio source"), i + 1, list_name(lang, *l)),
         Problem::SameHotkey => t("Le due hotkey devono essere diverse.", "The two hotkeys must be different."),
         Problem::BadTargetBitrate => t("Bitrate obiettivo non valido (numero intero in kbit/s, o vuoto).", "Invalid target bitrate (whole kbit/s, or empty)."),
         Problem::BadBitrate => t("Tetto di bitrate non valido (numero intero in kbit/s, o vuoto).", "Invalid bitrate cap (whole kbit/s, or empty)."),
         Problem::BadMaxMb => t("Tetto di RAM non valido (numero intero in MB, o vuoto).", "Invalid RAM cap (whole MB, or empty)."),
         Problem::BadMonitor => t("L'indice del monitor deve essere un numero (0 = principale).", "The monitor index must be a number (0 = primary)."),
         Problem::EmptyVideoTarget => t("Indica il titolo della finestra o l'eseguibile del gioco.", "Enter the window title or the game executable."),
-        Problem::EmptySourceName(i) => format!("{} {}", t("Nome mancante nella sorgente audio", "Missing name in audio source"), i + 1),
-        Problem::EmptyAppExe(i) => format!("{} {}", t("Eseguibile mancante nella sorgente audio", "Missing executable in audio source"), i + 1),
+        Problem::EmptySourceName(l, i) => format!("{} {} {}", t("Nome mancante nella sorgente audio", "Missing name in audio source"), i + 1, list_name(lang, *l)),
+        Problem::EmptyAppExe(l, i) => format!("{} {} {}", t("Eseguibile mancante nella sorgente audio", "Missing executable in audio source"), i + 1, list_name(lang, *l)),
         Problem::EmptyTemplate => t("Il nome del file non può essere vuoto.", "The file name cannot be empty."),
     }
 }

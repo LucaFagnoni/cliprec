@@ -288,3 +288,14 @@ Le voci [DEFAULT] e [PROPOSTA] di SPEC.md valgono come decise; qui ci sono quell
     software, `main.rs`) e la tray di Slint (la tray è di `cliprec-app`). 12 crate in meno,
     `cliprec-settings.exe` da 19,1 a 18,3 MB; l'accessibilità resta per i lettori di schermo. Il
     workflow di release tiene in cache registro e `target` per `Cargo.lock`.
+49. **Sorgenti separate per tipo di clip, menu per tipo di clip** (21 ottobre, scelte di Luca: due
+    elenchi indipendenti, menu «Clip video · Clip audio · Audio · Generale · Informazioni»).
+    `audio.audio_clip_sources` è l'elenco delle clip solo audio (assente = quello delle clip video).
+    `AudioConfig::plan` decide cosa catturare (una sorgente con le stesse impostazioni nei due
+    elenchi si cattura una volta), cosa registrare (un «Mix» per tipo di clip con le sole sue
+    sorgenti, uno solo se coincidono, più le tracce delle sorgenti) e quali tracce, in che ordine,
+    vanno in ciascuna clip. Il motore audio registra il piano con più mixer sullo stesso thread; il
+    salvataggio sceglie le tracce (`select_tracks`). Le impostazioni scrivono l'elenco audio solo se
+    diverso da quello video, come per le tracce (46). Ogni pagina di clip ha durata e file o formato,
+    tracce, sorgenti (componente `SourceList` riusato) e scorciatoie; «Audio» tiene le opzioni comuni
+    alle sorgenti, «Generale» cartella, nome del file, avvio, notifiche, memoria e lingua.
