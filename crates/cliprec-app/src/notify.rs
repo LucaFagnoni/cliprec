@@ -77,6 +77,26 @@ pub fn clip_summary(c: &SavedClip) -> String {
     format!("{} s · {} MB", c.duration_secs.round() as u64, (c.bytes as f64 / 1_000_000.0).round() as u64)
 }
 
+/// Azione collegata a un avviso: apre una pagina delle impostazioni di Windows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToastLink {
+    MicrophonePrivacy,
+}
+
+impl ToastLink {
+    pub fn uri(self) -> &'static str {
+        match self {
+            Self::MicrophonePrivacy => "ms-settings:privacy-microphone",
+        }
+    }
+}
+
+/// Mappa il testo di un avviso del motore all'azione utile (m26). Per ora solo la privacy del microfono.
+pub fn link_for(text: &str) -> Option<ToastLink> {
+    let t = text.to_lowercase();
+    ((t.contains("microfono") || t.contains("microphone")) && t.contains("privacy")).then_some(ToastLink::MicrophonePrivacy)
+}
+
 pub struct Notifier {
     pub enabled: bool,
     pub sound: bool,
@@ -110,7 +130,13 @@ impl Notifier {
     fn problem(&mut self, kind: &str, title: &str, text: &str) {
         tracing::warn!(kind, "{title}: {text}");
         if self.enabled && self.dedup.allow(kind, Instant::now()) {
-            show(title, text, &[]);
+            match link_for(text) {
+                Some(link) => {
+                    let label = fmt(current(), K::ToastOpenSettings, &[]);
+                    show(title, text, &[(&label, "uri", &PathBuf::from(link.uri()))]);
+                }
+                None => show(title, text, &[]),
+            }
         }
     }
 }
@@ -205,5 +231,16 @@ mod tests {
     fn summary_text() {
         let c = SavedClip { kind: ClipKind::Video, path: "x.mp4".into(), duration_secs: 60.0, bytes: 48_000_000 };
         assert_eq!(clip_summary(&c), "60 s · 48 MB");
+    }
+
+    #[test]
+    fn m26_microphone_privacy_errors_get_the_settings_button() {
+        let engine_text = "Windows nega l'accesso al microfono: apri Impostazioni → Privacy e sicurezza → Microfono \
+             e attiva «Consenti alle app desktop di accedere al microfono»";
+        assert_eq!(link_for(engine_text), Some(ToastLink::MicrophonePrivacy));
+        assert_eq!(link_for("Microphone access denied by Windows privacy settings"), Some(ToastLink::MicrophonePrivacy));
+        assert_eq!(link_for("RAM insufficiente"), None);
+        assert_eq!(link_for("un'altra app usa il dispositivo in modalità esclusiva"), None);
+        assert_eq!(ToastLink::MicrophonePrivacy.uri(), "ms-settings:privacy-microphone");
     }
 }

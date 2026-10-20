@@ -167,6 +167,9 @@ fn is_fullscreen(hwnd: windows::Win32::Foundation::HWND) -> bool {
 /// Argomento con cui l'istanza riavviata come amministratore sa di dover aspettare la vecchia.
 pub const RESTART_ARG: &str = "--dopo-riavvio";
 
+/// Quanto la nuova istanza aspetta la vecchia: il motore chiude in al più 15 s (salvataggi in corso).
+pub const RESTART_WAIT: std::time::Duration = std::time::Duration::from_secs(25);
+
 /// La voce «Riavvia come amministratore» ha senso solo se ClipRec non lo è già.
 pub fn restart_menu_visible(self_elevated: bool) -> bool {
     !self_elevated
@@ -275,6 +278,11 @@ mod tests {
         drop(held);
         assert!(waiter.join().unwrap());
         assert_eq!(RESTART_ARG, "--dopo-riavvio");
+    }
+
+    #[test]
+    fn m13_restart_waits_longer_than_the_engine_shutdown() {
+        assert!(RESTART_WAIT >= std::time::Duration::from_secs(20), "attesa di {RESTART_WAIT:?}: la vecchia istanza può impiegare 15 s");
     }
 
     #[test]

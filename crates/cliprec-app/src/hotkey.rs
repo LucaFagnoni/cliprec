@@ -144,6 +144,12 @@ pub fn known_conflicts(chord: &Chord, lang: crate::i18n::Lang) -> Vec<&'static s
         .collect()
 }
 
+/// Serve ascoltare il mouse? Solo se almeno una hotkey usa un pulsante `MouseN`: altrimenti
+/// Raw Input consegnerebbe un `WM_INPUT` per ogni movimento (1-8 kHz) senza motivo.
+pub fn needs_mouse(video: Option<Chord>, audio: Option<Chord>) -> bool {
+    [video, audio].into_iter().flatten().any(|c| matches!(c.trigger, Trigger::Mouse(_)))
+}
+
 /// Evento d'ingresso già decodificato da Raw Input.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InputEvent {
@@ -351,5 +357,14 @@ mod tests {
         assert!(!known_conflicts(&parse("Alt+F10").unwrap(), crate::i18n::Lang::En).is_empty());
         assert!(known_conflicts(&parse("Ctrl+Alt+F10").unwrap(), crate::i18n::Lang::En).is_empty());
         assert!(!known_conflicts(&parse("Alt+F9").unwrap(), crate::i18n::Lang::En).is_empty());
+    }
+
+    #[test]
+    fn m21_mouse_registered_only_when_a_hotkey_uses_it() {
+        let k = |t: &str| parse(t).ok();
+        assert!(!needs_mouse(k("Ctrl+Alt+F10"), k("Ctrl+Alt+F9")), "solo tastiera");
+        assert!(!needs_mouse(None, None));
+        assert!(needs_mouse(k("Mouse5"), k("Ctrl+Alt+F9")));
+        assert!(needs_mouse(k("Ctrl+F1"), k("Ctrl+Mouse4")));
     }
 }

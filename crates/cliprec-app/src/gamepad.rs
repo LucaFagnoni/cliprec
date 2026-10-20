@@ -67,11 +67,31 @@ fn pressed(prev: u16, now: u16, mask: u16) -> bool {
 /// Thread che legge i controller ogni 16 ms; i controller scollegati si riprovano ogni 2 s,
 /// perché `XInputGetState` su un indice vuoto è lento. Senza combinazioni configurate dorme.
 pub fn spawn(commands: Sender<AppCommand>) -> std::io::Result<JoinHandle<()>> {
-    std::thread::Builder::new().name("gamepad".into()).spawn(move || {
+    spawn_with(
+        commands,
+        || (VIDEO.load(Ordering::Relaxed) as u16, AUDIO.load(Ordering::Relaxed) as u16),
+        |i| {
+            let mut state = XINPUT_STATE::default();
+            // SAFETY: `state` è una struttura locale valida; l'indice è 0..4 come richiesto.
+            (unsafe { XInputGetState(i, &mut state) } == 0).then_some(state.Gamepad.wButtons.0)
+        },
+        Duration::from_millis(16),
+    )
+}
+
+/// Corpo del thread con le dipendenze iniettabili: `masks` dà le combinazioni (video, audio),
+/// `read` i tasti premuti del controller `i` (`None` = non collegato).
+fn spawn_with(
+    commands: Sender<AppCommand>,
+    masks: impl Fn() -> (u16, u16) + Send + 'static,
+    read: impl Fn(u32) -> Option<u16> + Send + 'static,
+    period: Duration,
+) -> std::io::Result<JoinHandle<()>> {
+    crate::supervisor::spawn_supervised("gamepad", move || {
         let mut prev = [0u16; 4];
         let mut next_probe = [Instant::now(); 4];
         loop {
-            let (video, audio) = (VIDEO.load(Ordering::Relaxed) as u16, AUDIO.load(Ordering::Relaxed) as u16);
+            let (video, audio) = masks();
             if video == 0 && audio == 0 {
                 std::thread::sleep(Duration::from_millis(500));
                 continue;
@@ -81,14 +101,11 @@ pub fn spawn(commands: Sender<AppCommand>) -> std::io::Result<JoinHandle<()>> {
                 if now < *probe {
                     continue;
                 }
-                let mut state = XINPUT_STATE::default();
-                // SAFETY: `state` è una struttura locale valida; l'indice è 0..4 come richiesto.
-                if unsafe { XInputGetState(i as u32, &mut state) } != 0 {
+                let Some(buttons) = read(i as u32) else {
                     *prev = 0;
                     *probe = now + Duration::from_secs(2);
                     continue;
-                }
-                let buttons = state.Gamepad.wButtons.0;
+                };
                 for (mask, cmd) in [(video, AppCommand::SaveVideoClip), (audio, AppCommand::SaveAudioClip)] {
                     if pressed(*prev, buttons, mask) && commands.send(cmd).is_err() {
                         return;
@@ -96,7 +113,7 @@ pub fn spawn(commands: Sender<AppCommand>) -> std::io::Result<JoinHandle<()>> {
                 }
                 *prev = buttons;
             }
-            std::thread::sleep(Duration::from_millis(16));
+            std::thread::sleep(period);
         }
     })
 }
@@ -117,5 +134,23 @@ mod tests {
         assert!(!pressed(0, 0x1000, combo), "solo uno dei due");
         assert!(pressed(0x1000, 0x1020 | 0x0001, combo), "altri tasti in più non contano");
         assert!(!pressed(0, 0xffff, 0), "nessuna combinazione configurata");
+    }
+
+    #[test]
+    fn m9_panic_in_the_gamepad_thread_is_survived() {
+        use std::sync::atomic::AtomicBool;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let panicked = std::sync::Arc::new(AtomicBool::new(false));
+        let p = panicked.clone();
+        // Prima lettura: panic. Dopo il riavvio il controller 0 preme il tasto A.
+        let read = move |i: u32| {
+            if !p.swap(true, Ordering::SeqCst) {
+                panic!("panic iniettato nel thread del controller");
+            }
+            (i == 0).then_some(0x1000)
+        };
+        spawn_with(tx, || (0x1000, 0), read, Duration::from_millis(5)).unwrap();
+        let got = rx.recv_timeout(Duration::from_secs(5));
+        assert_eq!(got, Ok(AppCommand::SaveVideoClip), "il thread del controller deve ripartire dopo il panic");
     }
 }

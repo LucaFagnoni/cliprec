@@ -6,7 +6,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, VK_CONTROL, VK_LWIN, VK_MBUTTON, VK_MENU, VK_RWIN, VK_SHIFT, VK_XBUTTON1, VK_XBUTTON2,
 };
 use windows::Win32::UI::Input::{
-    GetRawInputData, HRAWINPUT, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER, RID_INPUT, RIDEV_INPUTSINK, RIM_TYPEKEYBOARD,
+    GetRawInputData, HRAWINPUT, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER, RID_INPUT, RIDEV_INPUTSINK, RIDEV_REMOVE, RIM_TYPEKEYBOARD,
     RIM_TYPEMOUSE, RegisterRawInputDevices,
 };
 
@@ -15,11 +15,18 @@ use crate::hotkey::{InputEvent, Mods, Trigger, mouse_events};
 const RI_KEY_BREAK: u16 = 1;
 const RI_KEY_E0: u16 = 2;
 
-/// Registra tastiera (1/6) e mouse (1/2) sulla finestra nascosta, con `RIDEV_INPUTSINK`:
-/// gli eventi arrivano anche quando un altro programma ha il focus, senza sottrarli a nessuno.
-pub fn register(hwnd: HWND) -> anyhow::Result<()> {
+/// Registra la tastiera (1/6) e, solo se `mouse`, il mouse (1/2) sulla finestra nascosta, con
+/// `RIDEV_INPUTSINK`: gli eventi arrivano anche quando un altro programma ha il focus, senza
+/// sottrarli a nessuno. Con `mouse == false` toglie un'eventuale registrazione precedente del mouse
+/// (si richiama alla ricarica della configurazione).
+pub fn register(hwnd: HWND, mouse: bool) -> anyhow::Result<()> {
     let dev = |usage| RAWINPUTDEVICE { usUsagePage: 1, usUsage: usage, dwFlags: RIDEV_INPUTSINK, hwndTarget: hwnd };
-    let devices = [dev(6), dev(2)];
+    let mouse_dev = if mouse {
+        dev(2)
+    } else {
+        RAWINPUTDEVICE { usUsagePage: 1, usUsage: 2, dwFlags: RIDEV_REMOVE, hwndTarget: HWND::default() }
+    };
+    let devices = [dev(6), mouse_dev];
     // SAFETY: `devices` è un array valido della dimensione dichiarata.
     unsafe { RegisterRawInputDevices(&devices, std::mem::size_of::<RAWINPUTDEVICE>() as u32) }?;
     Ok(())
