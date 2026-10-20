@@ -142,6 +142,7 @@ dependencies = [
  "ffmpeg-the-third",
  "thiserror",
  "tracing",
+ "windows",
 ]
 
 [[package]]
