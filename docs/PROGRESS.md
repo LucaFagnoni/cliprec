@@ -1,47 +1,58 @@
 # Stato di ClipRec
 
-Ultimo aggiornamento: 20 ottobre 2026, 04:20.
+Ultimo aggiornamento: 20 ottobre 2026, 04:40.
 
 ## Fatto
 
 - **Fase 0** (03:30-03:40): workspace Cargo (9 crate + `xtask` + `tests`), contratti in `cliprec-core`,
   FFmpeg 9.0.2 LGPL in `third_party/ffmpeg`, `CLAUDE.md`, agenti, regole, hook.
-- **Fase 1** (03:41-04:06): sette subagenti in worktree separati, tutti uniti su `main` con clippy
-  pulito e test verdi.
-  - `cliprec-capture`: WGC su monitor e finestre (`MinUpdateInterval` 1/(2·fps)), Desktop Duplication
-    di ripiego, pacer CFR a triplo buffer (ritardo mediano 0,15 ms), modalità automatica, rilevamento
-    di frame neri o fermi, `SyntheticSource` con lampo a ogni secondo QPC.
-  - `cliprec-encode`: `hevc_nvenc`/`h264_nvenc` zero-copy da texture D3D11 (300-490 fps in debug),
-    `hevc_qsv`/`h264_qsv` sulla UHD 770, BGRA→NV12 BT.709 con bande nere, `open_best` e `probe`. AMF
-    scritto ma non provato (nessuna GPU AMD).
+- **Fase 1** (03:41-04:06): sette subagenti in worktree separati, tutti uniti su `main`.
+  - `cliprec-capture`: WGC su monitor e finestre, Desktop Duplication di ripiego, pacer CFR a triplo
+    buffer, modalità automatica, frame neri o fermi segnalati, `SyntheticSource` con lampo a ogni secondo.
+  - `cliprec-encode`: `hevc_nvenc`/`h264_nvenc` zero-copy da texture D3D11, `hevc_qsv`/`h264_qsv` sulla
+    UHD 770, BGRA→NV12 BT.709 con bande nere, `open_best`/`open_after`/`probe`. AMF scritto, non provato.
   - `cliprec-audio`: `WasapiSource` (app con process loopback, ingresso, uscita), silenzio continuo,
-    mix con deriva corretta (errore 0,03 ms su un'ora simulata), limiter, `BeepSource`, MMCSS,
-    riconnessione dei dispositivi.
-  - `cliprec-buffer`: arena di blocchi da 4 MiB riciclati, scarto a GOP interi, FLAC a 24 bit per
-    traccia, `VirtualLock` (bloccate su questo PC), snapshot senza copie.
-  - `cliprec-mux`: MP4/MKV con AAC per traccia, nomi delle tracce, prima traccia predefinita,
-    `+faststart`, `.part` rinominato, controllo spazio; clip audio FLAC/WAV per traccia o MKA.
-    Clip di 60 s 1080p60 con 4 tracce scritta in 0,77 s (release).
-  - `cliprec-app`: tray con stato e ultime clip, hotkey Raw Input (anche tasti del mouse), istanza
-    unica, supervisore con riavvio, server named pipe, toast (non provati di notte), log rotante.
-  - `cliprec-settings`: finestra Slint a sei schede con `AboutSlint`, stima RAM dal vivo, client pipe,
-    italiano e inglese; 29,7 MB di working set in release.
-  - `xtask` e `tests/`: `probe` (ffprobe), `sync` (lampi e bip), `gen-test-clip`, `bench-report`,
-    script PresentMon e WPR, `testwindow`.
-- **Fase 2, catena verticale** (04:10, commit `a4d2275`): il motore vero è collegato all'app. Con
-  sorgenti sintetiche il test end-to-end salva una clip video MP4 (7,8 s, 60 fps costanti, due tracce
-  AAC con i nomi) e una clip audio (un FLAC per traccia); ffprobe la valida, la sincronia tra tracce è
-  0 ms e quella A/V −16 ms (un frame: il lampo cade sul primo frame dopo il secondo intero).
+    mix con deriva corretta (0,03 ms su un'ora simulata), limiter, MMCSS, riconnessione, `BeepSource`.
+  - `cliprec-buffer`: arena di blocchi riciclati e bloccati in RAM, scarto a GOP interi, FLAC per
+    traccia, snapshot senza copie, `AudioRefs` (decompressione fuori dal lock).
+  - `cliprec-mux`: MP4/MKV con AAC per traccia e nomi, prima traccia predefinita, `+faststart`,
+    `.part` univoco rinominato, nomi mai sovrascritti, controllo spazio; clip audio FLAC/WAV o MKA.
+  - `cliprec-app`: tray, hotkey Raw Input (anche tasti del mouse), istanza unica, supervisore, named
+    pipe, toast (non provati di notte), log rotante.
+  - `cliprec-settings`: finestra Slint a sei schede con `AboutSlint`, stima RAM, client pipe, it/en.
+  - `xtask`/`tests`: `probe`, `sync`, `gen-test-clip`, `bench-report`, `testwindow`, script PresentMon/WPR.
+- **Fase 2** (04:10): motore collegato; catena verticale verificata da un test end-to-end.
+- **Fase 3** (04:20-04:40): revisione avversaria (25 voci) e correzioni dei proprietari dei crate:
+  encoder aperto fuori dal pacer con fallback e backoff, stati delle sorgenti notificati, solo audio se
+  il video non parte, buffer che sopravvive a riavvii e panic, ricarica della config solo se serve,
+  device perso e cambio di GPU gestiti, keyframe solo IDR, `.part` univoci, sorgenti audio in errore
+  ritentate, segnaposto della dimensione del bersaglio, test di iniezione dei guasti, primo avvio.
+- **Fase 4, parte fattibile** (04:40): `cargo xtask dist` e `notices`, installer Inno Setup (non
+  compilato), `README.md`, `THIRD_PARTY_NOTICES.md`, piano per la build FFmpeg ridotta.
+
+## Misure (release, RTX 3080, sorgenti sintetiche 1080p60 HEVC)
+
+| Metrica | Soglia | Misurato |
+| --- | --- | --- |
+| Avvio a freddo → encoder pronto | < 1,5 s | 0,32 s |
+| Hotkey → snapshot | < 20 ms | 0,7 ms (video), 0,14 ms (audio) |
+| Hotkey → file, clip di 60 s | < 1 s | 0,69 s (con la clip audio scritta in parallelo) |
+| Durata della clip | ≥ N, ≤ N + 1 GOP | 60,77 s per N = 60 |
+| Sincronia tra tracce | ±20 ms | 0 ms |
+| Sincronia A/V (sintetica) | ±20 ms | −16 ms (un frame, artefatto della misura) |
+| CPU del processo (sessione lunga) | < 2% | circa 4% di un core = 0,15% della CPU |
+| Distribuzione | < 40 MB | 129,9 MB oggi (FFmpeg completa); 26-30 MB stimati con la build ridotta |
 
 ## In corso
 
-- Revisione avversaria di fine Fase 1 (`reviewer`, Opus, sola lettura).
-- Build release e sessione lunga con sorgenti sintetiche (memoria e frame persi nel tempo).
+- Sessione lunga dalle 04:18 alle 07:48 circa (`target/sessione-lunga/sessione-lunga.csv`): al minuto
+  16 memoria privata stabile a 406 MB, 2 frame persi (all'avvio), una clip ogni 10 minuti.
+- Seconda revisione avversaria (fine Fase 3).
 
 ## Prossimo passo
 
-- Correggere le falle trovate dal revisore; prova con cattura reale di una finestra di test;
-  misure (avvio a freddo, hotkey → snapshot, hotkey → file, RAM del processo).
+- Correzioni dalla seconda revisione; misura A/V con cattura reale (lampo della finestra di test più
+  un bip, da fare di giorno perché il bip suona dagli altoparlanti).
 
 ## Problemi aperti
 
