@@ -34,7 +34,13 @@ fn main() -> anyhow::Result<()> {
         let out = args.get(2).map_or_else(|| Config::default().clips.folder().join("sessione-lunga"), Into::into);
         return engine::run_soak(Config::default(), minutes, out);
     }
-    let Some(_instance) = sys::acquire_single_instance(&sys::mutex_name())? else {
+    // Dopo «Riavvia come amministratore» la vecchia istanza sta ancora chiudendo: la si aspetta.
+    let instance = if args.iter().any(|a| a == sys::RESTART_ARG) {
+        sys::acquire_single_instance_wait(&sys::mutex_name(), Duration::from_secs(10), Duration::from_millis(100))?
+    } else {
+        sys::acquire_single_instance(&sys::mutex_name())?
+    };
+    let Some(_instance) = instance else {
         tracing::info!("ClipRec è già in esecuzione: avviso la prima istanza ed esco");
         sys::ping_first_instance();
         return Ok(());
