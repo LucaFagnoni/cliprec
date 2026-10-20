@@ -30,65 +30,12 @@ progetti originali: vanno verificati sui sorgenti della build indicata.
 | Libreria | Licenza | Titolare |
 | --- | --- | --- |
 | AMD AMF (intestazioni) | MIT | Advanced Micro Devices, Inc. |
-| Chromaprint | MIT (LGPL-2.1+ con altri backend FFT) | Lukáš Lalinský |
 | nv-codec-headers | MIT | NVIDIA Corporation e il progetto FFmpeg |
-| Fontconfig | MIT (stile HPND) | Keith Packard e collaboratori |
-| GMP | LGPL-3.0+ o GPL-2.0+ | Free Software Foundation |
-| iconv | dominio pubblico (win-iconv) o LGPL-2.1+ (GNU libiconv) | Yukihiro Nakadaira / Free Software Foundation |
-| Little CMS 2 | MIT | Marti Maria Saguer |
-| libaom | BSD-2-Clause con licenza di brevetti AOM | Alliance for Open Media |
-| aribb24 | LGPL-3.0 | Nogami Ryo, Kouji Kobayashi e collaboratori |
-| aribcaption | MIT | magicxqq (xqq) |
-| libass | ISC | Contributori di libass |
-| libbluray | LGPL-2.1+ | VideoLAN e collaboratori |
-| dav1d | BSD-2-Clause | VideoLAN e gli autori di dav1d |
-| FreeType | FreeType License (FTL) o GPL-2.0 | The FreeType Project |
-| FriBidi | LGPL-2.1+ | Behdad Esfahbod, Dov Grobgeld e collaboratori |
-| Game Music Emu | LGPL-2.1+ | Shay Green, Michael Pyne e collaboratori |
-| HarfBuzz | MIT | Behdad Esfahbod e collaboratori |
-| libjxl | BSD-3-Clause | Google LLC e i JPEG XL Project Authors |
-| Kvazaar | BSD-3-Clause | Tampere University e collaboratori |
-| LCEVC decoder | BSD-3-Clause-Clear | V-Nova International Ltd. |
-| LAME | LGPL-2.0+ | The LAME Project |
-| OpenAPV | BSD-3-Clause | Samsung Electronics e collaboratori |
-| OpenCORE AMR | Apache-2.0 | VisualOn e Android Open Source Project |
-| OpenH264 | BSD-2-Clause | Cisco Systems, Inc. |
-| OpenJPEG | BSD-2-Clause | Università di Lovanio e collaboratori |
-| libopenmpt | BSD-3-Clause | OpenMPT Project Developers and Contributors |
 | Opus | BSD-3-Clause | Xiph.Org Foundation, Skype Limited, Broadcom e altri |
-| libplacebo | LGPL-2.1+ | Niklas Haas e collaboratori |
-| rav1e | BSD-2-Clause-Patent | Xiph.Org e i collaboratori di rav1e |
-| librist | BSD-2-Clause | VideoLAN e SipRadius LLC |
-| librsvg | LGPL-2.1+ | Progetto GNOME e collaboratori |
-| Snappy | BSD-3-Clause | Google Inc. |
-| SoX Resampler | LGPL-2.1+ | Rob Sykes |
-| SRT | MPL-2.0 | Haivision Systems Inc. |
-| libssh | LGPL-2.1+ | Contributori di libssh |
 | SVT-AV1 | BSD-3-Clause-Clear con licenza di brevetti AOM | Alliance for Open Media e Intel Corporation |
-| libtheora | BSD-3-Clause | Xiph.Org Foundation |
-| TwoLAME | LGPL-2.1+ | Michael Somos, Mark Taylor e collaboratori |
-| uavs3d | Apache-2.0 / BSD (verificare sul sorgente) | Peking University Shenzhen Graduate School e collaboratori |
-| libvmaf | BSD-2-Clause-Patent | Netflix, Inc. |
-| libvorbis | BSD-3-Clause | Xiph.Org Foundation |
 | oneVPL | MIT | Intel Corporation |
-| libvpx | BSD-3-Clause con licenza di brevetti | Google LLC e collaboratori |
-| VVenC | BSD-3-Clause-Clear con licenza di brevetti | Fraunhofer HHI |
-| libwebp | BSD-3-Clause | Google LLC |
-| libxml2 | MIT | Daniel Veillard e collaboratori |
-| zimg | WTFPL | Victor Prokhorov (sekrit-twc) |
-| ZeroMQ | LGPL-3.0+ con eccezione per il linking statico (MPL-2.0 nelle versioni recenti) | Contributori di ZeroMQ |
-| zvbi | LGPL-2.1+ e BSD (alcune parti GPL-2, verificare sul sorgente) | Michael H. Schimek, Iñaki García Etxebarria e collaboratori |
-| LV2 | ISC | David Robillard e collaboratori |
-| XZ Utils (liblzma) | 0BSD / dominio pubblico | Lasse Collin |
-| OpenAL Soft | LGPL-2.0+ | Chris Robinson e collaboratori |
-| OpenCL (intestazioni e ICD loader) | Apache-2.0 | The Khronos Group |
+| Runtime di GCC (libgcc, libstdc++) | GPL-3.0 con GCC Runtime Library Exception | Free Software Foundation |
 | winpthreads (mingw-w64) | MIT / ZPL | Progetto mingw-w64 |
-| Schannel | componente di Windows, nessuna licenza di terzi | Microsoft Corporation |
-| SDL 2 | zlib | Sam Lantinga e collaboratori |
-| VA-API | MIT | Intel Corporation e collaboratori |
-| VapourSynth | LGPL-2.1+ | Fredrik Mellbin e collaboratori |
-| Vulkan (intestazioni e loader) | Apache-2.0 | The Khronos Group |
-| zlib | zlib | Jean-loup Gailly e Mark Adler |
 
 ## Pacchetti Rust
 

@@ -1,7 +1,10 @@
 # Percorsi assoluti: i worktree dei subagenti stanno in .claude/worktrees/ e devono vedere
-# la stessa FFmpeg preparata da `cargo xtask ffmpeg` nella radice del repository.
+# la stessa FFmpeg preparata nella radice del repository.
+# FFMPEG_DIR: build ridotta che ClipRec linka e distribuisce (`cargo xtask ffmpeg-ridotta`).
+# FFMPEG_TOOLS_DIR: build completa con ffmpeg/ffprobe, solo per test e verifiche (`cargo xtask ffmpeg`).
 [env]
-FFMPEG_DIR = "D:\\Repositories\\cliprec\\third_party\\ffmpeg"
+FFMPEG_DIR = "D:\\Repositories\\cliprec\\third_party\\ffmpeg-ridotta"
+FFMPEG_TOOLS_DIR = "D:\\Repositories\\cliprec\\third_party\\ffmpeg"
 LIBCLANG_PATH = "C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Tools\\Llvm\\x64\\bin"
 
 [alias]

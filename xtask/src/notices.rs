@@ -111,13 +111,9 @@ const LIBS: &[(&str, &str, &str, &str)] = &[
 
 pub fn run(root: &Path) -> Result<()> {
     let meta = load_meta(root)?;
-    let ffmpeg = std::env::var_os("FFMPEG_DIR").map(PathBuf::from).unwrap_or_else(|| root.join("third_party").join("ffmpeg"));
-    let version = Command::new(ffmpeg.join("bin").join("ffmpeg.exe")).arg("-version").output().context("ffmpeg -version (cargo xtask ffmpeg?)")?;
-    let text = format!(
-        "{HEADER}{}{RUST_HEADER}{}",
-        static_libs_section(&String::from_utf8_lossy(&version.stdout)),
-        table(&meta)?
-    );
+    let ffmpeg = std::env::var_os("FFMPEG_DIR").map(PathBuf::from).unwrap_or_else(|| root.join("third_party").join("ffmpeg-ridotta"));
+    let version = std::fs::read_to_string(ffmpeg.join("ffmpeg-version.txt")).context("ffmpeg-version.txt (cargo xtask ffmpeg-ridotta?)")?;
+    let text = format!("{HEADER}{}{RUST_HEADER}{}", static_libs_section(&version), table(&meta)?);
     std::fs::write(root.join("THIRD_PARTY_NOTICES.md"), text)?;
     println!("THIRD_PARTY_NOTICES.md aggiornato");
     Ok(())
@@ -154,6 +150,13 @@ pub fn static_libs_section(version_output: &str) -> String {
             None if name.starts_with("lib") => s.push_str(&format!("| {name} | da verificare | da verificare |\n")),
             None => {}
         }
+    }
+    // Build ridotta: `-static` porta nelle DLL anche il runtime del compilatore.
+    if configure.contains("--extra-ldflags=-static") {
+        s.push_str(
+            "| Runtime di GCC (libgcc, libstdc++) | GPL-3.0 con GCC Runtime Library Exception | Free Software Foundation |\n\
+             | winpthreads (mingw-w64) | MIT / ZPL | Progetto mingw-w64 |\n",
+        );
     }
     s
 }
@@ -263,7 +266,7 @@ mod tests {
     fn static_libs_section_covers_configure() {
         let cfg = include_str!("../../installer/ffmpeg-version.txt");
         let t = static_libs_section(cfg);
-        for lib in ["dav1d", "libvpx", "libaom", "SVT-AV1", "OpenH264", "LAME", "Opus", "libjxl", "zvbi"] {
+        for lib in ["SVT-AV1", "Opus", "oneVPL", "AMD AMF", "nv-codec-headers", "Runtime di GCC", "winpthreads"] {
             assert!(t.contains(lib), "sezione senza {lib}:\n{t}");
         }
         assert!(!t.contains("da verificare"), "libreria senza licenza nota:\n{t}");

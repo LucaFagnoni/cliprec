@@ -7,12 +7,15 @@
 //! - `testwindow [--seconds N]`: finestra 640x360 con timecode QPC e lampo a ogni secondo.
 //! - `mem <pid|nome.exe> [--top N]`: memoria di un processo per categoria (immagini, heap, stack, privata).
 //! - `dist`: build release e cartella `target/dist/ClipRec`. `notices`: rigenera THIRD_PARTY_NOTICES.md.
-//! - `ffmpeg`: scarica in `third_party/ffmpeg` la build FFmpeg 9 LGPL condivisa di BtbN
-//!   (header, librerie di importazione, DLL). Usa `curl.exe` e `tar.exe` di Windows.
+//! - `ffmpeg`: scarica in `FFMPEG_TOOLS_DIR` (`third_party/ffmpeg`) la build FFmpeg 9 LGPL completa
+//!   di BtbN, con ffmpeg e ffprobe: serve solo a test e verifiche. Usa `curl.exe` e `tar.exe` di Windows.
+//! - `ffmpeg-ridotta`: compila in `FFMPEG_DIR` (`third_party/ffmpeg-ridotta`) la build ridotta che
+//!   ClipRec linka e distribuisce (MSYS2 in `third_party/toolchain`, vedi `ridotta.rs`).
 
 mod dist;
 mod mem;
 mod notices;
+mod ridotta;
 mod testwindow;
 
 use std::path::{Path, PathBuf};
@@ -23,7 +26,7 @@ use cliprec_tests::generate::{self, GenOptions};
 use cliprec_tests::probe::{self, Expect};
 use cliprec_tests::{bench, sync};
 
-/// Build fissata: release `autobuild-2026-10-19-13-06` di BtbN (FFmpeg n9.0.2-28-g669f5ab083).
+/// Build completa per gli strumenti di test, fissata: release `autobuild-2026-10-19-13-06` di BtbN (FFmpeg n9.0.2-28-g669f5ab083).
 /// Lo SHA-256 è quello dichiarato da GitHub per l'asset ed è identico alle DLL in uso (avutil verificata).
 /// Se la release sparisce, serve una nuova release fissata e un nuovo hash (vedi docs/DECISIONS.md).
 const FFMPEG_SHA256: &str = "557513674c1628d82cad40515d75bc28d26c4730582b4029b018c4a1ff77a49c";
@@ -34,6 +37,7 @@ fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("ffmpeg") => ffmpeg(&root()?),
+        Some("ffmpeg-ridotta") => ridotta::run_build(&root()?),
         Some("dist") => dist::run_dist(&root()?),
         Some("notices") => notices::run(&root()?),
         Some("probe") => finish("probe", probe_cmd(&args[1..])?),
@@ -47,7 +51,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         _ => {
-            eprintln!("uso: cargo xtask ffmpeg | dist | notices | probe | sync | mem | gen-test-clip | bench-report (vedi la testata di xtask/src/main.rs)");
+            eprintln!("uso: cargo xtask ffmpeg | ffmpeg-ridotta | dist | notices | probe | sync | mem | gen-test-clip | bench-report (vedi la testata di xtask/src/main.rs)");
             std::process::exit(2);
         }
     }
@@ -128,8 +132,8 @@ pub(crate) fn run(cmd: &mut Command) -> Result<()> {
 }
 
 fn ffmpeg(root: &Path) -> Result<()> {
-    let third = root.join("third_party");
-    let dest = third.join("ffmpeg");
+    let dest = std::env::var_os("FFMPEG_TOOLS_DIR").map(PathBuf::from).unwrap_or_else(|| root.join("third_party").join("ffmpeg"));
+    let third = dest.parent().context("FFMPEG_TOOLS_DIR senza cartella padre")?;
     if dest.join("lib").join("avcodec.lib").exists() {
         println!("FFmpeg già presente in {}", dest.display());
         return Ok(());
@@ -139,10 +143,7 @@ fn ffmpeg(root: &Path) -> Result<()> {
     let zip = tmp.join("ffmpeg.zip");
     run(Command::new("curl.exe").args(["-sSfL", "-o"]).arg(&zip).arg(FFMPEG_URL))?;
     dist::verify_sha256(&zip, FFMPEG_SHA256)?;
-    let system_tar = PathBuf::from(std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into()))
-        .join("System32")
-        .join("tar.exe");
-    run(Command::new(system_tar).arg("-xf").arg(&zip).arg("-C").arg(&tmp))?;
+    run(Command::new(system_tar()).arg("-xf").arg(&zip).arg("-C").arg(&tmp))?;
     let extracted = std::fs::read_dir(&tmp)?
         .filter_map(|e| e.ok().map(|e| e.path()))
         .find(|p| p.is_dir())
@@ -154,4 +155,9 @@ fn ffmpeg(root: &Path) -> Result<()> {
     std::fs::remove_dir_all(&tmp)?;
     println!("FFmpeg pronto in {}", dest.display());
     Ok(())
+}
+
+/// `tar.exe` di Windows (bsdtar: zip, gz, xz).
+pub(crate) fn system_tar() -> PathBuf {
+    PathBuf::from(std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into())).join("System32").join("tar.exe")
 }

@@ -1,4 +1,5 @@
-//! Localizzazione ed esecuzione di ffmpeg/ffprobe (build LGPL in `third_party/ffmpeg/bin`).
+//! Localizzazione ed esecuzione di ffmpeg/ffprobe (build LGPL completa in `third_party/ffmpeg/bin`,
+//! solo per i test: la libreria che ClipRec linka e distribuisce è `FFMPEG_DIR`, senza programmi).
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -7,9 +8,9 @@ use anyhow::{Context, Result, bail};
 
 const DEFAULT_DIR: &str = r"D:\Repositories\cliprec\third_party\ffmpeg";
 
-/// Cartella `bin` di FFmpeg: `FFMPEG_DIR` (impostata da `.cargo/config.toml`) oppure il percorso fisso.
+/// Cartella `bin` degli strumenti FFmpeg: `FFMPEG_TOOLS_DIR` (impostata da `.cargo/config.toml`) oppure il percorso fisso.
 pub fn bin_dir() -> PathBuf {
-    let base = std::env::var_os("FFMPEG_DIR").map_or_else(|| PathBuf::from(DEFAULT_DIR), PathBuf::from);
+    let base = std::env::var_os("FFMPEG_TOOLS_DIR").map_or_else(|| PathBuf::from(DEFAULT_DIR), PathBuf::from);
     base.join("bin")
 }
 

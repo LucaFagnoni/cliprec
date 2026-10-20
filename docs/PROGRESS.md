@@ -71,7 +71,8 @@ i test di regressione, è nella tabella di `docs/REVIEW-CODICE.md`.
 ### Come provarlo
 
 ```powershell
-cargo xtask ffmpeg                       # solo la prima volta
+cargo xtask ffmpeg-ridotta               # solo la prima volta (~10 min)
+cargo xtask ffmpeg                       # solo la prima volta (strumenti di test)
 cargo build --release
 # 1. Tutte le prove della notte in un colpo (clip sintetica + app completa sulla finestra di test)
 scripts\prova-completa.ps1
@@ -118,8 +119,7 @@ l'app scrive la config predefinita e apre le impostazioni.
 
 ### Cosa manca
 
-- Build FFmpeg ridotta (oggi la distribuzione pesa 130 MB contro i 40 della specifica; piano in
-  `installer/FFMPEG-RIDOTTA.md`), firma del codice, installer compilato.
+- Firma del codice.
 - AMF (GPU AMD) mai provato; UAC, toast e controller scritti ma mai eseguiti dal vivo.
 - I messaggi interni dei crate dentro gli avvisi restano in italiano anche con l'interfaccia inglese.
 - Rimandate dalla revisione: m9 e R3 (audio preso in esclusiva da un'altra app: nessun segnale
@@ -174,7 +174,7 @@ Le righe della sessione continua vengono dal binario di prima della revisione.
 | CPU del processo | < 2% | 4,4% di un core = 0,16% della CPU |
 | RAM del processo esclusi i buffer | < 50 MB | **29 MB** (working set privato 47,8 MB con 18,9 MB di buffer; prima 114,8, cioè 96 esclusi i buffer). Da 24 a 34 MB fra 720p e 1440p e fra 30 e 144 fps; 5 MB in solo audio. Scomposizione sotto |
 | Picco di memoria al salvataggio | (nessuna) | 131 kB per una clip di 60 s su 2 tracce (prima 44 MB) |
-| Distribuzione | < 40 MB | 134 MB oggi (FFmpeg completa, runtime VC++, licenze); 26-30 MB stimati con la build ridotta |
+| Distribuzione | < 40 MB | **38,1 MiB** con la build FFmpeg ridotta (prima 136,9 MiB): DLL FFmpeg 13,5 MiB, exe 21,0 MiB, licenze 3,5 MiB, runtime VC++ 0,1 MiB. Installer 12,6 MiB (prima 45), zip portable 16,2 MiB (prima 61) |
 
 ### Scomposizione della RAM (m4)
 
@@ -251,6 +251,13 @@ frame pool è in VRAM) e AMF (nessuna GPU AMD qui).
   di distribuzione è stata provata da sola (`--prova` con le sole 4 DLL incluse).
 - **Sessione lunga** (04:18-07:48): vedi la tabella delle misure; CSV in
   `target/sessione-lunga/sessione-lunga.csv`.
+- **FFmpeg ridotta** (20 ottobre, pomeriggio): `cargo xtask ffmpeg-ridotta` compila con MSYS2
+  (scaricata e fissata in `third_party/toolchain`) una FFmpeg 9 LGPL con i soli encoder, muxer e
+  hwcontext usati (`installer/FFMPEG-RIDOTTA.md`, DECISIONS 36). DLL da 112 a 13,5 MiB, cartella di
+  distribuzione 38,1 MiB. La build BtbN completa resta solo per ffmpeg/ffprobe nei test
+  (`FFMPEG_TOOLS_DIR`); i test di mux generano il video software con `ffmpeg.exe` invece che con
+  la libreria linkata. Test, clippy, dist, installer e clip di prova (`hevc_nvenc`, probe e sync
+  ok, A/V −7 ms) verdi.
 
 ## Provato dal vivo stanotte (senza tastiera né schermo dell'utente)
 
@@ -272,4 +279,4 @@ frame pool è in VRAM) e AMF (nessuna GPU AMD qui).
   sorgente non è la finestra di test.
 - Worktree dei subagenti in `.claude/worktrees/` (circa 18 GB di `target`): i rami sono tutti uniti su
   `main`; si possono rimuovere con `git worktree remove --force --force <percorso>`.
-- `.cargo/config.toml` contiene percorsi assoluti di questo PC (`FFMPEG_DIR`, `LIBCLANG_PATH`).
+- `.cargo/config.toml` contiene percorsi assoluti di questo PC (`FFMPEG_DIR`, `FFMPEG_TOOLS_DIR`, `LIBCLANG_PATH`).

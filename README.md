@@ -24,7 +24,8 @@ Specifica completa in `SPEC.md`, decisioni in `docs/DECISIONS.md`, stato in `doc
 ## Compilare
 
 ```powershell
-cargo xtask ffmpeg                 # una volta: scarica FFmpeg 9 LGPL in third_party\ffmpeg
+cargo xtask ffmpeg-ridotta         # una volta: compila FFmpeg 9 LGPL ridotta in third_party\ffmpeg-ridotta (~10 min)
+cargo xtask ffmpeg                 # una volta: FFmpeg completa con ffmpeg/ffprobe, solo per i test
 cargo build --release              # target\release\cliprec-app.exe e cliprec-settings.exe
 cargo xtask dist                   # target\dist\ClipRec: exe, DLL FFmpeg e runtime VC++, licenze
 cargo xtask notices                # rigenera THIRD_PARTY_NOTICES.md
@@ -33,13 +34,13 @@ cargo xtask notices                # rigenera THIRD_PARTY_NOTICES.md
 tar.exe -a -c -f target\dist\ClipRec-0.1.0-portable.zip -C target\dist ClipRec      # zip portable
 ```
 
-`.cargo\config.toml` contiene percorsi assoluti (`FFMPEG_DIR`, `LIBCLANG_PATH`) da adattare su un
+`.cargo\config.toml` contiene percorsi assoluti (`FFMPEG_DIR`, `FFMPEG_TOOLS_DIR`, `LIBCLANG_PATH`) da adattare su un
 altro PC. L'installer (Inno Setup 7, installato per utente da jrsoftware.org) si compila dopo
 `cargo xtask dist`; è per utente, senza amministratore, ed è descritto nello script stesso. Se sul
 PC manca il runtime Visual C++, l'installer lo scarica da Microsoft durante l'installazione. Senza
 firma del codice Windows SmartScreen mostra «Editore sconosciuto» al primo avvio. La
-build FFmpeg ridotta, necessaria per stare sotto i 40 MB, è pianificata in
-`installer\FFMPEG-RIDOTTA.md`.
+build FFmpeg ridotta (solo i componenti usati, LGPL 3) è descritta in `installer\FFMPEG-RIDOTTA.md`;
+`cargo xtask ffmpeg-ridotta` scarica MSYS2 in `third_party\toolchain` e la compila.
 
 ## Provarlo senza toccare il gioco
 
@@ -105,8 +106,8 @@ Per pubblicare una versione: alzare `version` in `Cargo.toml` del workspace, poi
   scrive la chiave `HKCU\...\Run`.
 - Giochi avviati come amministratore: Windows può non consegnare le hotkey.
 - App che usano WASAPI esclusivo non sono catturabili in loopback.
-- La distribuzione è oggi di circa 137 MB (installer 45 MB, zip 61 MB) (FFmpeg completa); l'obiettivo di 40 MB richiede la
-  build ridotta. Nessun certificato di firma disponibile: gli exe non sono firmati.
+- La distribuzione pesa 38,1 MiB (installer 12,6 MiB, zip 16,2 MiB) con la build FFmpeg ridotta.
+  Nessun certificato di firma disponibile: gli exe non sono firmati.
 
 ## Licenze
 
