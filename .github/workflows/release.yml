@@ -45,6 +45,18 @@ jobs:
           rustup toolchain install 1.93.0 --profile minimal
           rustup default 1.93.0
 
+      # Dipendenze già compilate: le release dopo la prima ricompilano solo il codice di ClipRec.
+      - name: Cache della build Rust
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: rust-1.93-${{ hashFiles('Cargo.lock') }}
+          restore-keys: rust-1.93-
+
       - name: Cache della FFmpeg ridotta
         id: ffmpeg
         uses: actions/cache/restore@v6

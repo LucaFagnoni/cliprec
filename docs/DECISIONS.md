@@ -282,3 +282,9 @@ Le voci [DEFAULT] e [PROPOSTA] di SPEC.md valgono come decise; qui ci sono quell
     Niente test (servono GPU ed encoder hardware): si lanciano in locale prima. Così la build non
     tocca `target\dist`, da cui gira il ClipRec di Luca. `xtask dist` cerca il runtime VC++ anche
     nelle edizioni di Visual Studio 2022 in `Program Files`.
+48. **Slint senza le parti inutilizzate, cache della build nel workflow** (21 ottobre, richiesta di
+    Luca). Slint con `default-features = false` e solo `std`, `compat-1-2`, `backend-winit`,
+    `renderer-software` e `accessibility`: via il renderer OpenGL (le impostazioni usano sempre il
+    software, `main.rs`) e la tray di Slint (la tray è di `cliprec-app`). 12 crate in meno,
+    `cliprec-settings.exe` da 19,1 a 18,3 MB; l'accessibilità resta per i lettori di schermo. Il
+    workflow di release tiene in cache registro e `target` per `Cargo.lock`.

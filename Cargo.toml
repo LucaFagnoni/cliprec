@@ -25,7 +25,7 @@ claxon = "=0.4.3"
 rtrb = "=0.4.0"
 ffmpeg-the-third = { version = "=6.0.0", default-features = false, features = ["codec", "format", "software-resampling"] }
 tray-icon = "=0.26.1"
-slint = "=1.18.1"
+slint = { version = "=1.18.1", default-features = false, features = ["std", "compat-1-2", "backend-winit", "renderer-software", "accessibility"] }
 slint-build = "=1.18.1"
 tauri-winrt-notification = "=0.8.1"
 serde = { version = "1.0.229", features = ["derive"] }
