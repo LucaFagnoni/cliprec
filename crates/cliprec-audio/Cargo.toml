@@ -10,6 +10,16 @@ publish.workspace = true
 cliprec-core.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+wasapi.workspace = true
+rubato.workspace = true
+rtrb.workspace = true
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_Media_Audio",
+    "Win32_System_Com",
+] }
 
 [lints]
 workspace = true
