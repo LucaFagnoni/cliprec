@@ -55,6 +55,12 @@ pub enum K {
     EngStartFailed,
     EngBufferStopped,
     EngDeviceLost,
+    EngVideoFallbackAudio,
+    EngClipShort,
+    EngTestVideoOk,
+    EngTestVideoMissing,
+    EngTestTrackOk,
+    EngTestTrackSilent,
 }
 
 #[cfg(test)]
@@ -103,6 +109,12 @@ pub const ALL: &[K] = &[
     K::EngStartFailed,
     K::EngBufferStopped,
     K::EngDeviceLost,
+    K::EngVideoFallbackAudio,
+    K::EngClipShort,
+    K::EngTestVideoOk,
+    K::EngTestVideoMissing,
+    K::EngTestTrackOk,
+    K::EngTestTrackSilent,
 ];
 
 const TABLE: &[(K, &str, &str)] = &[
@@ -154,6 +166,12 @@ const TABLE: &[(K, &str, &str)] = &[
     (K::EngStartFailed, "avvio del buffer: {0}", "starting the buffer: {0}"),
     (K::EngBufferStopped, "il buffer è fermo: avvialo dal menu della tray", "the buffer is stopped: start it from the tray menu"),
     (K::EngDeviceLost, "device GPU perso: riavvio cattura ed encoder", "GPU device lost: restarting capture and encoder"),
+    (K::EngVideoFallbackAudio, "nessun video nel buffer (encoder non pronto): salvo la clip audio", "no video in the buffer (encoder not ready): saving the audio clip"),
+    (K::EngClipShort, "clip di {0} s invece di {1} s: il buffer non copriva ancora tutta la durata", "clip of {0} s instead of {1} s: the buffer did not cover the full duration yet"),
+    (K::EngTestVideoOk, "video ok ({0})", "video ok ({0})"),
+    (K::EngTestVideoMissing, "video assente, nero o fermo", "video missing, black or frozen"),
+    (K::EngTestTrackOk, "{0}: audio ok", "{0}: audio ok"),
+    (K::EngTestTrackSilent, "{0}: silenzio", "{0}: silent"),
 ];
 
 /// Testo grezzo, con i segnaposto.
