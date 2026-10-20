@@ -655,7 +655,6 @@ fn video_callback(
     let mut last_error = String::new();
     let mut next_index: Option<u64> = None;
     let mut encoding_since: Option<Instant> = None;
-    let mut last: Option<GpuFrame> = None;
     Box::new(move |frame: &GpuFrame| {
         // L'attesa torna a 1 s solo dopo 10 s di codifica riuscita, non a ogni apertura.
         if encoding_since.is_some_and(|t| t.elapsed() > Duration::from_secs(10)) {
@@ -732,29 +731,23 @@ fn video_callback(
         let mut push = |p: cliprec_core::PacketRef<'_>| buffer.push_video(p);
         // Il pacer salta l'indice sui tick persi: ripetendo l'ultimo frame codificato per quei tick il
         // file resta a frequenza costante e l'audio resta allineato (come i frame duplicati di OBS).
-        // ponytail: al massimo 100 ms per tick, per non alimentare altri ritardi sotto carico GPU;
+        // Un frame `repeated` costa solo il passaggio all'encoder, che rimanda la superficie già
+        // convertita: niente copie né conversioni sulla GPU. ponytail: al massimo 250 ms per tick;
         // oltre, il buco resta nel file come salto di timestamp.
-        let missing = next_index.map_or(0, |n| frame.index.saturating_sub(n)).min(u64::from(fps / 10));
+        let missing = next_index.map_or(0, |n| frame.index.saturating_sub(n)).min(u64::from(fps / 4));
         let mut result = Ok(());
-        if let Some(prev) = last.as_ref() {
-            for k in (1..=missing).rev() {
-                let filler = GpuFrame {
-                    texture: prev.texture.clone(),
-                    width: prev.width,
-                    height: prev.height,
-                    pts: frame.pts.add_hns(-(k as i64) * cliprec_core::HNS_PER_SEC / i64::from(fps)),
-                    index: frame.index - k,
-                    repeated: true,
-                };
-                result = result.and_then(|()| enc.encode(&filler, &mut push));
-            }
+        for k in (1..=missing).rev() {
+            let filler = GpuFrame {
+                texture: frame.texture.clone(),
+                width: frame.width,
+                height: frame.height,
+                pts: frame.pts.add_hns(-(k as i64) * cliprec_core::HNS_PER_SEC / i64::from(fps)),
+                index: frame.index - k,
+                repeated: true,
+            };
+            result = result.and_then(|()| enc.encode(&filler, &mut push));
         }
         let result = result.and_then(|()| enc.encode(frame, &mut push));
-        // Un frame ripetuto è già in `last`: la copia serve solo per i frame nuovi o di altra dimensione.
-        let same_size = last.as_ref().is_some_and(|l| l.width == frame.width && l.height == frame.height);
-        if result.is_ok() && !(frame.repeated && same_size) {
-            remember(&device, &mut last, frame);
-        }
         match result {
             Ok(()) => next_index = Some(frame.index + 1),
             Err(e) => {
@@ -773,40 +766,6 @@ fn video_callback(
             }
         }
     })
-}
-
-/// Copia GPU del frame appena codificato in una texture propria: la texture del pacer vale solo
-/// durante la callback, e i tick persi vanno riempiti con il frame precedente. Se la copia non riesce
-/// i riempitivi saltano e resta un salto di timestamp.
-fn remember(device: &GpuDevice, last: &mut Option<GpuFrame>, frame: &GpuFrame) {
-    use windows::Win32::Graphics::Direct3D11::{D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT};
-    if last.as_ref().is_none_or(|l| l.width != frame.width || l.height != frame.height) {
-        let mut desc = D3D11_TEXTURE2D_DESC::default();
-        // SAFETY: texture valida per tutta la callback; `desc` è una struttura locale.
-        unsafe { frame.texture.GetDesc(&mut desc) };
-        desc.Usage = D3D11_USAGE_DEFAULT;
-        desc.CPUAccessFlags = 0;
-        desc.MiscFlags = 0;
-        let mut texture = None;
-        // SAFETY: descrittore valido ricavato dalla texture sorgente; puntatore d'uscita locale.
-        if unsafe { device.device.CreateTexture2D(&desc, None, Some(&mut texture)) }.is_err() {
-            *last = None;
-            return;
-        }
-        *last = texture.map(|texture| GpuFrame {
-            texture,
-            width: frame.width,
-            height: frame.height,
-            pts: frame.pts,
-            index: frame.index,
-            repeated: true,
-        });
-    }
-    if let Some(l) = last.as_ref() {
-        // SAFETY: stesse dimensioni e formato; il contesto immediato è protetto dal multithread di
-        // GpuDevice e la copia è accodata dopo la conversione dell'encoder sulla stessa texture.
-        unsafe { device.context.CopyResource(&l.texture, &frame.texture) };
-    }
 }
 
 /// Prova i candidati in ordine saltando quelli già falliti; prenota il buffer per i nuovi parametri.

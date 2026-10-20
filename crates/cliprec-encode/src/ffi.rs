@@ -135,6 +135,9 @@ pub(crate) struct HwEncoder {
     /// Indice e pts QPC del primo frame: pts dell'encoder = indice − primo indice (time_base 1/fps).
     first: Option<(u64, QpcTime)>,
     last_pts: i64,
+    /// Ultimo frame mandato all'encoder (`frame` o una superficie QSV), nullo prima del primo: un
+    /// frame ripetuto lo rimanda senza rifare la conversione.
+    last_sent: *mut ffi::AVFrame,
 }
 
 // SAFETY: i contesti FFmpeg non sono legati al thread che li ha creati; `HwEncoder` è usato da un
@@ -249,6 +252,7 @@ impl HwEncoder {
             },
             first: None,
             last_pts: -1,
+            last_sent: ptr::null_mut(),
         };
 
         // SAFETY: sequenza documentata di libavutil/libavcodec. Ogni puntatore allocato finisce
@@ -540,6 +544,26 @@ impl HwEncoder {
         base.add_hns(hns as i64)
     }
 
+    /// Manda all'encoder `send` (un frame di `self` già riempito) con il pts dato, poi svuota.
+    fn send(&mut self, send: *mut ffi::AVFrame, pts: i64, sink: &mut dyn FnMut(PacketRef<'_>)) -> Result<(), EncodeError> {
+        // SAFETY: `send` è un frame di proprietà di `self` con un buffer valido; l'encoder ne
+        // prende un riferimento proprio in avcodec_send_frame, quindi rimandarlo è lecito.
+        let ret = unsafe {
+            let f = &mut *send;
+            f.pts = pts;
+            f.duration = 1;
+            f.color_primaries = ffi::AVColorPrimaries::BT709;
+            f.color_trc = ffi::AVColorTransferCharacteristic::BT709;
+            f.colorspace = ffi::AVColorSpace::BT709;
+            f.color_range = ffi::AVColorRange::MPEG;
+            ffi::avcodec_send_frame(self.ctx, send)
+        };
+        if ret < 0 {
+            return Err(self.runtime_error("avcodec_send_frame", av_error_string(ret)));
+        }
+        self.drain(sink)
+    }
+
     /// Consegna a `sink` tutti i pacchetti pronti.
     fn drain(&mut self, sink: &mut dyn FnMut(PacketRef<'_>)) -> Result<(), EncodeError> {
         let duration = HNS_PER_SEC / i64::from(self.params.fps.max(1));
@@ -583,6 +607,14 @@ impl VideoEncoder for HwEncoder {
         let pts = (frame.index.saturating_sub(first_index) as i64).max(self.last_pts + 1);
         self.last_pts = pts;
 
+        // Frame ripetuto (stesso contenuto del precedente, o riempitivo di un tick perso): si rimanda
+        // la superficie già convertita. Niente conversione sulla GPU, che sotto carico compete col
+        // gioco e fa perdere tick; come i frame duplicati di `ffmpeg -r`, che gli encoder accettano.
+        if frame.repeated && !self.last_sent.is_null() {
+            return self.send(self.last_sent, pts, sink);
+        }
+        // Finché la conversione non riesce, nessuna superficie è valida da rimandare.
+        self.last_sent = ptr::null_mut();
         let (tex, slice, send) = if self.vendor == Vendor::Software {
             // SAFETY: frame yuv420p allocato in open; alloca un buffer nuovo solo se l'encoder ne
             // tiene ancora un riferimento (non succede dopo il drain del frame precedente).
@@ -637,22 +669,8 @@ impl VideoEncoder for HwEncoder {
             }
         }
 
-        // SAFETY: `send` è un frame di proprietà di `self` con un buffer hw valido; l'encoder ne
-        // prende un riferimento proprio in avcodec_send_frame.
-        let ret = unsafe {
-            let f = &mut *send;
-            f.pts = pts;
-            f.duration = 1;
-            f.color_primaries = ffi::AVColorPrimaries::BT709;
-            f.color_trc = ffi::AVColorTransferCharacteristic::BT709;
-            f.colorspace = ffi::AVColorSpace::BT709;
-            f.color_range = ffi::AVColorRange::MPEG;
-            ffi::avcodec_send_frame(self.ctx, send)
-        };
-        if ret < 0 {
-            return Err(self.runtime_error("avcodec_send_frame", av_error_string(ret)));
-        }
-        self.drain(sink)
+        self.last_sent = send;
+        self.send(send, pts, sink)
     }
 
     fn flush(&mut self, sink: &mut dyn FnMut(PacketRef<'_>)) -> Result<(), EncodeError> {

@@ -619,3 +619,77 @@ fn hevc_nvenc_444_colors() {
     let path = write_stream("hevc_nvenc_444.hevc", &extradata, &pkts);
     check_colors(&path, 1920, 1080, 0, 8);
 }
+
+/// Frame ripetuti (pacer senza frame nuovi, riempitivi dei tick persi): l'encoder rimanda l'ultima
+/// superficie convertita senza rifare la conversione. Qui ogni frame dispari è marcato ripetuto ma
+/// porta una texture magenta: nel file deve restare il colore del frame precedente.
+fn repeated_frames_skip_conversion(gpu: &GpuDevice, encoder: &str, file: &str) {
+    let (w, h) = (640, 360);
+    let settings = EncoderSettings::from_config(&Default::default(), w, h);
+    let mut enc = cliprec_encode::open(gpu, &settings, encoder).unwrap();
+    let params = enc.params().clone();
+    let (fresh, fresh_rtv) = texture(gpu, w, h, None);
+    let (magenta, magenta_rtv) = texture(gpu, w, h, None);
+    // SAFETY: vista valida sul device del contesto, protetto per l'uso da più thread.
+    unsafe { gpu.context.ClearRenderTargetView(magenta_rtv.as_ref().unwrap(), &[1.0, 0.0, 1.0, 1.0]) };
+    let color = |i: u64| [(i * 4) as f32 / 255.0, 0.5, 1.0 - (i * 4) as f32 / 255.0, 1.0];
+    let mut pkts = Vec::new();
+    let mut sink = |p: cliprec_core::PacketRef<'_>| {
+        pkts.push(Pkt { data: p.data.to_vec(), pts: p.pts, dts: p.dts, keyframe: p.keyframe });
+    };
+    let n = 60u64;
+    for i in 0..n {
+        let repeated = i % 2 == 1;
+        if !repeated {
+            // SAFETY: come sopra.
+            unsafe { gpu.context.ClearRenderTargetView(fresh_rtv.as_ref().unwrap(), &color(i)) };
+        }
+        let frame = GpuFrame {
+            texture: if repeated { magenta.clone() } else { fresh.clone() },
+            width: w,
+            height: h,
+            pts: QpcTime(1_000_000_000).add_hns(i as i64 * HNS_PER_SEC / i64::from(FPS)),
+            index: i,
+            repeated,
+        };
+        enc.encode(&frame, &mut sink).unwrap();
+    }
+    enc.flush(&mut sink).unwrap();
+    let path = match params.codec {
+        cliprec_core::VideoCodec::Av1 => write_ivf(file, w, h, &params.extradata, &pkts),
+        _ => write_stream(file, &params.extradata, &pkts),
+    };
+    let ffmpeg = std::env::var("FFMPEG_TOOLS_DIR").unwrap_or_else(|_| "D:/Repositories/cliprec/third_party/ffmpeg".into());
+    let out = Command::new(PathBuf::from(ffmpeg).join("bin").join("ffmpeg.exe"))
+        .args(["-v", "error", "-i"])
+        .arg(&path)
+        .args(["-vf", &format!("crop=2:2:{}:{}", w / 2, h / 2), "-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "ffmpeg: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(out.stdout.len() as u64, n * 12, "{encoder}: frame decodificati");
+    for (i, px) in out.stdout.chunks(12).enumerate() {
+        let want = color(i as u64 & !1).map(|c| (c * 255.0).round() as i32);
+        let diff = (0..3).map(|c| (i32::from(px[c]) - want[c]).abs()).max().unwrap();
+        assert!(diff <= 12, "{encoder}, frame {i}: {:?} invece di {want:?} (magenta = conversione rifatta)", &px[..3]);
+    }
+    eprintln!("{encoder}: {n} frame, i ripetuti rimandano la superficie precedente");
+}
+
+#[test]
+fn repeated_frames_skip_conversion_nvenc() {
+    let Some(gpu) = device(NVIDIA) else { return };
+    repeated_frames_skip_conversion(&gpu, "hevc_nvenc", "repeated_nvenc.hevc");
+}
+
+#[test]
+fn repeated_frames_skip_conversion_qsv() {
+    let Some(gpu) = device(INTEL) else { return };
+    repeated_frames_skip_conversion(&gpu, "hevc_qsv", "repeated_qsv.hevc");
+}
+
+#[test]
+fn repeated_frames_skip_conversion_svtav1() {
+    let Some(gpu) = device(NVIDIA).or_else(|| device(INTEL)) else { return };
+    repeated_frames_skip_conversion(&gpu, "libsvtav1", "repeated_svtav1.ivf");
+}
