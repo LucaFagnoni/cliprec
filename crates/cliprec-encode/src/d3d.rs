@@ -15,6 +15,7 @@ use windows::Win32::Graphics::Direct3D11::{
     D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0,
     D3D11_VIDEO_PROCESSOR_STREAM, D3D11_VIDEO_USAGE_OPTIMAL_SPEED, D3D11_VPIV_DIMENSION_TEXTURE2D,
     D3D11_BIND_RENDER_TARGET, D3D11_BOX, D3D11_TEX2D_VPOV, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
+    D3D11_CPU_ACCESS_READ, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_USAGE_STAGING,
     D3D11_VPOV_DIMENSION_TEXTURE2D, D3D11_VPOV_DIMENSION_TEXTURE2DARRAY, ID3D11Device, ID3D11DeviceContext,
     ID3D11Texture2D, ID3D11VideoContext1,
     ID3D11VideoDevice, ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator,
@@ -115,11 +116,24 @@ fn input_view(
     view.ok_or_else(|| windows::core::Error::from_hresult(windows::Win32::Foundation::E_POINTER))
 }
 
+/// Dove finisce il frame NV12 convertito.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Output {
+    /// Direttamente nella texture del pool hwframes (render target): NVENC, AMF.
+    Pool,
+    /// In una texture render target intermedia, poi copiata su GPU nella fetta del pool: QSV.
+    PoolViaCopy,
+    /// In una texture render target intermedia, poi letta dalla CPU (encoder software).
+    Cpu,
+}
+
 pub(crate) struct Converter {
     device: ID3D11Device,
     context: ID3D11DeviceContext,
-    /// Solo QSV: texture NV12 render target intermedia, copiata poi nella fetta del pool.
+    /// QSV e software: texture NV12 render target intermedia.
     staging: Option<ID3D11Texture2D>,
+    /// Solo software: texture NV12 `USAGE_STAGING` leggibile dalla CPU.
+    readback: Option<ID3D11Texture2D>,
     video_device: ID3D11VideoDevice,
     video_context: ID3D11VideoContext1,
     out_w: u32,
@@ -129,12 +143,36 @@ pub(crate) struct Converter {
 }
 
 impl Converter {
-    pub(crate) fn new(gpu: &GpuDevice, out_w: u32, out_h: u32, fps: u32, via_staging: bool) -> windows::core::Result<Self> {
-        let staging = if via_staging { Some(texture(&gpu.device, out_w, out_h, DXGI_FORMAT_NV12)?) } else { None };
+    pub(crate) fn new(gpu: &GpuDevice, out_w: u32, out_h: u32, fps: u32, output: Output) -> windows::core::Result<Self> {
+        let staging = match output {
+            Output::Pool => None,
+            Output::PoolViaCopy | Output::Cpu => Some(texture(&gpu.device, out_w, out_h, DXGI_FORMAT_NV12)?),
+        };
+        let readback = match output {
+            Output::Cpu => {
+                let desc = D3D11_TEXTURE2D_DESC {
+                    Width: out_w,
+                    Height: out_h,
+                    MipLevels: 1,
+                    ArraySize: 1,
+                    Format: DXGI_FORMAT_NV12,
+                    SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                    Usage: D3D11_USAGE_STAGING,
+                    CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+                    ..Default::default()
+                };
+                let mut tex = None;
+                // SAFETY: descrittore locale valido per la chiamata; puntatore d'uscita locale.
+                unsafe { gpu.device.CreateTexture2D(&desc, None, Some(&mut tex))? };
+                Some(tex.ok_or_else(|| windows::core::Error::from_hresult(windows::Win32::Foundation::E_POINTER))?)
+            }
+            _ => None,
+        };
         Ok(Self {
             device: gpu.device.clone(),
             context: gpu.context.clone(),
             staging,
+            readback,
             video_device: gpu.device.cast()?,
             video_context: gpu.context.cast()?,
             out_w,
@@ -150,8 +188,38 @@ impl Converter {
         unsafe { self.device.GetDeviceRemovedReason() }.is_err()
     }
 
+    /// Copia l'ultimo frame convertito (con [`Output::Cpu`]) nella texture leggibile, la mappa e
+    /// passa a `f` i piani Y e UV interlacciato con i rispettivi passi in byte. Attende la GPU.
+    pub(crate) fn read_nv12(&mut self, f: impl FnOnce(&[u8], usize, &[u8], usize)) -> windows::core::Result<()> {
+        let (Some(staging), Some(readback)) = (&self.staging, &self.readback) else {
+            return Err(windows::core::Error::from_hresult(windows::Win32::Foundation::E_UNEXPECTED));
+        };
+        let mut map = D3D11_MAPPED_SUBRESOURCE::default();
+        // SAFETY: due texture NV12 della stessa dimensione sullo stesso device; `readback` è
+        // USAGE_STAGING con CPU_ACCESS_READ, quindi mappabile in lettura.
+        unsafe {
+            self.context.CopyResource(readback, staging);
+            self.context.Map(readback, 0, D3D11_MAP_READ, 0, Some(&mut map))?;
+        }
+        let pitch = map.RowPitch as usize;
+        let h = self.out_h as usize;
+        if !map.pData.is_null() && pitch >= self.out_w as usize {
+            // SAFETY: per NV12 la mappatura contiene `h` righe di Y da `pitch` byte seguite da `h/2`
+            // righe di UV interlacciato con lo stesso passo; i dati restano validi fino a Unmap.
+            let (y, uv) = unsafe {
+                let base = map.pData as *const u8;
+                (std::slice::from_raw_parts(base, pitch * h), std::slice::from_raw_parts(base.add(pitch * h), pitch * (h / 2)))
+            };
+            f(y, pitch, uv, pitch);
+        }
+        // SAFETY: risorsa mappata qui sopra.
+        unsafe { self.context.Unmap(readback, 0) };
+        Ok(())
+    }
+
     /// Accoda la conversione di `src` (BGRA, `src_w`×`src_h`) nella fetta `slice` della texture
-    /// NV12 `dst` (puntatore `ID3D11Texture2D*` preso da `AVFrame.data[0]`).
+    /// NV12 `dst` (puntatore `ID3D11Texture2D*` preso da `AVFrame.data[0]`). Con [`Output::Cpu`]
+    /// `dst` è nullo e il risultato resta nella texture intermedia per [`Converter::read_nv12`].
     pub(crate) fn blit(
         &mut self,
         src: &ID3D11Texture2D,
@@ -243,7 +311,7 @@ impl Converter {
         let res = unsafe { self.video_context.VideoProcessorBlt(&p.processor, &output, 0, std::slice::from_ref(&stream)) };
         drop(ManuallyDrop::into_inner(stream.pInputSurface));
         res?;
-        if let Some(staging) = &self.staging {
+        if let Some(staging) = self.staging.as_ref().filter(|_| !dst.is_null()) {
             // SAFETY: `dst` è il puntatore ID3D11Texture2D di un AVFrame vivo per la chiamata;
             // sorgente e destinazione sono NV12 della stessa dimensione sullo stesso device.
             unsafe {

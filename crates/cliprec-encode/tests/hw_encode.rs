@@ -138,8 +138,10 @@ fn nal_types(data: &[u8], hevc: bool) -> Vec<u8> {
         .collect()
 }
 
-fn check_packets(pkts: &[Pkt], hevc: bool) {
-    for p in pkts {
+/// `codec`: "h264", "hevc" o "av1" (per AV1 niente controllo dei NAL: lo fa ffprobe sui frame).
+fn check_packets(pkts: &[Pkt], codec: &str) {
+    let hevc = codec == "hevc";
+    for p in pkts.iter().filter(|_| codec != "av1") {
         let idr = nal_types(&p.data, hevc).iter().any(|&t| if hevc { t == 19 || t == 20 } else { t == 5 });
         assert_eq!(p.keyframe, idr, "keyframe se e solo se il pacchetto contiene un IDR");
     }
@@ -178,7 +180,10 @@ fn ffprobe(path: &PathBuf) -> String {
 
 /// Decodifica il file con ffmpeg e confronta il pixel centrale di ogni frame con il colore pieno
 /// disegnato in `run`: rileva superfici riscritte mentre l'encoder le legge e conversioni sbagliate.
-fn check_colors(path: &PathBuf, w: u32, h: u32) {
+/// `lag`: frame di scarto ammessi (prima o dopo), tranne che sui keyframe (0, 60, 120), che devono
+/// coincidere. SVT-AV1 a CRF 28 nei livelli temporali alti non codifica variazioni di 1-4 livelli
+/// su un campo piatto e ripete un frame di riferimento, anche successivo: misurato fino a 4.
+fn check_colors(path: &PathBuf, w: u32, h: u32, lag: usize, tol: i32) {
     let ffmpeg = std::env::var("FFMPEG_DIR").unwrap_or_else(|_| "D:/Repositories/cliprec/third_party/ffmpeg".into());
     let out = Command::new(PathBuf::from(ffmpeg).join("bin").join("ffmpeg.exe"))
         .args(["-v", "error", "-i"])
@@ -188,12 +193,117 @@ fn check_colors(path: &PathBuf, w: u32, h: u32) {
         .unwrap();
     assert!(out.status.success(), "ffmpeg: {}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(out.stdout.len() as u64, FRAMES * 12);
-    for (i, px) in out.stdout.chunks(12).enumerate() {
+    let want = |i: usize| {
         let t = i as f32 / FRAMES as f32;
-        let want = [t, 1.0 - t, (i % 60) as f32 / 60.0].map(|c| (c * 255.0).round() as i32);
-        let diff = (0..3).map(|c| (i32::from(px[c]) - want[c]).abs()).max().unwrap();
-        assert!(diff <= 6, "frame {i}: {:?} invece di {want:?}", &px[..3]);
+        [t, 1.0 - t, (i % 60) as f32 / 60.0].map(|c| (c * 255.0).round() as i32)
+    };
+    for (i, px) in out.stdout.chunks(12).enumerate() {
+        let diff = |j: usize| (0..3).map(|c| (i32::from(px[c]) - want(j)[c]).abs()).max().unwrap();
+        let lag = if i % 60 == 0 { 0 } else { lag };
+        let ok = (i.saturating_sub(lag)..=(i + lag).min(FRAMES as usize - 1)).any(|j| diff(j) <= tol);
+        assert!(ok, "frame {i}: {:?} invece di {:?}", &px[..3], want(i));
     }
+}
+
+/// Contenitore IVF minimo per AV1 (ffprobe non riconosce OBU nudi senza delimitatori temporali).
+/// Se i pacchetti non portano il sequence header, lo prende da `extradata` (OBU grezzi).
+fn write_ivf(name: &str, w: u32, h: u32, extradata: &[u8], pkts: &[Pkt]) -> PathBuf {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/test-output");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(name);
+    let mut b = Vec::new();
+    b.extend_from_slice(b"DKIF");
+    b.extend_from_slice(&0u16.to_le_bytes());
+    b.extend_from_slice(&32u16.to_le_bytes());
+    b.extend_from_slice(b"AV01");
+    b.extend_from_slice(&(w as u16).to_le_bytes());
+    b.extend_from_slice(&(h as u16).to_le_bytes());
+    b.extend_from_slice(&FPS.to_le_bytes());
+    b.extend_from_slice(&1u32.to_le_bytes());
+    b.extend_from_slice(&(pkts.len() as u32).to_le_bytes());
+    b.extend_from_slice(&0u32.to_le_bytes());
+    let start = QpcTime(1_000_000_000);
+    // Un OBU sequence header (tipo 1) ha il primo byte 0x0a o 0x08: si aggiunge al primo pacchetto
+    // se extradata è un OBU grezzo che il pacchetto non contiene già.
+    let raw_obu = matches!(extradata.first(), Some(0x0a | 0x08));
+    let needs_header = raw_obu && pkts.first().is_some_and(|p| !p.data.windows(extradata.len()).any(|w| w == extradata));
+    for (i, p) in pkts.iter().enumerate() {
+        let data = if i == 0 && needs_header { [extradata, &p.data].concat() } else { p.data.clone() };
+        let pts = (p.pts.hns_since(start) * i64::from(FPS) + HNS_PER_SEC / 2) / HNS_PER_SEC;
+        b.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        b.extend_from_slice(&(pts as u64).to_le_bytes());
+        b.extend_from_slice(&data);
+    }
+    std::fs::write(&path, b).unwrap();
+    path
+}
+
+/// Indici dei frame decodificati marcati come chiave da ffprobe.
+fn probe_key_frames(path: &PathBuf) -> Vec<usize> {
+    let ffmpeg = std::env::var("FFMPEG_DIR").unwrap_or_else(|_| "D:/Repositories/cliprec/third_party/ffmpeg".into());
+    let out = Command::new(PathBuf::from(ffmpeg).join("bin").join("ffprobe.exe"))
+        .args(["-v", "error", "-select_streams", "v:0", "-show_entries", "frame=key_frame", "-of", "csv=p=0"])
+        .arg(path)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "ffprobe: {}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8_lossy(&out.stdout).lines().enumerate().filter(|(_, l)| l.trim() == "1").map(|(i, _)| i).collect()
+}
+
+/// Encoder di riserva SVT-AV1: aperto da `open_after` quando tutti gli hardware sono esclusi.
+fn svtav1(size: (u32, u32), noise: bool, file: &str) -> Option<(f64, u64, f64)> {
+    let gpu = device(NVIDIA).or_else(|| device(INTEL))?;
+    let settings = EncoderSettings::from_config(&Default::default(), size.0, size.1);
+    let hardware: Vec<String> =
+        cliprec_encode::candidates(settings.codec).into_iter().map(|(_, n)| n).filter(|n| n != "libsvtav1").collect();
+    let mut enc = cliprec_encode::open_after(&gpu, &settings, &hardware).unwrap();
+    let params = enc.params().clone();
+    assert_eq!(params.encoder_name, "libsvtav1");
+    assert_eq!(params.codec, cliprec_core::VideoCodec::Av1);
+    assert_eq!((params.width, params.height), size);
+    let (pkts, fps) = run(&gpu, enc.as_mut(), &[size], noise);
+    check_packets(&pkts, "av1");
+    let path = write_ivf(file, size.0, size.1, &params.extradata, &pkts);
+    assert_eq!(ffprobe(&path), format!("av1,{},{},{FRAMES}", size.0, size.1));
+    assert_eq!(probe_key_frames(&path), vec![0, 60, 120], "un keyframe ogni 60 frame (ffprobe)");
+    if !noise {
+        // CRF 28 su campi piatti: errore di quantizzazione fino a 8 livelli.
+        check_colors(&path, size.0, size.1, 4, 10);
+    }
+    let bytes: usize = pkts.iter().map(|p| p.data.len()).sum();
+    let bps = bytes as f64 * 8.0 / (FRAMES as f64 / f64::from(FPS));
+    eprintln!(
+        "libsvtav1 {}x{}{}: {fps:.0} fps di encode, {:.2} Mbit/s (tetto {:.2}), extradata {} B",
+        size.0,
+        size.1,
+        if noise { " (rumore)" } else { "" },
+        bps / 1e6,
+        params.bit_rate as f64 / 1e6,
+        params.extradata.len()
+    );
+    Some((bps, params.bit_rate, fps))
+}
+
+#[test]
+fn open_after_falls_back_to_svtav1() {
+    svtav1((1920, 1080), false, "libsvtav1_1080p.ivf");
+}
+
+#[test]
+fn svtav1_1080p_noise_respects_bitrate_cap() {
+    let Some((bps, cap, _)) = svtav1((1920, 1080), true, "libsvtav1_1080p_noise.ivf") else { return };
+    assert!(bps <= cap as f64 * 1.35, "{bps} bit/s oltre il tetto {cap}");
+}
+
+#[test]
+fn svtav1_1440p_colors() {
+    svtav1((2560, 1440), false, "libsvtav1_1440p.ivf");
+}
+
+#[test]
+fn svtav1_1440p_noise_respects_bitrate_cap() {
+    let Some((bps, cap, _)) = svtav1((2560, 1440), true, "libsvtav1_1440p_noise.ivf") else { return };
+    assert!(bps <= cap as f64 * 1.35, "{bps} bit/s oltre il tetto {cap}");
 }
 
 fn write_stream(name: &str, extradata: &[u8], pkts: &[Pkt]) -> PathBuf {
@@ -235,14 +345,14 @@ fn encode_and_probe(
     assert!(!params.extradata.is_empty(), "extradata vuoto");
     assert_eq!((params.width, params.height), out);
     let (pkts, fps) = run(&gpu, enc.as_mut(), sizes, noise);
-    check_packets(&pkts, probe_codec == "hevc");
+    check_packets(&pkts, probe_codec);
     let bytes: usize = pkts.iter().map(|p| p.data.len()).sum();
     let bps = bytes as f64 * 8.0 / (FRAMES as f64 / f64::from(FPS));
     let key_bytes = pkts.iter().filter(|p| p.keyframe).map(|p| p.data.len()).max().unwrap_or(0);
     let path = write_stream(file, &params.extradata, &pkts);
     let probe = ffprobe(&path);
     if !noise {
-        check_colors(&path, out.0, out.1);
+        check_colors(&path, out.0, out.1, 0, 6);
     }
     eprintln!(
         "{encoder}{} su {}: {fps:.0} fps di encode, {} pacchetti, {:.1} KB/pacchetto medi, keyframe max {:.1} KB, {:.2} Mbit/s (tetto {:.2}), extradata {} B (inizio {:02x?}); ffprobe: {probe}",
