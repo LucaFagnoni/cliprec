@@ -251,10 +251,13 @@ dependencies = [
 name = "cliprec-mux"
 version = "0.1.0"
 dependencies = [
+ "cliprec-buffer",
  "cliprec-core",
  "ffmpeg-the-third",
+ "serde_json",
  "thiserror",
  "tracing",
+ "windows",
 ]
 
 [[package]]
