@@ -23,6 +23,28 @@ const DISCONTINUITY_HNS: i64 = 1_000_000; // 100 ms
 const DRIFT_SMOOTHING: f64 = 1.0 / 64.0;
 const AUDIO_CHUNK: usize = 1 << 20;
 
+/// Quanto audio conservare: almeno `audio_hns` prima della fine, e comunque tutto il video
+/// conservato (da `video_from`), ma non più di `video_max_hns` prima della fine se il video si
+/// ferma. Più un blocco di margine.
+#[derive(Clone, Copy)]
+pub(crate) struct Keep {
+    pub audio_hns: i64,
+    pub video_from: Option<QpcTime>,
+    pub video_max_hns: i64,
+}
+
+impl Keep {
+    /// I blocchi che finiscono entro questo istante si possono scartare.
+    pub fn cutoff(self, end: QpcTime) -> QpcTime {
+        let block = frames_to_hns(BLOCK_FRAMES as i64);
+        let audio = end.add_hns(-self.audio_hns - block);
+        match self.video_from {
+            Some(v) => audio.min(v.max(end.add_hns(-self.video_max_hns)).add_hns(-block)),
+            None => audio,
+        }
+    }
+}
+
 pub(crate) struct BlockMeta {
     start: QpcTime,
     frames: usize,
@@ -78,7 +100,7 @@ impl Track {
     }
 
     /// Accoda `samples` (f32 stereo interleaved) che iniziano a `start`; tiene `keep_hns` di storia.
-    pub fn push(&mut self, enc: &Verified<Encoder>, start: QpcTime, samples: &[f32], keep_hns: i64) {
+    pub fn push(&mut self, enc: &Verified<Encoder>, start: QpcTime, samples: &[f32], keep: Keep) {
         let frames = samples.len() / CHANNELS;
         if frames == 0 {
             return;
@@ -111,7 +133,7 @@ impl Track {
             }
         }
         let end = self.time_at(self.count);
-        let oldest = end.add_hns(-keep_hns);
+        let oldest = keep.cutoff(end);
         while self.ring.front().is_some_and(|b| b.meta.start.add_hns(frames_to_hns(b.meta.frames as i64)) <= oldest) {
             self.ring.pop_front();
         }
