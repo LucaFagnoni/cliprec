@@ -122,3 +122,11 @@ Le voci [DEFAULT] e [PROPOSTA] di SPEC.md valgono come decise; qui ci sono quell
     soundboard, video) e la restituiva in ritardo dopo il giro nell'hardware, con l'eco tra le tracce.
     Limite di Windows: si esclude un solo albero di processi; finché l'app non è aperta si esclude
     ClipRec, quindi in quella sorgente il «ding» di salvataggio entra quando l'app è aperta.
+33. **Avvio come amministratore con un'attività pianificata** (20 ottobre, richiesta di Luca). Il
+    valore `Run` non può avviare un programma con privilegi elevati senza la conferma UAC a ogni
+    accesso; un'attività «all'accesso» con `HighestAvailable` sì. ClipRec la crea con `schtasks /XML`
+    da un processo elevato (una conferma UAC quando si salva l'opzione, una quando la si toglie) e
+    toglie il valore `Run`. L'XML fissa durata illimitata, avvio anche a batteria e priorità normale:
+    i valori predefiniti fermerebbero ClipRec dopo 3 giorni e lo farebbero girare a priorità bassa.
+    Un segnaposto accanto a config.toml evita di richiedere il permesso a ogni avvio. La finestra
+    delle impostazioni è stata ridisegnata sul modello delle Impostazioni di Windows 11.

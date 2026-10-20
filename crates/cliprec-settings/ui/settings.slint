@@ -1,65 +1,114 @@
-// Finestra impostazioni di ClipRec. Le stringhe vengono da `global T`, riempito da Rust in
-// italiano o inglese (src/i18n.rs); la logica vive in Rust (src/model.rs), qui solo la vista.
-import { TabWidget, ComboBox, CheckBox, SpinBox, Slider, LineEdit, Button, ScrollView, AboutSlint, VerticalBox, HorizontalBox, Palette } from "std-widgets.slint";
+// Finestra impostazioni di ClipRec, sul modello delle Impostazioni di Windows 11: barra laterale con
+// le sezioni, pagine di schede con righe (titolo, descrizione, controllo a destra). Le stringhe
+// vengono da `global T`, riempito da Rust in italiano o inglese (src/i18n.rs); la logica vive in
+// Rust (src/model.rs), qui solo la vista.
+import { ComboBox, SpinBox, Slider, LineEdit, Button, ScrollView, AboutSlint, Palette, Switch } from "std-widgets.slint";
 
 export global T {
     in property <string> window-title;
+    in property <string> app-subtitle;
     in property <string> tab-video;
     in property <string> tab-audio;
     in property <string> tab-hotkeys;
     in property <string> tab-saving;
     in property <string> tab-advanced;
     in property <string> tab-about;
+    in property <string> video-subtitle;
+    in property <string> audio-subtitle;
+    in property <string> hotkeys-subtitle;
+    in property <string> saving-subtitle;
+    in property <string> advanced-subtitle;
+    in property <string> about-subtitle;
+    in property <string> sec-recording;
+    in property <string> sec-quality;
+    in property <string> sec-capture;
+    in property <string> sec-tracks;
+    in property <string> sec-sources;
+    in property <string> sec-apps;
+    in property <string> sec-keyboard;
+    in property <string> sec-controller;
+    in property <string> sec-length;
+    in property <string> sec-files;
+    in property <string> sec-startup;
+    in property <string> sec-notify;
+    in property <string> sec-memory;
+    in property <string> sec-performance;
+    in property <string> sec-language;
     in property <string> video-enabled;
+    in property <string> video-enabled-desc;
     in property <string> video-source;
+    in property <string> video-source-desc;
     in property <string> video-target;
+    in property <string> target-monitor-desc;
+    in property <string> target-window-desc;
+    in property <string> target-game-desc;
     in property <string> video-codec;
+    in property <string> video-codec-desc;
     in property <string> video-resolution;
+    in property <string> video-resolution-desc;
     in property <string> video-fps;
     in property <string> video-quality;
+    in property <string> video-quality-desc;
     in property <string> video-max-bitrate;
+    in property <string> video-max-bitrate-desc;
     in property <string> auto;
     in property <string> native;
     in property <string> src-monitor;
     in property <string> src-window;
     in property <string> src-game;
     in property <string> pick;
+    in property <string> capture-cursor;
+    in property <string> any-fullscreen;
+    in property <string> any-fullscreen-desc;
+    in property <string> games;
+    in property <string> games-hint;
     in property <string> audio-mode;
+    in property <string> audio-mode-desc;
     in property <string> mode-separate;
     in property <string> mode-merged;
     in property <string> add-mix;
+    in property <string> add-mix-desc;
     in property <string> process-events;
+    in property <string> process-events-desc;
     in property <string> add-source;
     in property <string> sources-hint;
     in property <string> kind-app;
     in property <string> kind-input;
     in property <string> kind-output;
     in property <string> kind-except;
-    in property <string> placeholder-name;
-    in property <string> placeholder-app;
-    in property <string> placeholder-device;
-    in property <string> col-name;
-    in property <string> col-kind;
-    in property <string> col-source;
     in property <string> col-volume;
     in property <string> col-delay;
     in property <string> pick-app;
     in property <string> device-missing;
+    in property <string> placeholder-name;
+    in property <string> placeholder-app;
+    in property <string> placeholder-device;
+    in property <string> move-up;
+    in property <string> move-down;
+    in property <string> remove;
     in property <string> hotkey-video;
+    in property <string> hotkey-video-desc;
     in property <string> hotkey-audio;
+    in property <string> hotkey-audio-desc;
+    in property <string> hotkey-hint;
+    in property <string> hotkey-press;
+    in property <string> hotkey-clear;
+    in property <string> hotkey-empty;
     in property <string> pad-video;
     in property <string> pad-audio;
     in property <string> pad-hint;
-    in property <string> hotkey-press;
-    in property <string> hotkey-clear;
-    in property <string> hotkey-hint;
     in property <string> clip-video-seconds;
+    in property <string> clip-video-seconds-desc;
     in property <string> clip-audio-seconds;
+    in property <string> clip-audio-seconds-desc;
+    in property <string> seconds;
     in property <string> folder;
     in property <string> folder-default;
     in property <string> browse;
     in property <string> template;
     in property <string> template-hint;
+    in property <string> container;
+    in property <string> container-desc;
     in property <string> audio-format;
     in property <string> fmt-flac;
     in property <string> fmt-wav;
@@ -67,28 +116,32 @@ export global T {
     in property <string> fmt-polywav;
     in property <string> fmt-opus;
     in property <string> fmt-aac;
-    in property <string> container;
+    in property <string> start-windows;
+    in property <string> start-windows-desc;
+    in property <string> start-admin;
+    in property <string> start-admin-desc;
+    in property <string> notifications;
+    in property <string> notifications-desc;
+    in property <string> sound;
     in property <string> ram-max;
+    in property <string> ram-max-desc;
     in property <string> ram-auto;
     in property <string> ram-estimate;
     in property <string> lock-pages;
+    in property <string> lock-pages-desc;
     in property <string> gpu-priority;
+    in property <string> gpu-priority-desc;
     in property <string> prio-high;
     in property <string> prio-normal;
     in property <string> language;
     in property <string> lang-auto;
-    in property <string> start-windows;
-    in property <string> sound;
-    in property <string> notifications;
-    in property <string> capture-cursor;
-    in property <string> any-fullscreen;
-    in property <string> games;
-    in property <string> games-hint;
     in property <string> about-text;
+    in property <string> version;
     in property <string> save;
     in property <string> cancel;
     in property <string> test;
-    in property <string> status-title;
+    in property <string> status-running;
+    in property <string> status-offline;
 }
 
 export struct Form {
@@ -121,6 +174,7 @@ export struct Form {
     gpu-priority: int,
     language: int,
     start-with-windows: bool,
+    start-as-admin: bool,
     sound: bool,
     notifications: bool,
 }
@@ -135,15 +189,164 @@ export struct SourceRow {
     pick: int,
 }
 
-component FormRow inherits HorizontalLayout {
-    in property <string> label;
-    spacing: 12px;
-    alignment: start;
-    Text {
-        text: root.label;
-        width: 190px;
-        vertical-alignment: center;
-        wrap: word-wrap;
+// Colori delle Impostazioni di Windows 11, chiari o scuri come il sistema.
+global Theme {
+    out property <bool> dark: Palette.color-scheme == ColorScheme.dark;
+    out property <color> window: dark ? #202020 : #f3f3f3;
+    out property <color> card: dark ? #2b2b2b : #fbfbfb;
+    out property <color> stroke: dark ? #1d1d1d : #e5e5e5;
+    out property <color> divider: dark ? #ffffff10 : #0000000d;
+    out property <color> hover: dark ? #ffffff0b : #00000008;
+    out property <color> selected: dark ? #ffffff12 : #0000000b;
+    out property <color> text: dark ? #ffffff : #1b1b1b;
+    out property <color> text-secondary: dark ? #ffffffa0 : #0000009c;
+    out property <color> text-disabled: dark ? #ffffff5c : #0000005c;
+    out property <color> warning: dark ? #fce100 : #9d5d00;
+    out property <color> error: dark ? #ff99a4 : #c42b1c;
+    out property <color> success: dark ? #6ccb5f : #0f7b0f;
+    // Icone di sistema, presenti in Windows 10 e 11.
+    out property <string> icons: "Segoe MDL2 Assets";
+}
+
+component Icon inherits Text {
+    font-family: Theme.icons;
+    font-size: 16px;
+    color: Theme.text;
+    horizontal-alignment: center;
+    vertical-alignment: center;
+}
+
+component NavItem inherits Rectangle {
+    in property <string> icon;
+    in property <string> text;
+    in property <bool> selected;
+    callback clicked();
+    height: 40px;
+    border-radius: 5px;
+    background: selected ? Theme.selected : (ta.has-hover ? Theme.hover : transparent);
+    ta := TouchArea {
+        clicked => { root.clicked(); }
+    }
+    Rectangle {
+        x: 0;
+        width: 3px;
+        height: 16px;
+        border-radius: 1.5px;
+        background: Palette.accent-background;
+        visible: root.selected;
+    }
+    HorizontalLayout {
+        padding-left: 16px;
+        spacing: 14px;
+        Icon { text: root.icon; width: 18px; }
+        Text { text: root.text; color: Theme.text; font-size: 14px; vertical-alignment: center; }
+    }
+}
+
+component IconButton inherits Rectangle {
+    in property <string> icon;
+    in property <bool> enabled: true;
+    callback clicked();
+    width: 32px;
+    height: 32px;
+    border-radius: 4px;
+    background: ta.has-hover && root.enabled ? Theme.selected : transparent;
+    ta := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+    Icon {
+        width: parent.width;
+        height: parent.height;
+        text: root.icon;
+        font-size: 12px;
+        color: root.enabled ? Theme.text : Theme.text-disabled;
+    }
+}
+
+component Card inherits Rectangle {
+    background: Theme.card;
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: Theme.stroke;
+    VerticalLayout {
+        @children
+    }
+}
+
+component Divider inherits Rectangle {
+    height: 1px;
+    background: Theme.divider;
+}
+
+component SectionTitle inherits VerticalLayout {
+    in property <string> text;
+    padding-top: 20px;
+    padding-bottom: 4px;
+    Text { text: root.text; font-size: 14px; font-weight: 600; color: Theme.text; }
+}
+
+// Riga di una scheda: titolo e descrizione a sinistra, controlli a destra.
+component SettingRow inherits HorizontalLayout {
+    in property <string> title;
+    in property <string> description;
+    in property <bool> enabled: true;
+    in property <color> description-color: Theme.text-secondary;
+    padding-left: 16px;
+    padding-right: 16px;
+    padding-top: 11px;
+    padding-bottom: 11px;
+    spacing: 24px;
+    min-height: 60px;
+    VerticalLayout {
+        alignment: center;
+        spacing: 2px;
+        horizontal-stretch: 1;
+        Text {
+            text: root.title;
+            font-size: 14px;
+            color: root.enabled ? Theme.text : Theme.text-disabled;
+            wrap: word-wrap;
+        }
+        if root.description != "": Text {
+            text: root.description;
+            font-size: 12px;
+            color: root.enabled ? root.description-color : Theme.text-disabled;
+            wrap: word-wrap;
+        }
+    }
+    HorizontalLayout {
+        alignment: end;
+        spacing: 8px;
+        horizontal-stretch: 0;
+        @children
+    }
+}
+
+// Pagina con titolo e contenuto scorrevole.
+component Page inherits Rectangle {
+    in property <string> title;
+    in property <string> subtitle;
+    // La pagina non impone dimensioni alla finestra: il contenuto scorre.
+    min-height: 0;
+    min-width: 0;
+    sv := ScrollView {
+        width: parent.width;
+        height: parent.height;
+        content-width: self.visible-width;
+        content-height: content.preferred-height;
+        content := VerticalLayout {
+            width: sv.visible-width;
+            padding-left: 36px;
+            padding-right: 36px;
+            padding-top: 28px;
+            padding-bottom: 24px;
+            spacing: 4px;
+            alignment: start;
+            Text { text: root.title; font-size: 28px; font-weight: 600; color: Theme.text; }
+            Text { text: root.subtitle; font-size: 14px; color: Theme.text-secondary; wrap: word-wrap; }
+            @children
+        }
     }
 }
 
@@ -153,12 +356,12 @@ component HotkeyField inherits Rectangle {
     in property <string> value;
     callback key(string, bool, bool, bool, bool) -> bool;
     callback mouse(int, bool, bool, bool, bool) -> bool;
-    callback clear();
-    min-width: 220px;
+    width: 220px;
     height: 32px;
-    border-width: fs.has-focus ? 2px : 1px;
-    border-color: fs.has-focus ? #2f7de1 : #808080;
     border-radius: 4px;
+    background: Palette.control-background;
+    border-width: 1px;
+    border-color: fs.has-focus ? Palette.accent-background : Theme.stroke;
     fs := FocusScope {
         key-pressed(e) => {
             if (e.text == Key.Escape) {
@@ -168,7 +371,7 @@ component HotkeyField inherits Rectangle {
             }
             accept
         }
-        ta := TouchArea {
+        TouchArea {
             pointer-event(e) => {
                 if (e.kind == PointerEventKind.down) {
                     fs.focus();
@@ -180,21 +383,28 @@ component HotkeyField inherits Rectangle {
                 }
             }
         }
-        Text {
-            x: 8px;
-            text: fs.has-focus ? T.hotkey-press : root.value;
-            vertical-alignment: center;
-            color: fs.has-focus ? #2f7de1 : (self.text == "" ? #808080 : Palette.foreground);
+        HorizontalLayout {
+            padding-left: 10px;
+            padding-right: 10px;
+            spacing: 8px;
+            Icon { text: "\u{E765}"; width: 16px; font-size: 14px; color: Theme.text-secondary; }
+            Text {
+                text: fs.has-focus ? T.hotkey-press : (root.value == "" ? T.hotkey-empty : root.value);
+                vertical-alignment: center;
+                font-size: 14px;
+                color: fs.has-focus ? Palette.accent-background : (root.value == "" ? Theme.text-secondary : Theme.text);
+            }
         }
     }
 }
 
 export component SettingsWindow inherits Window {
     title: T.window-title;
-    preferred-width: 1040px;
-    preferred-height: 680px;
-    min-width: 980px;
+    preferred-width: 1060px;
+    preferred-height: 720px;
+    min-width: 920px;
     min-height: 600px;
+    background: Theme.window;
 
     in-out property <Form> f;
     in-out property <[SourceRow]> sources;
@@ -215,6 +425,8 @@ export component SettingsWindow inherits Window {
     in property <[string]> codec-labels;
     in-out property <int> codec-pos;
     in property <string> codec-warning;
+    in property <string> version;
+    property <int> page: root.start-tab;
 
     callback save();
     callback cancel();
@@ -231,122 +443,246 @@ export component SettingsWindow inherits Window {
     callback hotkey-key(int, string, bool, bool, bool, bool) -> bool;
     callback hotkey-mouse(int, int, bool, bool, bool, bool) -> bool;
 
-    VerticalLayout {
-        padding: 12px;
-        spacing: 8px;
-
-        TabWidget {
-            current-index: root.start-tab;
-            Tab {
-                title: T.tab-video;
+    HorizontalLayout {
+        // Barra laterale: nome, sezioni, stato del registratore.
+        VerticalLayout {
+            width: 264px;
+            padding: 12px;
+            padding-top: 18px;
+            spacing: 4px;
+            HorizontalLayout {
+                padding-left: 12px;
+                padding-bottom: 18px;
+                spacing: 12px;
+                Rectangle {
+                    width: 28px;
+                    height: 28px;
+                    border-radius: 7px;
+                    background: #e5484d;
+                    Rectangle { width: 10px; height: 10px; border-radius: 5px; background: white; }
+                }
                 VerticalLayout {
-                    padding-top: 12px;
-                    spacing: 10px;
-                    alignment: start;
-                    FormRow {
-                        label: "";
-                        CheckBox { text: T.video-enabled; checked <=> root.f.video-enabled; }
+                    alignment: center;
+                    Text { text: "ClipRec"; font-size: 16px; font-weight: 600; color: Theme.text; }
+                    Text { text: T.app-subtitle; font-size: 12px; color: Theme.text-secondary; }
+                }
+            }
+            NavItem { icon: "\u{E714}"; text: T.tab-video; selected: root.page == 0; clicked => { root.page = 0; } }
+            NavItem { icon: "\u{E767}"; text: T.tab-audio; selected: root.page == 1; clicked => { root.page = 1; } }
+            NavItem { icon: "\u{E765}"; text: T.tab-hotkeys; selected: root.page == 2; clicked => { root.page = 2; } }
+            NavItem { icon: "\u{E74E}"; text: T.tab-saving; selected: root.page == 3; clicked => { root.page = 3; } }
+            NavItem { icon: "\u{E713}"; text: T.tab-advanced; selected: root.page == 4; clicked => { root.page = 4; } }
+            NavItem { icon: "\u{E946}"; text: T.tab-about; selected: root.page == 5; clicked => { root.page = 5; } }
+            Rectangle { vertical-stretch: 1; }
+            // Stato dal vivo (named pipe verso il core) e clip di prova.
+            Card {
+                VerticalLayout {
+                    padding: 14px;
+                    spacing: 8px;
+                    HorizontalLayout {
+                        spacing: 8px;
+                        VerticalLayout {
+                            alignment: center;
+                            Rectangle {
+                                width: 8px;
+                                height: 8px;
+                                border-radius: 4px;
+                                background: root.status-online ? Theme.success : Theme.text-disabled;
+                            }
+                        }
+                        Text {
+                            text: root.status-online ? T.status-running : T.status-offline;
+                            font-size: 14px;
+                            font-weight: 600;
+                            color: Theme.text;
+                        }
                     }
-                    FormRow {
-                        label: T.video-source;
+                    if root.status-online: Text {
+                        text: root.status-text;
+                        font-size: 12px;
+                        color: Theme.text-secondary;
+                        wrap: word-wrap;
+                    }
+                    Button {
+                        text: T.test;
+                        enabled: root.status-online;
+                        clicked => { root.test-clip(); }
+                    }
+                }
+            }
+        }
+
+        // Pagina scelta e barra dei pulsanti.
+        VerticalLayout {
+            horizontal-stretch: 1;
+            if root.page == 0: Page {
+                vertical-stretch: 1;
+                title: T.tab-video;
+                subtitle: T.video-subtitle;
+                SectionTitle { text: T.sec-recording; }
+                Card {
+                    SettingRow {
+                        title: T.video-enabled;
+                        description: T.video-enabled-desc;
+                        Switch { checked <=> root.f.video-enabled; }
+                    }
+                    Divider { }
+                    SettingRow {
+                        title: T.video-source;
+                        description: T.video-source-desc;
+                        enabled: root.f.video-enabled;
                         ComboBox {
                             model: [T.auto, T.src-monitor, T.src-window, T.src-game];
                             current-index <=> root.f.source-kind;
-                            width: 200px;
+                            enabled: root.f.video-enabled;
+                            width: 220px;
                         }
                     }
-                    FormRow {
-                        label: T.video-target;
-                        visible: root.f.source-kind > 0;
-                        LineEdit { text <=> root.f.source-target; width: 280px; enabled: root.f.video-enabled; }
+                    if root.f.source-kind > 0: Divider { }
+                    if root.f.source-kind > 0: SettingRow {
+                        title: T.video-target;
+                        description: root.f.source-kind == 1 ? T.target-monitor-desc : (root.f.source-kind == 2 ? T.target-window-desc : T.target-game-desc);
+                        enabled: root.f.video-enabled;
+                        LineEdit { text <=> root.f.source-target; enabled: root.f.video-enabled; width: 220px; }
                         ComboBox {
                             model: root.f.source-kind == 1 ? root.monitors : (root.f.source-kind == 2 ? root.windows-list : root.apps);
                             current-index: -1;
-                            width: 200px;
+                            enabled: root.f.video-enabled;
+                            width: 160px;
                             selected(v) => {
                                 root.video-target-pick(self.current-index);
                                 self.current-index = -1;
                             }
                         }
                     }
-                    FormRow {
-                        label: T.video-codec;
-                        ComboBox { model: root.codec-labels; current-index <=> root.codec-pos; selected(v) => { root.codec-picked(self.current-index); } width: 200px; }
-                        Text { text: root.codec-warning; color: #d08000; vertical-alignment: center; wrap: word-wrap; }
+                }
+                SectionTitle { text: T.sec-quality; }
+                Card {
+                    SettingRow {
+                        title: T.video-codec;
+                        description: root.codec-warning != "" ? root.codec-warning : T.video-codec-desc;
+                        description-color: root.codec-warning != "" ? Theme.warning : Theme.text-secondary;
+                        ComboBox {
+                            model: root.codec-labels;
+                            current-index <=> root.codec-pos;
+                            selected(v) => { root.codec-picked(self.current-index); }
+                            width: 220px;
+                        }
                     }
-                    FormRow {
-                        label: T.video-resolution;
-                        ComboBox { model: [T.native, "1440p", "1080p", "720p"]; current-index <=> root.f.resolution; width: 200px; }
+                    Divider { }
+                    SettingRow {
+                        title: T.video-resolution;
+                        description: T.video-resolution-desc;
+                        ComboBox { model: [T.native, "1440p", "1080p", "720p"]; current-index <=> root.f.resolution; width: 220px; }
                     }
-                    FormRow {
-                        label: T.video-fps;
-                        ComboBox { model: ["30", "60", "120", "144"]; current-index <=> root.f.fps; width: 200px; }
+                    Divider { }
+                    SettingRow {
+                        title: T.video-fps;
+                        ComboBox { model: ["30", "60", "120", "144"]; current-index <=> root.f.fps; width: 220px; }
                     }
-                    FormRow {
-                        label: T.video-quality;
+                    Divider { }
+                    SettingRow {
+                        title: T.video-quality;
+                        description: T.video-quality-desc;
                         Slider {
                             minimum: 10;
                             maximum: 40;
                             value: root.f.quality;
                             changed(v) => { root.f.quality = Math.round(v); }
-                            width: 280px;
+                            width: 180px;
                         }
-                        Text { text: root.f.quality; vertical-alignment: center; }
+                        Text { text: root.f.quality; width: 32px; color: Theme.text; vertical-alignment: center; horizontal-alignment: right; }
                     }
-                    FormRow {
-                        label: T.video-max-bitrate;
-                        LineEdit { text <=> root.f.max-bitrate; placeholder-text: T.auto; width: 200px; }
+                    Divider { }
+                    SettingRow {
+                        title: T.video-max-bitrate;
+                        description: T.video-max-bitrate-desc;
+                        LineEdit { text <=> root.f.max-bitrate; placeholder-text: T.auto; width: 220px; }
+                    }
+                }
+                SectionTitle { text: T.sec-capture; }
+                Card {
+                    SettingRow {
+                        title: T.capture-cursor;
+                        Switch { checked <=> root.f.capture-cursor; }
+                    }
+                    Divider { }
+                    SettingRow {
+                        title: T.any-fullscreen;
+                        description: T.any-fullscreen-desc;
+                        Switch { checked <=> root.f.any-fullscreen; }
+                    }
+                    Divider { }
+                    SettingRow {
+                        title: T.games;
+                        description: T.games-hint;
+                        LineEdit { text <=> root.f.games; width: 300px; }
                     }
                 }
             }
-            Tab {
+
+            if root.page == 1: Page {
+                vertical-stretch: 1;
                 title: T.tab-audio;
+                subtitle: T.audio-subtitle;
+                SectionTitle { text: T.sec-tracks; }
+                Card {
+                    SettingRow {
+                        title: T.audio-mode;
+                        description: T.audio-mode-desc;
+                        ComboBox { model: [T.mode-separate, T.mode-merged]; current-index <=> root.f.audio-mode; width: 240px; }
+                    }
+                    Divider { }
+                    SettingRow {
+                        title: T.add-mix;
+                        description: T.add-mix-desc;
+                        enabled: root.f.audio-mode == 0;
+                        Switch { checked <=> root.f.add-mix; enabled: root.f.audio-mode == 0; }
+                    }
+                }
+                SectionTitle { text: T.sec-sources; }
+                Text { text: T.sources-hint; font-size: 12px; color: Theme.text-secondary; wrap: word-wrap; }
                 VerticalLayout {
-                    padding-top: 12px;
+                    padding-top: 6px;
                     spacing: 8px;
-                    FormRow {
-                        label: T.audio-mode;
-                        ComboBox { model: [T.mode-separate, T.mode-merged]; current-index <=> root.f.audio-mode; width: 260px; }
-                        CheckBox {
-                            text: T.add-mix;
-                            checked <=> root.f.add-mix;
-                            enabled: root.f.audio-mode == 0;
-                        }
-                    }
-                    CheckBox { text: T.process-events; checked <=> root.f.process-events; }
-                    Text { text: T.sources-hint; color: #808080; wrap: word-wrap; }
-                    HorizontalLayout {
-                        spacing: 6px;
-                        Text { text: T.col-name; width: 150px; color: #a0a0a0; }
-                        Text { text: T.col-kind; width: 200px; color: #a0a0a0; }
-                        Text { text: T.col-source; horizontal-stretch: 1; color: #a0a0a0; }
-                        Text { text: T.col-volume; width: 136px; color: #a0a0a0; }
-                        Text { text: T.col-delay; width: 140px; color: #a0a0a0; }
-                        Rectangle { width: 114px; }
-                    }
-                    ScrollView {
+                    for r[i] in root.sources: Card {
                         VerticalLayout {
-                            spacing: 6px;
-                            alignment: start;
-                            for r[i] in root.sources: HorizontalLayout {
-                                spacing: 6px;
+                            padding: 14px;
+                            spacing: 10px;
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Rectangle {
+                                    width: 24px;
+                                    height: 24px;
+                                    y: (parent.height - self.height) / 2;
+                                    border-radius: 12px;
+                                    background: Theme.selected;
+                                    Text { text: i + 1; font-size: 12px; color: Theme.text-secondary; }
+                                }
                                 LineEdit {
                                     text: r.name;
                                     placeholder-text: T.placeholder-name;
-                                    width: 150px;
+                                    width: 220px;
                                     edited(t) => { root.source-changed(i, { name: t, kind: r.kind, target: r.target, volume: r.volume, delay: r.delay, pick: r.pick }); }
                                 }
                                 ComboBox {
                                     model: [T.kind-app, T.kind-input, T.kind-output, T.kind-except];
                                     current-index: r.kind;
-                                    width: 200px;
+                                    width: 220px;
                                     selected(v) => {
                                         root.source-changed(i, { name: r.name, kind: self.current-index, target: "", volume: r.volume, delay: r.delay, pick: 0 });
                                     }
                                 }
-                                // App e «tutto tranne un'app»: nome dell'eseguibile, scritto o scelto tra le app aperte.
+                                Rectangle { horizontal-stretch: 1; }
+                                IconButton { icon: "\u{E70E}"; enabled: i > 0; clicked => { root.source-move(i, -1); } }
+                                IconButton { icon: "\u{E70D}"; enabled: i < root.sources.length - 1; clicked => { root.source-move(i, 1); } }
+                                IconButton { icon: "\u{E74D}"; clicked => { root.source-remove(i); } }
+                            }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                // App e «tutto tranne un'app»: eseguibile scritto o scelto tra le app aperte.
                                 if r.kind == 0 || r.kind == 3: HorizontalLayout {
-                                    spacing: 6px;
+                                    spacing: 8px;
                                     horizontal-stretch: 1;
                                     LineEdit {
                                         text: r.target;
@@ -357,7 +693,7 @@ export component SettingsWindow inherits Window {
                                     ComboBox {
                                         model: root.app-choices;
                                         current-index: 0;
-                                        width: 190px;
+                                        width: 200px;
                                         selected(v) => {
                                             if (self.current-index > 0) {
                                                 root.source-pick(i, r.kind, self.current-index);
@@ -368,7 +704,7 @@ export component SettingsWindow inherits Window {
                                 }
                                 // Ingresso e uscita: il dispositivo per nome, il predefinito di Windows in testa.
                                 if r.kind == 1 || r.kind == 2: HorizontalLayout {
-                                    spacing: 6px;
+                                    spacing: 8px;
                                     horizontal-stretch: 1;
                                     ComboBox {
                                         model: r.kind == 1 ? root.inputs : root.outputs;
@@ -376,28 +712,32 @@ export component SettingsWindow inherits Window {
                                         horizontal-stretch: 1;
                                         selected(v) => { root.source-pick(i, r.kind, self.current-index); }
                                     }
-                                    if r.pick < 0: Text { text: T.device-missing; color: #e06c6c; vertical-alignment: center; }
+                                    if r.pick < 0: Text { text: T.device-missing; color: Theme.error; vertical-alignment: center; }
                                 }
+                            }
+                            // Volume e ritardo.
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Text { text: T.col-volume; color: Theme.text-secondary; vertical-alignment: center; }
                                 Slider {
                                     minimum: 0;
                                     maximum: 200;
                                     value: r.volume * 100;
-                                    width: 90px;
+                                    width: 200px;
                                     changed(v) => { root.source-changed(i, { name: r.name, kind: r.kind, target: r.target, volume: Math.round(v) / 100, delay: r.delay, pick: r.pick }); }
                                 }
-                                Text { text: Math.round(r.volume * 100) + "%"; width: 40px; vertical-alignment: center; }
+                                Text { text: Math.round(r.volume * 100) + "%"; width: 40px; color: Theme.text; vertical-alignment: center; }
+                                Rectangle { horizontal-stretch: 1; }
+                                Text { text: T.col-delay; color: Theme.text-secondary; vertical-alignment: center; }
                                 SpinBox {
                                     minimum: -1000;
                                     maximum: 1000;
                                     step-size: 10;
                                     value: r.delay;
-                                    width: 120px;
+                                    width: 110px;
                                     edited(v) => { root.source-changed(i, { name: r.name, kind: r.kind, target: r.target, volume: r.volume, delay: v, pick: r.pick }); }
                                 }
-                                Text { text: "ms"; vertical-alignment: center; }
-                                Button { text: "▲"; width: 34px; enabled: i > 0; clicked => { root.source-move(i, -1); } }
-                                Button { text: "▼"; width: 34px; enabled: i < root.sources.length - 1; clicked => { root.source-move(i, 1); } }
-                                Button { text: "X"; width: 34px; clicked => { root.source-remove(i); } }
+                                Text { text: "ms"; color: Theme.text-secondary; vertical-alignment: center; }
                             }
                         }
                     }
@@ -406,188 +746,223 @@ export component SettingsWindow inherits Window {
                         Button { text: T.add-source; enabled: root.sources.length < 8; clicked => { root.source-add(); } }
                     }
                 }
+                SectionTitle { text: T.sec-apps; }
+                Card {
+                    SettingRow {
+                        title: T.process-events;
+                        description: T.process-events-desc;
+                        Switch { checked <=> root.f.process-events; }
+                    }
+                }
             }
-            Tab {
+
+            if root.page == 2: Page {
+                vertical-stretch: 1;
                 title: T.tab-hotkeys;
-                VerticalLayout {
-                    padding-top: 12px;
-                    spacing: 12px;
-                    alignment: start;
-                    FormRow {
-                        label: T.hotkey-video;
+                subtitle: T.hotkeys-subtitle;
+                SectionTitle { text: T.sec-keyboard; }
+                Card {
+                    SettingRow {
+                        title: T.hotkey-video;
+                        description: T.hotkey-video-desc;
                         HotkeyField {
                             value: root.f.hotkey-video;
                             key(t, c, a, s, m) => { root.hotkey-key(0, t, c, a, s, m) }
                             mouse(b, c, a, s, m) => { root.hotkey-mouse(0, b, c, a, s, m) }
                         }
-                        Button { text: T.hotkey-clear; clicked => { root.f.hotkey-video = ""; } }
+                        IconButton { icon: "\u{E711}"; enabled: root.f.hotkey-video != ""; clicked => { root.f.hotkey-video = ""; } }
                     }
-                    FormRow {
-                        label: T.hotkey-audio;
+                    Divider { }
+                    SettingRow {
+                        title: T.hotkey-audio;
+                        description: T.hotkey-audio-desc;
                         HotkeyField {
                             value: root.f.hotkey-audio;
                             key(t, c, a, s, m) => { root.hotkey-key(1, t, c, a, s, m) }
                             mouse(b, c, a, s, m) => { root.hotkey-mouse(1, b, c, a, s, m) }
                         }
-                        Button { text: T.hotkey-clear; clicked => { root.f.hotkey-audio = ""; } }
+                        IconButton { icon: "\u{E711}"; enabled: root.f.hotkey-audio != ""; clicked => { root.f.hotkey-audio = ""; } }
                     }
-                    FormRow {
-                        label: T.pad-video;
-                        LineEdit { text <=> root.f.pad-video; placeholder-text: "Back+A"; min-width: 260px; }
-                    }
-                    FormRow {
-                        label: T.pad-audio;
-                        LineEdit { text <=> root.f.pad-audio; placeholder-text: "LB+RB+Y"; min-width: 260px; }
-                    }
-                    Text { text: T.pad-hint; color: #808080; wrap: word-wrap; }
-                    Text { text: T.hotkey-hint; color: #808080; wrap: word-wrap; }
-                    Text { text: root.hotkey-warning; color: #d08000; wrap: word-wrap; visible: root.hotkey-warning != ""; }
                 }
+                Text { text: T.hotkey-hint; font-size: 12px; color: Theme.text-secondary; wrap: word-wrap; }
+                if root.hotkey-warning != "": Text { text: root.hotkey-warning; font-size: 12px; color: Theme.warning; wrap: word-wrap; }
+                SectionTitle { text: T.sec-controller; }
+                Card {
+                    SettingRow {
+                        title: T.pad-video;
+                        LineEdit { text <=> root.f.pad-video; placeholder-text: "Back+A"; width: 220px; }
+                    }
+                    Divider { }
+                    SettingRow {
+                        title: T.pad-audio;
+                        LineEdit { text <=> root.f.pad-audio; placeholder-text: "LB+RB+Y"; width: 220px; }
+                    }
+                }
+                Text { text: T.pad-hint; font-size: 12px; color: Theme.text-secondary; wrap: word-wrap; }
             }
-            Tab {
+
+            if root.page == 3: Page {
+                vertical-stretch: 1;
                 title: T.tab-saving;
-                VerticalLayout {
-                    padding-top: 12px;
-                    spacing: 10px;
-                    alignment: start;
-                    FormRow {
-                        label: T.clip-video-seconds;
+                subtitle: T.saving-subtitle;
+                SectionTitle { text: T.sec-length; }
+                Card {
+                    SettingRow {
+                        title: T.clip-video-seconds;
+                        description: T.clip-video-seconds-desc;
                         SpinBox { minimum: 1; maximum: 3600; value <=> root.f.video-seconds; width: 140px; }
+                        Text { text: T.seconds; color: Theme.text-secondary; vertical-alignment: center; }
                     }
-                    FormRow {
-                        label: T.clip-audio-seconds;
+                    Divider { }
+                    SettingRow {
+                        title: T.clip-audio-seconds;
+                        description: T.clip-audio-seconds-desc;
                         SpinBox { minimum: 1; maximum: 7200; value <=> root.f.audio-seconds; width: 140px; }
+                        Text { text: T.seconds; color: Theme.text-secondary; vertical-alignment: center; }
                     }
-                    FormRow {
-                        label: T.folder;
-                        LineEdit { text <=> root.f.folder; placeholder-text: T.folder-default; min-width: 420px; }
+                }
+                SectionTitle { text: T.sec-files; }
+                Card {
+                    SettingRow {
+                        title: T.folder;
+                        LineEdit { text <=> root.f.folder; placeholder-text: T.folder-default; width: 320px; }
                         Button { text: T.browse; clicked => { root.browse-folder(); } }
                     }
-                    FormRow {
-                        label: T.template;
-                        LineEdit { text <=> root.f.template; min-width: 420px; }
+                    Divider { }
+                    SettingRow {
+                        title: T.template;
+                        description: T.template-hint;
+                        LineEdit { text <=> root.f.template; width: 320px; }
                     }
-                    FormRow {
-                        label: "";
-                        Text { text: T.template-hint; color: #808080; wrap: word-wrap; }
+                    Divider { }
+                    SettingRow {
+                        title: T.container;
+                        description: T.container-desc;
+                        ComboBox { model: ["MP4", "MKV"]; current-index <=> root.f.container; width: 240px; }
                     }
-                    FormRow {
-                        label: T.audio-format;
-                        ComboBox { model: [T.fmt-flac, T.fmt-wav, T.fmt-mka, T.fmt-polywav, T.fmt-opus, T.fmt-aac]; current-index <=> root.f.audio-format; width: 260px; }
-                    }
-                    FormRow {
-                        label: T.container;
-                        ComboBox { model: ["MP4", "MKV"]; current-index <=> root.f.container; width: 140px; }
+                    Divider { }
+                    SettingRow {
+                        title: T.audio-format;
+                        ComboBox { model: [T.fmt-flac, T.fmt-wav, T.fmt-mka, T.fmt-polywav, T.fmt-opus, T.fmt-aac]; current-index <=> root.f.audio-format; width: 240px; }
                     }
                 }
             }
-            Tab {
+
+            if root.page == 4: Page {
+                vertical-stretch: 1;
                 title: T.tab-advanced;
-                ScrollView {
-                    VerticalLayout {
-                        padding-top: 12px;
-                        spacing: 10px;
-                        alignment: start;
-                        FormRow {
-                            label: T.ram-max;
-                            LineEdit { text <=> root.f.max-mb; placeholder-text: T.ram-auto; width: 200px; }
+                subtitle: T.advanced-subtitle;
+                SectionTitle { text: T.sec-startup; }
+                Card {
+                    SettingRow {
+                        title: T.start-windows;
+                        description: T.start-windows-desc;
+                        Switch { checked <=> root.f.start-with-windows; }
+                    }
+                    Divider { }
+                    // Disponibile solo con l'avvio con Windows: senza, resta spento e grigio.
+                    SettingRow {
+                        title: T.start-admin;
+                        description: T.start-admin-desc;
+                        enabled: root.f.start-with-windows;
+                        Switch {
+                            checked: root.f.start-with-windows && root.f.start-as-admin;
+                            enabled: root.f.start-with-windows;
+                            toggled => { root.f.start-as-admin = self.checked; }
                         }
-                        FormRow {
-                            label: T.ram-estimate;
-                            Text { text: root.ram-estimate; vertical-alignment: center; font-weight: 700; }
-                        }
-                        FormRow {
-                            label: "";
-                            CheckBox { text: T.lock-pages; checked <=> root.f.lock-pages; }
-                        }
-                        FormRow {
-                            label: T.gpu-priority;
-                            ComboBox { model: [T.prio-high, T.prio-normal]; current-index <=> root.f.gpu-priority; width: 200px; }
-                        }
-                        FormRow {
-                            label: T.language;
-                            ComboBox {
-                                model: [T.lang-auto, "Italiano", "English"];
-                                current-index <=> root.f.language;
-                                width: 200px;
-                                selected(v) => { root.language-changed(); }
-                            }
-                        }
-                        FormRow {
-                            label: "";
-                            CheckBox { text: T.start-windows; checked <=> root.f.start-with-windows; }
-                        }
-                        FormRow {
-                            label: "";
-                            CheckBox { text: T.sound; checked <=> root.f.sound; }
-                        }
-                        FormRow {
-                            label: "";
-                            CheckBox { text: T.notifications; checked <=> root.f.notifications; }
-                        }
-                        FormRow {
-                            label: "";
-                            CheckBox { text: T.capture-cursor; checked <=> root.f.capture-cursor; }
-                        }
-                        FormRow {
-                            label: "";
-                            CheckBox { text: T.any-fullscreen; checked <=> root.f.any-fullscreen; }
-                        }
-                        FormRow {
-                            label: T.games;
-                            LineEdit { text <=> root.f.games; placeholder-text: T.games-hint; min-width: 420px; }
+                    }
+                }
+                SectionTitle { text: T.sec-notify; }
+                Card {
+                    SettingRow {
+                        title: T.notifications;
+                        description: T.notifications-desc;
+                        Switch { checked <=> root.f.notifications; }
+                    }
+                    Divider { }
+                    SettingRow {
+                        title: T.sound;
+                        Switch { checked <=> root.f.sound; }
+                    }
+                }
+                SectionTitle { text: T.sec-memory; }
+                Card {
+                    SettingRow {
+                        title: T.ram-max;
+                        description: T.ram-max-desc + "  " + T.ram-estimate + ": " + root.ram-estimate;
+                        LineEdit { text <=> root.f.max-mb; placeholder-text: T.ram-auto; width: 220px; }
+                    }
+                    Divider { }
+                    SettingRow {
+                        title: T.lock-pages;
+                        description: T.lock-pages-desc;
+                        Switch { checked <=> root.f.lock-pages; }
+                    }
+                }
+                SectionTitle { text: T.sec-performance; }
+                Card {
+                    SettingRow {
+                        title: T.gpu-priority;
+                        description: T.gpu-priority-desc;
+                        ComboBox { model: [T.prio-high, T.prio-normal]; current-index <=> root.f.gpu-priority; width: 220px; }
+                    }
+                }
+                SectionTitle { text: T.sec-language; }
+                Card {
+                    SettingRow {
+                        title: T.language;
+                        ComboBox {
+                            model: [T.lang-auto, "Italiano", "English"];
+                            current-index <=> root.f.language;
+                            width: 220px;
+                            selected(v) => { root.language-changed(); }
                         }
                     }
                 }
             }
-            Tab {
+
+            if root.page == 5: Page {
+                vertical-stretch: 1;
                 title: T.tab-about;
+                subtitle: T.about-subtitle;
+                SectionTitle { text: "ClipRec"; }
+                Card {
+                    VerticalLayout {
+                        padding: 16px;
+                        spacing: 6px;
+                        Text { text: T.version + " " + root.version; font-size: 12px; color: Theme.text-secondary; }
+                        Text { text: T.about-text; font-size: 14px; color: Theme.text; wrap: word-wrap; }
+                    }
+                }
                 VerticalLayout {
-                    padding-top: 12px;
-                    spacing: 12px;
+                    padding-top: 16px;
                     alignment: start;
-                    Text { text: T.about-text; wrap: word-wrap; }
-                    AboutSlint { preferred-height: 220px; }
+                    HorizontalLayout {
+                        alignment: start;
+                        AboutSlint { width: 220px; height: 110px; }
+                    }
                 }
             }
-        }
 
-        // Pannello di stato dal vivo (named pipe verso il core).
-        Rectangle {
-            height: 40px;
-            border-width: 1px;
-            border-color: #80808080;
-            border-radius: 4px;
+            // Messaggio dell'ultima azione e pulsanti.
+            Divider { }
             HorizontalLayout {
-                padding-left: 10px;
-                padding-right: 10px;
-                spacing: 10px;
+                padding-left: 36px;
+                padding-right: 24px;
+                padding-top: 14px;
+                padding-bottom: 14px;
+                spacing: 8px;
                 Text {
-                    text: root.status-text;
+                    text: root.message;
+                    font-size: 13px;
+                    color: root.message-error ? Theme.error : Theme.success;
                     vertical-alignment: center;
-                    color: root.status-online ? #2e9e4f : #808080;
                     horizontal-stretch: 1;
-                    overflow: elide;
+                    wrap: word-wrap;
                 }
-                Button {
-                    text: T.test;
-                    enabled: root.status-online;
-                    clicked => { root.test-clip(); }
-                }
+                Button { text: T.cancel; width: 120px; clicked => { root.cancel(); } }
+                Button { text: T.save; primary: true; width: 120px; clicked => { root.save(); } }
             }
-        }
-
-        HorizontalLayout {
-            spacing: 10px;
-            Text {
-                text: root.message;
-                color: root.message-error ? #d03030 : #2e9e4f;
-                vertical-alignment: center;
-                horizontal-stretch: 1;
-                wrap: word-wrap;
-            }
-            Button { text: T.save; primary: true; clicked => { root.save(); } }
-            Button { text: T.cancel; clicked => { root.cancel(); } }
         }
     }
 }

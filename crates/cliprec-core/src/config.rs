@@ -303,6 +303,9 @@ pub struct GeneralConfig {
     /// "it", "en" o "auto".
     pub language: String,
     pub start_with_windows: bool,
+    /// Con `start_with_windows`: all'accesso parte come amministratore (attività pianificata con
+    /// privilegi massimi invece del valore `Run`). Serve per i giochi avviati come amministratore.
+    pub start_as_admin: bool,
     pub sound_on_save: bool,
     pub notifications: bool,
     /// Classe di priorità GPU: "high" (default) o "normal". Mai "realtime".
@@ -314,6 +317,7 @@ impl Default for GeneralConfig {
         Self {
             language: "auto".into(),
             start_with_windows: false,
+            start_as_admin: false,
             sound_on_save: true,
             notifications: true,
             gpu_priority: "high".into(),

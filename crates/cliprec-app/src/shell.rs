@@ -299,8 +299,10 @@ impl Ui {
                     n.sound = cfg.general.sound_on_save;
                 }
                 // «Avvio con Windows» cambiato dalle impostazioni: si applica subito, non al prossimo avvio.
-                if !notify::headless() {
-                    crate::autostart::apply(&cfg);
+                if !notify::headless()
+                    && let Some(problem) = crate::autostart::apply(&cfg)
+                {
+                    self.app.process_event(&EngineEvent::Warning(problem));
                 }
                 if let Ok(mut c) = self.app.config.lock() {
                     *c = cfg;
@@ -563,8 +565,10 @@ pub fn run(io: ShellIo) -> anyhow::Result<()> {
         tracing::error!("server IPC non avviato: {e}");
     }
 
-    if !notify::headless() {
-        crate::autostart::apply(&config);
+    if !notify::headless()
+        && let Some(problem) = crate::autostart::apply(&config)
+    {
+        app.process_event(&EngineEvent::Warning(problem));
     }
 
     // SAFETY: finestra valida; il timer è sul thread corrente e viene tolto all'uscita.

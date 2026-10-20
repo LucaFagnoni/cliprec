@@ -219,6 +219,41 @@ pub fn restart_elevated() -> anyhow::Result<()> {
     })
 }
 
+/// Esegue `file params` come amministratore (dialogo UAC), senza finestra, e ne aspetta l'uscita
+/// (al più 60 s). Restituisce il codice d'uscita; errore se l'utente rifiuta.
+pub fn run_elevated_wait(file: &str, params: &str) -> anyhow::Result<u32> {
+    use windows::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject};
+    use windows::Win32::UI::Shell::{SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW};
+    use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
+    let (file, params) = (wide(file), wide(params));
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_NOASYNC | SEE_MASK_NOCLOSEPROCESS,
+        lpVerb: windows::core::w!("runas"),
+        lpFile: PCWSTR(file.as_ptr()),
+        lpParameters: PCWSTR(params.as_ptr()),
+        nShow: SW_HIDE.0,
+        ..Default::default()
+    };
+    // SAFETY: `info` è completa e le stringhe terminate da NUL vivono per tutta la chiamata.
+    unsafe { ShellExecuteExW(&mut info) }.map_err(|e| {
+        if e.code() == windows::Win32::Foundation::ERROR_CANCELLED.to_hresult() {
+            anyhow::anyhow!("richiesta di amministratore annullata")
+        } else {
+            anyhow::anyhow!("ShellExecuteExW: {e}")
+        }
+    })?;
+    let process = info.hProcess;
+    let mut code = 1u32;
+    // SAFETY: `process` è l'handle restituito da ShellExecuteExW con NOCLOSEPROCESS: lo si usa e lo si chiude qui.
+    unsafe {
+        WaitForSingleObject(process, 60_000);
+        let _ = GetExitCodeProcess(process, &mut code);
+        let _ = CloseHandle(process);
+    }
+    Ok(code)
+}
+
 /// Messaggio registrato con cui una seconda istanza avvisa la prima.
 pub fn second_instance_msg() -> u32 {
     // SAFETY: stringa statica terminata da NUL; il valore è lo stesso in tutti i processi.

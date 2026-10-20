@@ -60,7 +60,7 @@ pub fn format_status(lang: Lang, s: &EngineStatus) -> String {
     let mb = s.buffer_bytes as f64 / 1_048_576.0;
     let mut t = if s.video_enabled {
         format!(
-            "{}: {} · {:.0} fps · {}: {} · {}: {:.0} MB · {}: {:.0} s · {}: {}",
+            "{}: {} · {:.0} fps\n{}: {}\n{}: {:.0} MB · {}: {:.0} s\n{}: {}",
             lang.pick("Encoder", "Encoder"),
             if s.encoder.is_empty() { "-" } else { &s.encoder },
             s.fps,
@@ -75,7 +75,7 @@ pub fn format_status(lang: Lang, s: &EngineStatus) -> String {
         )
     } else {
         format!(
-            "{} · RAM: {:.0} MB · {}: {:.0} s · {}: {}",
+            "{}\nRAM: {:.0} MB · {}: {:.0} s\n{}: {}",
             lang.pick("Solo audio", "Audio only"),
             mb,
             lang.pick("coperti", "covered"),
@@ -85,10 +85,10 @@ pub fn format_status(lang: Lang, s: &EngineStatus) -> String {
         )
     };
     if !s.buffer_running {
-        t.push_str(lang.pick(" · buffer fermo", " · buffer stopped"));
+        t.push_str(lang.pick("\nBuffer fermo", "\nBuffer stopped"));
     }
     if let Some(e) = &s.last_error {
-        t.push_str(&format!(" · {e}"));
+        t.push_str(&format!("\n{e}"));
     }
     t
 }

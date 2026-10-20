@@ -110,6 +110,7 @@ pub fn to_form(c: &Config) -> (Form, Vec<SourceRow>) {
             _ => 0,
         },
         start_with_windows: c.general.start_with_windows,
+        start_as_admin: c.general.start_as_admin,
         sound: c.general.sound_on_save,
         notifications: c.general.notifications,
     };
@@ -293,6 +294,7 @@ pub fn build_lenient(form: &Form, rows: &[SourceRow], base: &Config) -> (Config,
     }
     .into();
     c.general.start_with_windows = form.start_with_windows;
+    c.general.start_as_admin = form.start_as_admin;
     c.general.sound_on_save = form.sound;
     c.general.notifications = form.notifications;
 
@@ -411,6 +413,8 @@ mod tests {
         c.clips.audio_format = AudioClipFormat::Mka;
         c.memory.max_mb = Some(800);
         c.general.language = "en".into();
+        c.general.start_with_windows = true;
+        c.general.start_as_admin = true;
         c.general.gpu_priority = "normal".into();
         let (f, r) = rows_of(&c);
         assert_eq!(build_config(&f, &r, &c).unwrap(), c);

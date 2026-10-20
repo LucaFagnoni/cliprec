@@ -200,6 +200,7 @@ fn main() -> anyhow::Result<()> {
     };
 
     let ui = SettingsWindow::new()?;
+    ui.set_version(env!("CARGO_PKG_VERSION").into());
     let (form, rows_vec) = model::to_form(&base);
     let lang = Lang::resolve(form.language);
     set_lang(&ui, lang);
