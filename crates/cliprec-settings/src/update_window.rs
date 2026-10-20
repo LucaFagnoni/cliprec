@@ -21,6 +21,10 @@ pub struct View {
     pub can_install: bool,
     pub install_text: String,
     pub close_text: String,
+    /// Barra del download da 0 a 1; negativa = nascosta.
+    pub progress: f32,
+    /// Aggiornamento riuscito: la finestra si chiude da sola.
+    pub done: bool,
 }
 
 /// Stato della finestra tra un controllo e l'altro.
@@ -28,6 +32,8 @@ pub struct View {
 pub struct Tracker {
     /// Versione che si sta installando: dopo il riavvio il core nuovo deve riportarla.
     pub target: Option<String>,
+    /// Versione del core all'apertura: se poi ne riporta un'altra, l'aggiornamento è riuscito.
+    pub first: Option<String>,
 }
 
 /// Note di GitHub (Markdown) in testo semplice: niente `**`, apici inversi né `#`, elenchi con «•».
@@ -51,7 +57,12 @@ pub fn plain_notes(md: &str) -> String {
 /// Vista per lo stato `info` del core (`None` = core non raggiungibile).
 pub fn view(lang: Lang, info: Option<&UpdateInfo>, tracker: &mut Tracker) -> View {
     let t = |it: &str, en: &str| lang.pick(it, en).to_string();
-    let mut v = View { close_text: t("Chiudi", "Close"), install_text: t("Aggiorna e riavvia", "Update and restart"), ..View::default() };
+    let mut v = View {
+        close_text: t("Chiudi", "Close"),
+        install_text: t("Aggiorna e riavvia", "Update and restart"),
+        progress: -1.0,
+        ..View::default()
+    };
     let Some(info) = info else {
         // Durante il riavvio il core per qualche secondo non risponde.
         if tracker.target.is_some() {
@@ -64,11 +75,11 @@ pub fn view(lang: Lang, info: Option<&UpdateInfo>, tracker: &mut Tracker) -> Vie
         }
         return v;
     };
-    if let Some(target) = &tracker.target
-        && info.current == *target
-    {
-        v.heading = format!("{} {target}", t("ClipRec è aggiornato alla versione", "ClipRec has been updated to version"));
-        v.notes.clone_from(&info.notes);
+    let first = tracker.first.get_or_insert_with(|| info.current.clone()).clone();
+    if tracker.target.as_ref().is_some_and(|t| *t == info.current) || info.current != first {
+        v.heading = format!("{} {}", t("ClipRec è aggiornato alla versione", "ClipRec has been updated to version"), info.current);
+        v.subheading = t("La finestra si chiude da sola.", "This window closes by itself.");
+        v.done = true;
         return v;
     }
     let current = format!("{} {}", t("In uso:", "Installed:"), info.current);
@@ -102,7 +113,11 @@ pub fn view(lang: Lang, info: Option<&UpdateInfo>, tracker: &mut Tracker) -> Vie
             v.can_install = true;
             v.close_text = t("Più tardi", "Later");
             let busy = match phase {
-                UpdatePhase::Downloading => Some(t("Download dell'aggiornamento…", "Downloading the update…")),
+                UpdatePhase::Downloading => {
+                    v.progress = info.progress.unwrap_or(-1.0);
+                    let pct = info.progress.map(|p| format!(" {:.0}%", p * 100.0)).unwrap_or_default();
+                    Some(format!("{}{pct}", t("Download dell'aggiornamento…", "Downloading the update…")))
+                }
                 UpdatePhase::Installing => Some(t("Installazione…", "Installing…")),
                 UpdatePhase::Restarting => Some(t("Riavvio di ClipRec…", "Restarting ClipRec…")),
                 _ => None,
@@ -128,6 +143,7 @@ fn show(ui: &UpdateWindow, v: View, lang: Lang) {
     ui.set_can_install(v.can_install);
     ui.set_install_text(v.install_text.into());
     ui.set_close_text(v.close_text.into());
+    ui.set_progress(v.progress);
 }
 
 /// Apre la finestra e la aggiorna due volte al secondo fino alla chiusura.
@@ -152,7 +168,16 @@ pub fn run(lang: Lang) -> anyhow::Result<()> {
                 _ => None,
             };
             let v = view(lang, info.as_ref(), &mut tracker);
+            let done = v.done;
             if weak.upgrade_in_event_loop(move |ui| show(&ui, v, lang)).is_err() {
+                break;
+            }
+            if done {
+                // Aggiornamento riuscito: il messaggio resta qualche secondo, poi la finestra si chiude.
+                std::thread::sleep(Duration::from_secs(3));
+                let _ = slint::invoke_from_event_loop(|| {
+                    let _ = slint::quit_event_loop();
+                });
                 break;
             }
             std::thread::sleep(Duration::from_millis(500));
@@ -167,7 +192,7 @@ mod tests {
     use super::*;
 
     fn info(phase: UpdatePhase, available: Option<&str>) -> UpdateInfo {
-        UpdateInfo { current: "0.1.0".into(), available: available.map(Into::into), notes: "Novità".into(), phase }
+        UpdateInfo { current: "0.1.0".into(), available: available.map(Into::into), notes: "Novità".into(), phase, progress: None }
     }
 
     #[test]
@@ -176,8 +201,11 @@ mod tests {
         let v = view(Lang::It, Some(&info(UpdatePhase::Idle, Some("0.2.0"))), &mut tr);
         assert!(v.can_install && !v.busy && v.heading.contains("0.2.0") && v.notes == "Novità");
         assert_eq!(v.close_text, "Più tardi");
-        let v = view(Lang::It, Some(&info(UpdatePhase::Downloading, Some("0.2.0"))), &mut tr);
-        assert!(v.busy && v.status.contains("Download"));
+        let mut dl = info(UpdatePhase::Downloading, Some("0.2.0"));
+        dl.progress = Some(0.42);
+        let v = view(Lang::It, Some(&dl), &mut tr);
+        assert!(v.busy && v.status.contains("Download") && v.status.contains("42%"));
+        assert!((v.progress - 0.42).abs() < 1e-6, "barra al 42%");
         // Il core si chiude per il riavvio: la finestra resta in attesa.
         let v = view(Lang::It, None, &mut tr);
         assert!(v.busy && !v.error);
@@ -186,6 +214,19 @@ mod tests {
         new.current = "0.2.0".into();
         let v = view(Lang::It, Some(&new), &mut tr);
         assert!(v.heading.contains("aggiornato") && v.heading.contains("0.2.0") && !v.busy);
+        assert!(v.done, "a aggiornamento riuscito la finestra si chiude");
+    }
+
+    /// Anche senza aver visto le fasi (download troppo veloce), una versione diversa da quella
+    /// dell'apertura vuol dire aggiornamento riuscito.
+    #[test]
+    fn new_version_after_restart_closes_even_if_phases_were_missed() {
+        let mut tr = Tracker::default();
+        let _ = view(Lang::It, Some(&info(UpdatePhase::Idle, Some("0.2.0"))), &mut tr);
+        let _ = view(Lang::It, None, &mut tr);
+        let mut new = info(UpdatePhase::Idle, None);
+        new.current = "0.2.0".into();
+        assert!(view(Lang::It, Some(&new), &mut tr).done);
     }
 
     #[test]

@@ -116,6 +116,7 @@ pub fn to_form(c: &Config) -> (Form, Vec<SourceRow>) {
             AudioClipFormat::PolyWav => 3,
             AudioClipFormat::Opus => 4,
             AudioClipFormat::Aac => 5,
+            AudioClipFormat::Mp3 => 6,
         },
         container: i32::from(c.clips.container == VideoContainer::Mkv),
         max_mb: c.memory.max_mb.map(|v| v.to_string()).unwrap_or_default().into(),
@@ -319,6 +320,7 @@ pub fn build_lenient(form: &Form, rows: &[SourceRow], base: &Config) -> (Config,
         3 => AudioClipFormat::PolyWav,
         4 => AudioClipFormat::Opus,
         5 => AudioClipFormat::Aac,
+        6 => AudioClipFormat::Mp3,
         _ => AudioClipFormat::FlacPerTrack,
     };
     c.clips.container = if form.container == 1 { VideoContainer::Mkv } else { VideoContainer::Mp4 };

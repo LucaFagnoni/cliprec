@@ -30,6 +30,8 @@ pub struct Release {
     pub sha_url: String,
     /// Note della release (Markdown).
     pub notes: String,
+    /// Dimensione dello zip in byte (0 = ignota), per l'avanzamento del download.
+    pub size: u64,
 }
 
 fn version_parts(v: &str) -> Option<[u64; 3]> {
@@ -52,18 +54,14 @@ pub fn parse_latest(json: &str) -> Option<Release> {
         return None;
     }
     let assets = v["assets"].as_array()?;
-    let url = |suffix: &str| {
-        assets
-            .iter()
-            .find(|a| a["name"].as_str().is_some_and(|n| n.ends_with(suffix)))
-            .and_then(|a| a["browser_download_url"].as_str())
-            .map(str::to_owned)
-    };
+    let asset = |suffix: &str| assets.iter().find(|a| a["name"].as_str().is_some_and(|n| n.ends_with(suffix)));
+    let url = |suffix: &str| asset(suffix).and_then(|a| a["browser_download_url"].as_str()).map(str::to_owned);
     Some(Release {
         version: v["tag_name"].as_str()?.trim_start_matches(['v', 'V']).to_owned(),
         zip_url: url("-portable.zip")?,
         sha_url: url("-portable.zip.sha256")?,
         notes: v["body"].as_str().unwrap_or_default().trim().to_owned(),
+        size: asset("-portable.zip").and_then(|a| a["size"].as_u64()).unwrap_or(0),
     })
 }
 
@@ -89,6 +87,38 @@ fn fetch(url: &str, out: Option<&Path>) -> anyhow::Result<Vec<u8>> {
     Ok(o.stdout)
 }
 
+/// Scarica `url` in `out` riportando l'avanzamento (byte arrivati su `size`) ogni 150 ms.
+fn download(url: &str, out: &Path, size: u64, progress: &dyn Fn(f32)) -> anyhow::Result<()> {
+    use std::io::Read;
+    let mut child = system_tool("curl.exe")
+        .args(["-sSfL", "--max-time", "900", "-H", "User-Agent: ClipRec"])
+        .arg(url)
+        .arg("-o")
+        .arg(out)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .context("curl.exe")?;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            if !status.success() {
+                let mut err = String::new();
+                if let Some(mut e) = child.stderr.take() {
+                    let _ = e.read_to_string(&mut err);
+                }
+                bail!("{url}: {}", err.trim());
+            }
+            progress(1.0);
+            return Ok(());
+        }
+        if size > 0 {
+            let got = std::fs::metadata(out).map(|m| m.len()).unwrap_or(0);
+            progress((got as f64 / size as f64).min(1.0) as f32);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(150));
+    }
+}
+
 /// L'ultima release, se è più recente di questa versione.
 pub fn check() -> anyhow::Result<Option<Release>> {
     let body = fetch(&format!("https://api.github.com/repos/{REPO}/releases/latest"), None)?;
@@ -106,14 +136,15 @@ fn sha256(path: &Path) -> anyhow::Result<String> {
     Ok(hash)
 }
 
-/// Scarica, verifica ed estrae `release`, poi ne mette i file in `app_dir` (`installing` segna
-/// il passaggio dal download alla sostituzione). Al ritorno con `Ok` va solo riavviato ClipRec.
-pub fn install(release: &Release, app_dir: &Path, installing: impl FnOnce()) -> anyhow::Result<()> {
+/// Scarica, verifica ed estrae `release`, poi ne mette i file in `app_dir` (`progress` riporta il
+/// download, `installing` segna il passaggio alla sostituzione). Al ritorno con `Ok` va solo
+/// riavviato ClipRec.
+pub fn install(release: &Release, app_dir: &Path, progress: &dyn Fn(f32), installing: impl FnOnce()) -> anyhow::Result<()> {
     let work = std::env::temp_dir().join(format!("cliprec-update-{}", release.version));
     let _ = std::fs::remove_dir_all(&work);
     std::fs::create_dir_all(&work)?;
     let zip = work.join("ClipRec.zip");
-    fetch(&release.zip_url, Some(&zip))?;
+    download(&release.zip_url, &zip, release.size, progress)?;
     let expected = String::from_utf8_lossy(&fetch(&release.sha_url, None)?).split_whitespace().next().unwrap_or("").to_ascii_lowercase();
     if expected.len() != 64 || sha256(&zip)? != expected {
         bail!("lo zip scaricato non corrisponde allo SHA-256 pubblicato");
@@ -232,7 +263,14 @@ impl Updater {
 
     fn set_phase(&self, phase: UpdatePhase) {
         if let Ok(mut i) = self.info.lock() {
+            i.progress = None;
             i.phase = phase;
+        }
+    }
+
+    fn set_progress(&self, p: f32) {
+        if let Ok(mut i) = self.info.lock() {
+            i.progress = Some(p);
         }
     }
 
@@ -291,7 +329,7 @@ impl Updater {
         let spawned = std::thread::Builder::new().name("aggiornamento".into()).spawn(move || {
             let result = app_dir()
                 .context("cartella di ClipRec sconosciuta")
-                .and_then(|dir| install(&release, &dir, || me.set_phase(UpdatePhase::Installing)).map(|()| dir));
+                .and_then(|dir| install(&release, &dir, &|p| me.set_progress(p), || me.set_phase(UpdatePhase::Installing)).map(|()| dir));
             match result {
                 Ok(dir) => {
                     tracing::info!(versione = %release.version, "aggiornamento installato, riavvio");
@@ -349,7 +387,7 @@ mod tests {
     fn latest_release_needs_zip_and_checksum() {
         let json = r#"{"tag_name":"v0.2.0","draft":false,"prerelease":false,"assets":[
             {"name":"ClipRec-0.2.0-Setup.exe","browser_download_url":"https://x/setup.exe"},
-            {"name":"ClipRec-0.2.0-portable.zip","browser_download_url":"https://x/p.zip"},
+            {"name":"ClipRec-0.2.0-portable.zip","browser_download_url":"https://x/p.zip","size":61000000},
             {"name":"ClipRec-0.2.0-portable.zip.sha256","browser_download_url":"https://x/p.zip.sha256"}]}"#;
         assert_eq!(
             parse_latest(json),
@@ -358,6 +396,7 @@ mod tests {
                 zip_url: "https://x/p.zip".into(),
                 sha_url: "https://x/p.zip.sha256".into(),
                 notes: String::new(),
+                size: 61_000_000,
             })
         );
         assert_eq!(parse_latest(&json.replace(".zip.sha256", ".txt")), None, "senza checksum non si aggiorna");

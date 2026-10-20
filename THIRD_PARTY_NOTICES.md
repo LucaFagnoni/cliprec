@@ -31,6 +31,7 @@ progetti originali: vanno verificati sui sorgenti della build indicata.
 | --- | --- | --- |
 | AMD AMF (intestazioni) | MIT | Advanced Micro Devices, Inc. |
 | nv-codec-headers | MIT | NVIDIA Corporation e il progetto FFmpeg |
+| LAME | LGPL-2.0+ | The LAME Project |
 | Opus | BSD-3-Clause | Xiph.Org Foundation, Skype Limited, Broadcom e altri |
 | SVT-AV1 | BSD-3-Clause-Clear con licenza di brevetti AOM | Alliance for Open Media e Intel Corporation |
 | oneVPL | MIT | Intel Corporation |

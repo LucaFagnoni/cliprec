@@ -2,7 +2,7 @@
 // le sezioni, pagine di schede con righe (titolo, descrizione, controllo a destra). Le stringhe
 // vengono da `global T`, riempito da Rust in italiano o inglese (src/i18n.rs); la logica vive in
 // Rust (src/model.rs), qui solo la vista.
-import { ComboBox, SpinBox, Slider, LineEdit, Button, ScrollView, AboutSlint, Palette, Switch, Spinner } from "std-widgets.slint";
+import { ComboBox, SpinBox, Slider, LineEdit, Button, ScrollView, AboutSlint, Palette, Switch, Spinner, ProgressIndicator } from "std-widgets.slint";
 
 export global T {
     in property <string> window-title;
@@ -146,6 +146,7 @@ export global T {
     in property <string> fmt-polywav;
     in property <string> fmt-opus;
     in property <string> fmt-aac;
+    in property <string> fmt-mp3;
     in property <string> start-windows;
     in property <string> start-windows-desc;
     in property <string> start-admin;
@@ -958,7 +959,7 @@ export component SettingsWindow inherits Window {
                     Divider { }
                     SettingRow {
                         title: T.audio-format;
-                        ComboBox { model: [T.fmt-flac, T.fmt-wav, T.fmt-mka, T.fmt-polywav, T.fmt-opus, T.fmt-aac]; current-index <=> root.f.audio-format; width: 240px; }
+                        ComboBox { model: [T.fmt-flac, T.fmt-wav, T.fmt-mka, T.fmt-polywav, T.fmt-opus, T.fmt-aac, T.fmt-mp3]; current-index <=> root.f.audio-format; width: 240px; }
                     }
                 }
             }
@@ -1118,6 +1119,7 @@ export component UpdateWindow inherits Window {
     in property <bool> can-install;
     in property <string> install-text;
     in property <string> close-text;
+    in property <float> progress: -1;
     callback install();
     callback dismiss();
 
@@ -1153,6 +1155,7 @@ export component UpdateWindow inherits Window {
             }
         }
         if root.notes == "": Rectangle { vertical-stretch: 1; }
+        if root.progress >= 0: ProgressIndicator { progress: root.progress; height: 6px; }
         HorizontalLayout {
             spacing: 10px;
             if root.busy: Spinner { width: 20px; height: 20px; indeterminate: true; }

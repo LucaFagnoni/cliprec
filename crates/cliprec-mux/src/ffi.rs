@@ -41,6 +41,8 @@ pub(crate) enum AudioCodec {
     PcmS24,
     /// Opus (libopus), float interleaved.
     Opus { bit_rate: i64 },
+    /// MP3 (libmp3lame), planare float.
+    Mp3 { bit_rate: i64 },
 }
 
 pub(crate) struct Track<'a> {
@@ -359,6 +361,7 @@ fn open_audio_encoder(codec: AudioCodec, global_header: bool) -> Result<Encoder,
         AudioCodec::Flac => (c"flac", AVSampleFormat::S32, 0),
         AudioCodec::PcmS24 => (c"pcm_s24le", AVSampleFormat::S32, 0),
         AudioCodec::Opus { bit_rate } => (c"libopus", AVSampleFormat::FLT, bit_rate),
+        AudioCodec::Mp3 { bit_rate } => (c"libmp3lame", AVSampleFormat::FLTP, bit_rate),
     };
     // SAFETY: nome letterale; il contesto va subito nel proprietario RAII.
     unsafe {
@@ -470,7 +473,7 @@ fn encode_track(
             (*frame.0).nb_samples = count as c_int;
             (*frame.0).pts = pos as i64;
             match codec {
-                AudioCodec::Aac { .. } => {
+                AudioCodec::Aac { .. } | AudioCodec::Mp3 { .. } => {
                     let l = std::slice::from_raw_parts_mut((*frame.0).data[0].cast::<f32>(), count);
                     let r = std::slice::from_raw_parts_mut((*frame.0).data[1].cast::<f32>(), count);
                     for ((l, r), s) in l.iter_mut().zip(r.iter_mut()).zip(input) {

@@ -175,7 +175,20 @@ pub fn open(device: &GpuDevice, settings: &EncoderSettings, encoder_name: &str) 
         (_, Some(b)) => u32::from(b.min(4)),
         (_, None) => auto_b_frames,
     };
-    let enc = with_bframe_fallback(encoder_name, b_frames, |b| ffi::HwEncoder::open(device, settings, encoder_name, codec, vendor, b))?;
+    let enc = with_bframe_fallback(encoder_name, b_frames, |b| ffi::HwEncoder::open(device, settings, encoder_name, codec, vendor, b))
+        .or_else(|e| match e {
+            // Alcuni driver AMD rifiutano QVBR, pre-analisi o VBAQ (dipende da GPU e versione):
+            // si riprova lo stesso encoder in VBR semplice, senza B-frame, prima di scartarlo.
+            EncodeError::Unsupported(ref msg) | EncodeError::SessionRejected(ref msg) if vendor == Vendor::Amf => {
+                tracing::info!(encoder = encoder_name, motivo = %msg, "AMF rifiutato, riprovo in VBR semplice");
+                let mut plain = settings.clone();
+                plain.advanced.rate_control = cliprec_core::config::RateControl::Vbr;
+                plain.advanced.lookahead = false;
+                plain.advanced.adaptive_quantization = false;
+                ffi::HwEncoder::open(device, &plain, encoder_name, codec, vendor, 0)
+            }
+            other => Err(other),
+        })?;
     tracing::info!(
         encoder = encoder_name,
         width = settings.width,
@@ -218,7 +231,7 @@ pub fn open_after(device: &GpuDevice, settings: &EncoderSettings, failed: &[Stri
         match open(device, settings, &name) {
             Ok(enc) => return Ok(enc),
             Err(e) => {
-                tracing::debug!(encoder = %name, error = %e, "encoder scartato");
+                tracing::info!(encoder = %name, error = %e, "encoder scartato");
                 last = e;
             }
         }
@@ -246,7 +259,14 @@ pub fn probe(device: &GpuDevice) -> Vec<(VideoCodec, String)> {
     candidates(CodecChoice::Av1)
         .into_iter()
         .filter(|(_, name)| name != SOFTWARE_ENCODER)
-        .filter(|(_, name)| open(device, &settings, name).is_ok())
+        .filter(|(_, name)| match open(device, &settings, name) {
+            Ok(_) => true,
+            Err(e) => {
+                // Nel log il motivo di ogni encoder che non si apre (es. AMF su una GPU AMD).
+                tracing::info!(encoder = %name, "encoder non disponibile: {e}");
+                false
+            }
+        })
         .collect()
 }
 

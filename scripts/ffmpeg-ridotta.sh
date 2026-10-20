@@ -7,7 +7,7 @@ src=$(cygpath -u "$1")
 prefix=$(cygpath -u "$2")
 cd "$src"
 
-# Le librerie esterne (svt-av1, opus, libvpl) e il runtime di gcc entrano staticamente nelle DLL:
+# Le librerie esterne (svt-av1, opus, lame, libvpl) e il runtime di gcc entrano staticamente nelle DLL:
 # la distribuzione resta di quattro DLL (avcodec, avformat, avutil, swresample) senza dipendenze MinGW.
 # libvpl (dispatcher QSV) è C++ e il suo .pc non dichiara libstdc++: la si aggiunge a mano.
 ./configure \
@@ -25,14 +25,14 @@ cd "$src"
   --enable-encoder=h264_nvenc,hevc_nvenc,av1_nvenc \
   --enable-encoder=h264_qsv,hevc_qsv,av1_qsv \
   --enable-encoder=h264_amf,hevc_amf,av1_amf \
-  --enable-encoder=libsvtav1,libopus,aac,flac,pcm_s24le \
-  --enable-muxer=mp4,matroska,flac,wav,opus \
+  --enable-encoder=libsvtav1,libopus,libmp3lame,aac,flac,pcm_s24le \
+  --enable-muxer=mp4,matroska,flac,wav,opus,mp3 \
   --enable-bsf=aac_adtstoasc \
   --enable-parser=hevc \
   --enable-protocol=file \
   --enable-ffnvcodec --enable-nvenc --enable-amf --enable-libvpl \
   --enable-d3d11va \
-  --enable-libsvtav1 --enable-libopus
+  --enable-libsvtav1 --enable-libopus --enable-libmp3lame
 
 make -j"$(nproc)"
 make install

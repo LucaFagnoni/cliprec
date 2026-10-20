@@ -472,7 +472,13 @@ fn build_ui(app: &Arc<App>, hwnd: HWND) -> anyhow::Result<Ui> {
     menu.append_items(&items)?;
     // Senza gestore gli eventi dell'icona (ogni passaggio del mouse) si accumulano in un canale che
     // nessuno legge. Va installato prima di creare l'icona: il primo valore impostato resta.
-    tray_icon::TrayIconEvent::set_event_handler(Some(|_| {}));
+    // Doppio clic sinistro: impostazioni.
+    let dbl_app = Arc::clone(app);
+    tray_icon::TrayIconEvent::set_event_handler(Some(move |e: tray_icon::TrayIconEvent| {
+        if let tray_icon::TrayIconEvent::DoubleClick { button: tray_icon::MouseButton::Left, .. } = e {
+            dbl_app.launch_settings();
+        }
+    }));
     let icon = icon::tray_icon(IconState::Stopped).context("icona della tray")?;
     let tray = TrayIconBuilder::new().with_menu(Box::new(menu)).with_icon(icon).with_tooltip("ClipRec").build()?;
 

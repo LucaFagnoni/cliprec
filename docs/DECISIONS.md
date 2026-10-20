@@ -175,3 +175,12 @@ Le voci [DEFAULT] e [PROPOSTA] di SPEC.md valgono come decise; qui ci sono quell
     dichiara) e il parser HEVC (in una build minima `hevc/parse.o` resta senza le SEI e il link
     fallisce). `FFmpeg-BUILD.txt` e `THIRD_PARTY_NOTICES.md` leggono `ffmpeg-version.txt`, scritto
     dallo script al posto di `ffmpeg -version`.
+38. **MP3 con LAME, ripiego AMF, avanzamento degli aggiornamenti** (20 ottobre, richieste di Luca).
+    Clip audio anche in MP3 (192 kbit/s, un file per traccia): FFmpeg non ha un encoder MP3 suo,
+    quindi la build ridotta aggiunge `libmp3lame` (LAME 3.100, LGPL-2.0+, statica, pacchetto MSYS2
+    `mingw-w64-ucrt-x86_64-lame-3.100-3`) e il muxer `mp3`. AMF: su una RX 6700 XT nessun encoder
+    AMD risultava disponibile e qui non c'è una GPU AMD per capirne il motivo; ora ogni encoder
+    scartato scrive il motivo nel log (livello info) e, se AMF rifiuta l'apertura, si riprova lo
+    stesso encoder in VBR semplice senza B-frame, pre-analisi e VBAQ prima di scartarlo. Updater:
+    download con avanzamento (dimensione dello zip dalla release, file misurato ogni 150 ms) e
+    chiusura automatica della finestra quando il core riparte con un'altra versione.

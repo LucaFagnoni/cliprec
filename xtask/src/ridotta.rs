@@ -23,7 +23,7 @@ pub const FFMPEG_SRC_SHA256: &str = "e5b24d5779f736b3ef8a985d52051d48fece48712f8
 
 /// Pacchetti MSYS2 fissati: compilatore, assembler e le librerie che finiscono nelle DLL.
 /// Le altre dipendenze di gcc (gmp, isl, zstd...) vengono dal repository al momento della build.
-pub const PACKAGES: [&str; 18] = [
+pub const PACKAGES: [&str; 19] = [
     "make-4.4.1-3",
     "diffutils-3.12-1",
     "mingw-w64-ucrt-x86_64-gcc-16.2.0-6",
@@ -39,6 +39,7 @@ pub const PACKAGES: [&str; 18] = [
     "mingw-w64-ucrt-x86_64-pkgconf-1~3.0.10-1",
     "mingw-w64-ucrt-x86_64-svt-av1-4.2.0-1",
     "mingw-w64-ucrt-x86_64-opus-1.6.1-2",
+    "mingw-w64-ucrt-x86_64-lame-3.100-3",
     "mingw-w64-ucrt-x86_64-libvpl-2.17.0-1",
     "mingw-w64-ucrt-x86_64-amf-headers-1.5.3-1",
     "mingw-w64-ucrt-x86_64-ffnvcodec-headers-13.0.19.0-1",

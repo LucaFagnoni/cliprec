@@ -407,7 +407,7 @@ fn audio_clips_polywav_opus_aac() {
         }
     }
 
-    for (format, ext, codec) in [(AudioClipFormat::Opus, "opus", "opus"), (AudioClipFormat::Aac, "m4a", "aac")] {
+    for (format, ext, codec) in [(AudioClipFormat::Opus, "opus", "opus"), (AudioClipFormat::Aac, "m4a", "aac"), (AudioClipFormat::Mp3, "mp3", "mp3")] {
         let base = out_dir().join(format!("audio_{ext}"));
         clean(&base);
         let saved = write_audio_clip(&base, &refs, format).unwrap();

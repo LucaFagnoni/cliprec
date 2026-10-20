@@ -192,6 +192,7 @@ strings! {
     set_fmt_polywav: "WAV polifonico unico", "Single polyphonic WAV";
     set_fmt_opus: "Opus, un file per traccia", "Opus, one file per track";
     set_fmt_aac: "AAC, un file per traccia", "AAC, one file per track";
+    set_fmt_mp3: "MP3, un file per traccia", "MP3, one file per track";
     set_start_windows: "Avvia con Windows", "Start with Windows";
     set_start_windows_desc: "ClipRec parte all'accesso, nella barra delle applicazioni.", "ClipRec starts at sign-in, in the notification area.";
     set_start_admin: "Avvia come amministratore", "Start as administrator";

@@ -341,6 +341,8 @@ pub enum AudioClipFormat {
     Opus,
     /// AAC-LC in M4A per la condivisione: un file per traccia (in traccia unica: un solo file).
     Aac,
+    /// MP3 (LAME) per la massima compatibilità: un file per traccia (in traccia unica: un solo file).
+    Mp3,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

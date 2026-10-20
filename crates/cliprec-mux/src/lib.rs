@@ -431,6 +431,7 @@ pub fn write_audio_clip<A: ClipAudio + ?Sized>(
         AudioClipFormat::Mka => ("matroska", AudioCodec::Flac, ".mka"),
         AudioClipFormat::Opus => ("opus", AudioCodec::Opus { bit_rate: 128_000 }, ".opus"),
         AudioClipFormat::Aac => ("mp4", AudioCodec::Aac { bit_rate: 192_000 }, ".m4a"),
+        AudioClipFormat::Mp3 => ("mp3", AudioCodec::Mp3 { bit_rate: 192_000 }, ".mp3"),
         AudioClipFormat::PolyWav => {
             let saved = write_reserved(path, ".wav", false, |part| polywav::write(part, audio))?;
             return Ok(SavedClip { kind: ClipKind::Audio, bytes: size_of(&saved), path: saved, duration_secs });

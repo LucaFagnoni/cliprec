@@ -59,6 +59,8 @@ pub struct UpdateInfo {
     /// Note della release (testo Markdown di GitHub).
     pub notes: String,
     pub phase: UpdatePhase,
+    /// Avanzamento del download da 0 a 1 (solo in `Downloading`, se la dimensione è nota).
+    pub progress: Option<f32>,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
