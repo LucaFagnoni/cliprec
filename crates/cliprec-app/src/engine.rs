@@ -204,7 +204,13 @@ impl Session {
     fn poll_states(&mut self) {
         let mut now: Vec<(String, SourceState)> = self.audio.as_ref().map(|a| a.states()).unwrap_or_default();
         if let Some(v) = &self.video {
-            now.push((v.describe(), v.stats().state));
+            let state = v.stats().state;
+            // Il bersaglio è passato su un monitor di un'altra GPU: device, sorgente ed encoder vanno
+            // ricreati sull'adattatore giusto (catturare tra GPU diverse scende a pochi fps).
+            if state == SourceState::Waiting(cliprec_capture::ADAPTER_CHANGED.to_string()) {
+                self.restart.store(true, Ordering::SeqCst);
+            }
+            now.push((v.describe(), state));
         }
         for (name, st) in &now {
             let changed = !self.states.iter().any(|(n, s)| n == name && s == st);
