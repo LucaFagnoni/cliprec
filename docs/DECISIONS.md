@@ -45,6 +45,10 @@ Le voci [DEFAULT] e [PROPOSTA] di SPEC.md valgono come decise; qui ci sono quell
     `SubagentStop` esegue clippy e test dei crate modificati nel worktree (`scripts/gate.ps1 -Hook`) e
     blocca al massimo tre volte, per non creare cicli senza fine di notte.
 11. **Nome della named pipe** `\\.\pipe\cliprec-<utente>`, messaggi JSON una riga per messaggio.
-12. **Spegnimento del PC: non programmato.** AVVIO.md, regola 6, vieta di spegnere o riavviare il PC;
-    lo spegnimento automatico è una scelta di Luca e alle 03:37 risultavano al lavoro quattro sessioni
-    di pokewilds.
+12. **Spegnimento del PC: non lo esegue ClipRec.** AVVIO.md, regola 6, vieta di spegnere o riavviare
+    il PC. Alle 03:47 la sessione «Pokewilds Godot iOS build setup» ha comunicato che, su indicazione di
+    Luca, lo spegnimento forzato lo fa lei: un suo watcher dalle 09:00 controlla
+    `.coordinamento/` e lancia `shutdown /s /f /t 60` quando ci sono sia `pokewilds-finito.txt` sia
+    `cliprec-finito.txt`, e comunque alle 09:30. ClipRec scrive `cliprec-finito.txt` solo se Luca lo
+    conferma direttamente in questa chat; altrimenti vale la scadenza delle 09:30. `.coordinamento/`
+    è ignorata da git.
