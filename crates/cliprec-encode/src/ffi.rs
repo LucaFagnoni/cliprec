@@ -8,7 +8,8 @@ use ffmpeg_the_third::ffi;
 use windows::Win32::Graphics::Direct3D11::{D3D11_BIND_DECODER, D3D11_BIND_RENDER_TARGET};
 use windows::core::Interface;
 
-use crate::d3d::Converter;
+use crate::d3d::{Converter, Output};
+use crate::yuv::{Plane, nv12_to_i420};
 use crate::{EncoderSettings, Vendor};
 
 /// Texture del pool fisso per QSV (`async_depth` 4 + B-frame + margine). D3D11 rifiuta array NV12
@@ -99,6 +100,12 @@ pub(crate) fn quiet_logs() {
     }
 }
 
+/// Preset di SVT-AV1. Non 10-12: in modalità random access SVT avvisa che da M10 in su sono
+/// «per l'automazione» e a M10 su 1080p sono usciti 3 frame interamente grigi (82-84 nel test con
+/// colori pieni, confermato decodificando con dav1d e con libaom). M9 in release: 1080p 389 fps su
+/// colori pieni, 1440p 108 fps su rumore (caso peggiore), oltre i 60 fps richiesti.
+const SOFTWARE_PRESET: u32 = 9;
+
 /// Superficie QSV mappata una volta all'apertura su una fetta del pool D3D11 e riusata: niente
 /// `av_hwframe_get_buffer`/`av_hwframe_map` per frame. È libera quando l'encoder ha rilasciato
 /// il suo riferimento (`buf[0]` con un solo riferimento, il nostro).
@@ -122,6 +129,7 @@ pub(crate) struct HwEncoder {
     next_slot: usize,
     pkt: *mut ffi::AVPacket,
     converter: Converter,
+    vendor: Vendor,
     params: VideoStreamParams,
     /// Indice e pts QPC del primo frame: pts dell'encoder = indice − primo indice (time_base 1/fps).
     first: Option<(u64, QpcTime)>,
@@ -198,7 +206,12 @@ impl HwEncoder {
         if s.width == 0 || s.height == 0 || !s.width.is_multiple_of(2) || !s.height.is_multiple_of(2) || s.fps == 0 {
             return Err(EncodeError::Failed(format!("{name}: dimensione {}×{} @ {} fps non valida", s.width, s.height, s.fps)));
         }
-        let converter = Converter::new(gpu, s.width, s.height, s.fps, vendor == Vendor::Qsv)
+        let output = match vendor {
+            Vendor::Qsv => Output::PoolViaCopy,
+            Vendor::Software => Output::Cpu,
+            Vendor::Nvenc | Vendor::Amf => Output::Pool,
+        };
+        let converter = Converter::new(gpu, s.width, s.height, s.fps, output)
             .map_err(|e| EncodeError::Unsupported(format!("{name}: video processor D3D11: {e}")))?;
 
         let max_kbps = s.max_bitrate_kbps_for(codec);
@@ -213,6 +226,7 @@ impl HwEncoder {
             next_slot: 0,
             pkt: ptr::null_mut(),
             converter,
+            vendor,
             params: VideoStreamParams {
                 codec,
                 width: s.width,
@@ -231,59 +245,9 @@ impl HwEncoder {
         // scritti nei contesti D3D11 seguono hwcontext_d3d11va.h; i riferimenti COM passati a
         // FFmpeg sono AddRef-ati (clone + into_raw) perché FFmpeg li rilascia alla chiusura.
         unsafe {
-            enc.device_ref = ffi::av_hwdevice_ctx_alloc(ffi::AVHWDeviceType::D3D11VA);
-            if enc.device_ref.is_null() {
-                return Err(EncodeError::Failed(format!("{name}: av_hwdevice_ctx_alloc")));
-            }
-            let dev = (*enc.device_ref).data as *mut ffi::AVHWDeviceContext;
-            let d3d = (*dev).hwctx as *mut AVD3D11VADeviceContext;
-            (*d3d).device = gpu.device.clone().into_raw();
-            (*d3d).device_context = gpu.context.clone().into_raw();
-            let ret = ffi::av_hwdevice_ctx_init(enc.device_ref);
-            if ret < 0 {
-                return Err(open_error(name, "av_hwdevice_ctx_init", ret));
-            }
-
-            enc.frames_ref = ffi::av_hwframe_ctx_alloc(enc.device_ref);
-            if enc.frames_ref.is_null() {
-                return Err(EncodeError::Failed(format!("{name}: av_hwframe_ctx_alloc")));
-            }
-            let fc = (*enc.frames_ref).data as *mut ffi::AVHWFramesContext;
-            (*fc).format = ffi::AVPixelFormat::D3D11;
-            (*fc).sw_format = ffi::AVPixelFormat::NV12;
-            (*fc).width = s.width as c_int;
-            (*fc).height = s.height as c_int;
-            let fhw = (*fc).hwctx as *mut AVD3D11VAFramesContext;
-            if vendor == Vendor::Qsv {
-                (*fc).initial_pool_size = QSV_POOL_SIZE;
-                (*fhw).bind_flags = D3D11_BIND_DECODER.0 as u32;
-            } else {
-                (*fhw).bind_flags = D3D11_BIND_RENDER_TARGET.0 as u32;
-            }
-            let ret = ffi::av_hwframe_ctx_init(enc.frames_ref);
-            if ret < 0 {
-                return Err(open_error(name, "av_hwframe_ctx_init", ret));
-            }
-
-            let (pix_fmt, enc_frames) = if vendor == Vendor::Qsv {
-                let ret = ffi::av_hwdevice_ctx_create_derived(&mut enc.qsv_device_ref, ffi::AVHWDeviceType::QSV, enc.device_ref, 0);
-                if ret < 0 {
-                    return Err(EncodeError::Unsupported(format!("{name}: device QSV derivato: {}", av_error_string(ret))));
-                }
-                let ret = ffi::av_hwframe_ctx_create_derived(
-                    &mut enc.qsv_frames_ref,
-                    ffi::AVPixelFormat::QSV,
-                    enc.qsv_device_ref,
-                    enc.frames_ref,
-                    0,
-                );
-                if ret < 0 {
-                    return Err(EncodeError::Unsupported(format!("{name}: frame QSV derivati: {}", av_error_string(ret))));
-                }
-                enc.map_qsv_slots(name)?;
-                (ffi::AVPixelFormat::QSV, enc.qsv_frames_ref)
-            } else {
-                (ffi::AVPixelFormat::D3D11, enc.frames_ref)
+            let (pix_fmt, enc_frames) = match vendor {
+                Vendor::Software => (ffi::AVPixelFormat::YUV420P, ptr::null_mut()),
+                _ => enc.init_hw(gpu, s, name, vendor)?,
             };
 
             enc.ctx = ffi::avcodec_alloc_context3(av_codec);
@@ -298,12 +262,28 @@ impl HwEncoder {
             c.time_base = ffi::AVRational { num: 1, den: s.fps as c_int };
             c.framerate = ffi::AVRational { num: s.fps as c_int, den: 1 };
             c.pix_fmt = pix_fmt;
-            c.sw_pix_fmt = ffi::AVPixelFormat::NV12;
-            c.hw_frames_ctx = ffi::av_buffer_ref(enc_frames);
+            if enc_frames.is_null() {
+                // Software: un solo frame yuv420p riusato per tutta la sessione.
+                let f = &mut *enc.frame;
+                f.format = ffi::AVPixelFormat::YUV420P.0;
+                f.width = s.width as c_int;
+                f.height = s.height as c_int;
+                let ret = ffi::av_frame_get_buffer(enc.frame, 0);
+                if ret < 0 {
+                    return Err(EncodeError::Failed(format!("{name}: av_frame_get_buffer: {}", av_error_string(ret))));
+                }
+            } else {
+                c.sw_pix_fmt = ffi::AVPixelFormat::NV12;
+                c.hw_frames_ctx = ffi::av_buffer_ref(enc_frames);
+            }
             c.gop_size = s.fps as c_int;
             // AMF: niente B-frame in HEVC su nessuna generazione VCN; in AV1 da verificare a runtime,
             // quindi spenti.
-            c.max_b_frames = if vendor == Vendor::Amf && codec != cliprec_core::VideoCodec::H264 { 0 } else { 2 };
+            c.max_b_frames = match vendor {
+                Vendor::Amf if codec != cliprec_core::VideoCodec::H264 => 0,
+                Vendor::Software => 0,
+                _ => 2,
+            };
             c.rc_max_rate = i64::from(max_kbps) * 1000;
             c.rc_buffer_size = (i64::from(max_kbps) * 1000).min(i64::from(c_int::MAX)) as c_int;
             c.flags |= ffi::AV_CODEC_FLAG_GLOBAL_HEADER as c_int | ffi::AV_CODEC_FLAG_CLOSED_GOP as c_int;
@@ -352,6 +332,14 @@ impl HwEncoder {
                     opts.set("forced_idr", 1);
                     opts.set("idr_interval", 0);
                 }
+                Vendor::Software => {
+                    // CRF con tetto (maxrate/bufsize sopra): la scala 0-63 di SVT-AV1 da quella 0-51.
+                    c.bit_rate = 0;
+                    opts.set("preset", SOFTWARE_PRESET);
+                    opts.set("crf", (u32::from(q) * 63 / 51).clamp(1, 63));
+                    // KEY_FRAME a GOP chiuso, non «forward keyframe»: punto di partenza valido.
+                    opts.set("svtav1-params", "irefresh-type=2");
+                }
             }
 
             let ret = ffi::avcodec_open2(enc.ctx, av_codec, &mut opts.0);
@@ -368,6 +356,80 @@ impl HwEncoder {
             }
         }
         Ok(enc)
+    }
+
+    /// Device D3D11VA sul device di sessione, pool NV12 e, per QSV, device e pool QSV derivati.
+    /// Restituisce il formato e il pool da dare all'encoder.
+    ///
+    /// # Safety
+    /// Da chiamare una sola volta, con i campi FFmpeg di `self` ancora nulli.
+    unsafe fn init_hw(
+        &mut self,
+        gpu: &GpuDevice,
+        s: &EncoderSettings,
+        name: &str,
+        vendor: Vendor,
+    ) -> Result<(ffi::AVPixelFormat, *mut ffi::AVBufferRef), EncodeError> {
+        // SAFETY: sequenza documentata di libavutil. Ogni puntatore allocato finisce subito in
+        // `self`, che lo libera in Drop anche se un passo successivo fallisce. I campi scritti nei
+        // contesti D3D11 seguono hwcontext_d3d11va.h; i riferimenti COM passati a FFmpeg sono
+        // AddRef-ati (clone + into_raw) perché FFmpeg li rilascia alla chiusura.
+        unsafe {
+            self.device_ref = ffi::av_hwdevice_ctx_alloc(ffi::AVHWDeviceType::D3D11VA);
+            if self.device_ref.is_null() {
+                return Err(EncodeError::Failed(format!("{name}: av_hwdevice_ctx_alloc")));
+            }
+            let dev = (*self.device_ref).data as *mut ffi::AVHWDeviceContext;
+            let d3d = (*dev).hwctx as *mut AVD3D11VADeviceContext;
+            (*d3d).device = gpu.device.clone().into_raw();
+            (*d3d).device_context = gpu.context.clone().into_raw();
+            let ret = ffi::av_hwdevice_ctx_init(self.device_ref);
+            if ret < 0 {
+                return Err(open_error(name, "av_hwdevice_ctx_init", ret));
+            }
+
+            self.frames_ref = ffi::av_hwframe_ctx_alloc(self.device_ref);
+            if self.frames_ref.is_null() {
+                return Err(EncodeError::Failed(format!("{name}: av_hwframe_ctx_alloc")));
+            }
+            let fc = (*self.frames_ref).data as *mut ffi::AVHWFramesContext;
+            (*fc).format = ffi::AVPixelFormat::D3D11;
+            (*fc).sw_format = ffi::AVPixelFormat::NV12;
+            (*fc).width = s.width as c_int;
+            (*fc).height = s.height as c_int;
+            let fhw = (*fc).hwctx as *mut AVD3D11VAFramesContext;
+            if vendor == Vendor::Qsv {
+                (*fc).initial_pool_size = QSV_POOL_SIZE;
+                (*fhw).bind_flags = D3D11_BIND_DECODER.0 as u32;
+            } else {
+                (*fhw).bind_flags = D3D11_BIND_RENDER_TARGET.0 as u32;
+            }
+            let ret = ffi::av_hwframe_ctx_init(self.frames_ref);
+            if ret < 0 {
+                return Err(open_error(name, "av_hwframe_ctx_init", ret));
+            }
+
+            Ok(if vendor == Vendor::Qsv {
+                let ret = ffi::av_hwdevice_ctx_create_derived(&mut self.qsv_device_ref, ffi::AVHWDeviceType::QSV, self.device_ref, 0);
+                if ret < 0 {
+                    return Err(EncodeError::Unsupported(format!("{name}: device QSV derivato: {}", av_error_string(ret))));
+                }
+                let ret = ffi::av_hwframe_ctx_create_derived(
+                    &mut self.qsv_frames_ref,
+                    ffi::AVPixelFormat::QSV,
+                    self.qsv_device_ref,
+                    self.frames_ref,
+                    0,
+                );
+                if ret < 0 {
+                    return Err(EncodeError::Unsupported(format!("{name}: frame QSV derivati: {}", av_error_string(ret))));
+                }
+                self.map_qsv_slots(name)?;
+                (ffi::AVPixelFormat::QSV, self.qsv_frames_ref)
+            } else {
+                (ffi::AVPixelFormat::D3D11, self.frames_ref)
+            })
+        }
     }
 
     /// Mappa ogni texture del pool D3D11 fisso in un frame QSV che resta vivo fino a Drop.
@@ -464,7 +526,15 @@ impl VideoEncoder for HwEncoder {
         let pts = (frame.index.saturating_sub(first_index) as i64).max(self.last_pts + 1);
         self.last_pts = pts;
 
-        let (tex, slice, send) = if self.qsv_slots.is_empty() {
+        let (tex, slice, send) = if self.vendor == Vendor::Software {
+            // SAFETY: frame yuv420p allocato in open; alloca un buffer nuovo solo se l'encoder ne
+            // tiene ancora un riferimento (non succede dopo il drain del frame precedente).
+            let ret = unsafe { ffi::av_frame_make_writable(self.frame) };
+            if ret < 0 {
+                return Err(self.runtime_error("av_frame_make_writable", av_error_string(ret)));
+            }
+            (ptr::null_mut(), 0, self.frame)
+        } else if self.qsv_slots.is_empty() {
             // SAFETY: frame e pool sono di proprietà di `self`; av_hwframe_get_buffer riempie
             // data[0] (ID3D11Texture2D*) e data[1] (indice nell'array) secondo hwcontext_d3d11va.h.
             unsafe {
@@ -491,6 +561,23 @@ impl VideoEncoder for HwEncoder {
         };
         if let Err(e) = self.converter.blit(&frame.texture, frame.width, frame.height, tex, slice) {
             return Err(self.runtime_error("VideoProcessorBlt", e.to_string()));
+        }
+        if self.vendor == Vendor::Software {
+            let (w, h) = (self.params.width as usize, self.params.height as usize);
+            // SAFETY: i piani di un frame yuv420p scrivibile allocato da av_frame_get_buffer hanno
+            // `linesize` byte per riga, `h` righe per Y e `h/2` per U e V; nessun altro li tocca
+            // finché non chiamiamo avcodec_send_frame.
+            let (dy, du, dv) = unsafe {
+                let f = &*self.frame;
+                let plane = |i: usize, rows: usize| Plane {
+                    data: std::slice::from_raw_parts_mut(f.data[i], f.linesize[i].max(0) as usize * rows),
+                    stride: f.linesize[i].max(0) as usize,
+                };
+                (plane(0, h), plane(1, h / 2), plane(2, h / 2))
+            };
+            if let Err(e) = self.converter.read_nv12(|y, yp, uv, uvp| nv12_to_i420(w, h, (y, yp), (uv, uvp), dy, du, dv)) {
+                return Err(self.runtime_error("lettura del frame dalla GPU", e.to_string()));
+            }
         }
 
         // SAFETY: `send` è un frame di proprietà di `self` con un buffer hw valido; l'encoder ne

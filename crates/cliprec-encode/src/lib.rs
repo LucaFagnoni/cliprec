@@ -4,6 +4,8 @@
 //! Ogni [`GpuFrame`](cliprec_core::GpuFrame) BGRA viene convertito in NV12 BT.709 a range limitato
 //! da `ID3D11VideoProcessor`, scalato nella risoluzione d'uscita fissa con bande nere, dentro una
 //! texture del pool hwframes D3D11 di FFmpeg, e passato all'encoder senza passare dalla CPU.
+//! Unica eccezione il ripiego software [`SOFTWARE_ENCODER`] (SVT-AV1), ultimo candidato: la
+//! conversione resta sulla GPU e solo il frame NV12 finale viene letto dalla CPU.
 //!
 //! Uso tipico:
 //!
@@ -20,26 +22,33 @@
 mod d3d;
 mod ffi;
 mod nal;
+mod yuv;
 
 use cliprec_core::config::{CodecChoice, OutputResolution, VideoConfig, default_max_bitrate_kbps};
 use cliprec_core::{EncodeError, GpuDevice, VideoCodec, VideoEncoder};
 
-/// Famiglia di encoder hardware.
+/// Famiglia di encoder.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Vendor {
     Nvenc,
     Amf,
     Qsv,
+    /// SVT-AV1 su CPU ([`SOFTWARE_ENCODER`]), l'unico che legge i frame dalla GPU.
+    Software,
 }
 
+/// Encoder di riserva software, ultimo di ogni elenco di [`candidates`].
+pub const SOFTWARE_ENCODER: &str = "libsvtav1";
+
 impl Vendor {
-    const ALL: [Vendor; 3] = [Vendor::Nvenc, Vendor::Amf, Vendor::Qsv];
+    const HARDWARE: [Vendor; 3] = [Vendor::Nvenc, Vendor::Amf, Vendor::Qsv];
 
     fn suffix(self) -> &'static str {
         match self {
             Vendor::Nvenc => "nvenc",
             Vendor::Amf => "amf",
             Vendor::Qsv => "qsv",
+            Vendor::Software => "",
         }
     }
 }
@@ -90,7 +99,8 @@ fn codec_prefix(codec: VideoCodec) -> &'static str {
 }
 
 /// Encoder da provare per `choice`, in ordine: prima il codec scelto (HEVC per `Auto`), poi gli
-/// altri come ripiego; per ogni codec NVENC, AMF, QSV.
+/// altri come ripiego; per ogni codec NVENC, AMF, QSV; in fondo, sempre, [`SOFTWARE_ENCODER`]
+/// (AV1 su CPU).
 pub fn candidates(choice: CodecChoice) -> Vec<(VideoCodec, String)> {
     let codecs: &[VideoCodec] = match choice {
         CodecChoice::Auto | CodecChoice::Hevc => &[VideoCodec::Hevc, VideoCodec::H264],
@@ -99,23 +109,30 @@ pub fn candidates(choice: CodecChoice) -> Vec<(VideoCodec, String)> {
     };
     codecs
         .iter()
-        .flat_map(|&c| Vendor::ALL.iter().map(move |v| (c, format!("{}_{}", codec_prefix(c), v.suffix()))))
+        .flat_map(|&c| Vendor::HARDWARE.iter().map(move |v| (c, format!("{}_{}", codec_prefix(c), v.suffix()))))
+        .chain(std::iter::once((VideoCodec::Av1, SOFTWARE_ENCODER.to_owned())))
         .collect()
 }
 
-/// Apre l'encoder FFmpeg `encoder_name` (es. `hevc_nvenc`, `h264_qsv`) sul device di sessione.
+/// Apre l'encoder FFmpeg `encoder_name` (es. `hevc_nvenc`, `h264_qsv`, `libsvtav1`) sul device di
+/// sessione. Con `libsvtav1` la conversione resta sulla GPU e solo il frame NV12 finale passa
+/// alla CPU.
 ///
 /// Errori: [`EncodeError::Unsupported`] se l'encoder non esiste o non può funzionare su questo
 /// device con queste opzioni; [`EncodeError::SessionRejected`] se la sessione è rifiutata (es.
 /// sessioni esaurite); [`EncodeError::Failed`] per argomenti non validi.
 pub fn open(device: &GpuDevice, settings: &EncoderSettings, encoder_name: &str) -> Result<Box<dyn VideoEncoder>, EncodeError> {
     let unsupported = || EncodeError::Unsupported(format!("nome di encoder sconosciuto: {encoder_name}"));
-    let (prefix, suffix) = encoder_name.split_once('_').ok_or_else(unsupported)?;
-    let codec = [VideoCodec::H264, VideoCodec::Hevc, VideoCodec::Av1]
-        .into_iter()
-        .find(|&c| codec_prefix(c) == prefix)
-        .ok_or_else(unsupported)?;
-    let vendor = Vendor::ALL.into_iter().find(|v| v.suffix() == suffix).ok_or_else(unsupported)?;
+    let (codec, vendor) = if encoder_name == SOFTWARE_ENCODER {
+        (VideoCodec::Av1, Vendor::Software)
+    } else {
+        let (prefix, suffix) = encoder_name.split_once('_').ok_or_else(unsupported)?;
+        let codec = [VideoCodec::H264, VideoCodec::Hevc, VideoCodec::Av1]
+            .into_iter()
+            .find(|&c| codec_prefix(c) == prefix)
+            .ok_or_else(unsupported)?;
+        (codec, Vendor::HARDWARE.into_iter().find(|v| v.suffix() == suffix).ok_or_else(unsupported)?)
+    };
     let enc = ffi::HwEncoder::open(device, settings, encoder_name, codec, vendor)?;
     tracing::info!(encoder = encoder_name, width = settings.width, height = settings.height, fps = settings.fps, "encoder aperto");
     Ok(Box::new(enc))
@@ -130,7 +147,7 @@ pub fn open_best(device: &GpuDevice, settings: &EncoderSettings) -> Result<Box<d
 /// Come [`open_best`], ma salta gli encoder in `failed` (nomi FFmpeg, es. `hevc_nvenc`): per il
 /// ripiego a runtime quando un encoder fallisce in modo ripetibile.
 pub fn open_after(device: &GpuDevice, settings: &EncoderSettings, failed: &[String]) -> Result<Box<dyn VideoEncoder>, EncodeError> {
-    let mut last = EncodeError::Unsupported("nessun encoder hardware".into());
+    let mut last = EncodeError::Unsupported("nessun encoder disponibile".into());
     for (_, name) in candidates(settings.codec).into_iter().filter(|(_, n)| !failed.contains(n)) {
         match open(device, settings, &name) {
             Ok(enc) => return Ok(enc),
@@ -156,11 +173,13 @@ pub fn set_gpu_priority(device: &GpuDevice, high: bool) -> Result<(), EncodeErro
     d3d::set_gpu_priority(device, high).map_err(|e| EncodeError::Failed(format!("priorità GPU: {e}")))
 }
 
-/// Combinazioni codec/encoder che si aprono davvero su `device` (1280×720 a 60 fps, CQ 23).
+/// Combinazioni codec/encoder hardware che si aprono davvero su `device` (1280×720 a 60 fps,
+/// CQ 23). Il ripiego software [`SOFTWARE_ENCODER`] non è incluso: c'è sempre.
 pub fn probe(device: &GpuDevice) -> Vec<(VideoCodec, String)> {
     let settings = EncoderSettings { codec: CodecChoice::Auto, fps: 60, width: 1280, height: 720, quality: 23, max_bitrate_kbps: None };
     candidates(CodecChoice::Av1)
         .into_iter()
+        .filter(|(_, name)| name != SOFTWARE_ENCODER)
         .filter(|(_, name)| open(device, &settings, name).is_ok())
         .collect()
 }
@@ -185,6 +204,9 @@ mod tests {
         assert_eq!(names[..3], ["hevc_nvenc", "hevc_amf", "hevc_qsv"]);
         assert_eq!(names[3], "h264_nvenc");
         assert_eq!(candidates(CodecChoice::H264)[0].1, "h264_nvenc");
-        assert_eq!(candidates(CodecChoice::Av1).len(), 9);
+        assert_eq!(candidates(CodecChoice::Av1).len(), 10);
+        for choice in [CodecChoice::Auto, CodecChoice::H264, CodecChoice::Hevc, CodecChoice::Av1] {
+            assert_eq!(candidates(choice).last().map(|(_, n)| n.as_str()), Some(SOFTWARE_ENCODER));
+        }
     }
 }
