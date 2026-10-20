@@ -4,8 +4,11 @@
 //! - `sync <file|cartella> [--tolerance-ms 20]`: misura della sincronia (lampi e bip).
 //! - `gen-test-clip <out.mp4> [--av-offset-ms X]`: clip di riferimento.
 //! - `bench-report <csv...>`: fps medi e 1% low da CSV PresentMon, confronto di due run.
+//! - `testwindow [--seconds N]`: finestra 640x360 con timecode QPC e lampo a ogni secondo.
 //! - `ffmpeg`: scarica in `third_party/ffmpeg` la build FFmpeg 9 LGPL condivisa di BtbN
 //!   (header, librerie di importazione, DLL). Usa `curl.exe` e `tar.exe` di Windows.
+
+mod testwindow;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -25,6 +28,7 @@ fn main() -> Result<()> {
         Some("probe") => finish("probe", probe_cmd(&args[1..])?),
         Some("sync") => finish("sync", sync_cmd(&args[1..])?),
         Some("gen-test-clip") => gen_cmd(&args[1..]),
+        Some("testwindow") => testwindow::run(opt(&args, "--seconds")?),
         Some("bench-report") => {
             let paths: Vec<&Path> = args[1..].iter().map(Path::new).collect();
             print!("{}", bench::report(&paths)?);
