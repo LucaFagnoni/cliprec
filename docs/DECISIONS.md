@@ -45,6 +45,13 @@ Le voci [DEFAULT] e [PROPOSTA] di SPEC.md valgono come decise; qui ci sono quell
     `SubagentStop` esegue clippy e test dei crate modificati nel worktree (`scripts/gate.ps1 -Hook`) e
     blocca al massimo tre volte, per non creare cicli senza fine di notte.
 11. **Nome della named pipe** `\\.\pipe\cliprec-<utente>`, messaggi JSON una riga per messaggio.
+12. **Spegnimento del PC: non lo esegue ClipRec.** AVVIO.md, regola 6, vieta di spegnere o riavviare
+    il PC. Alle 03:47 la sessione «Pokewilds Godot iOS build setup» ha comunicato che, su indicazione di
+    Luca, lo spegnimento forzato lo fa lei: un suo watcher dalle 09:00 controlla
+    `.coordinamento/` e lancia `shutdown /s /f /t 60` quando ci sono sia `pokewilds-finito.txt` sia
+    `cliprec-finito.txt`, e comunque alle 09:30. ClipRec scrive `cliprec-finito.txt` solo se Luca lo
+    conferma direttamente in questa chat; altrimenti vale la scadenza delle 09:30. `.coordinamento/`
+    è ignorata da git.
 13. **Contratto `AudioTrackSink`: contiguità e salti.** Lo `start` di un blocco può scostarsi di
     qualche ms dalla fine del precedente: il buffer tratta i campioni come contigui. Oltre 100 ms è una
     discontinuità (es. dopo una sospensione): nuovo segmento, silenzio allo snapshot.
@@ -54,11 +61,3 @@ Le voci [DEFAULT] e [PROPOSTA] di SPEC.md valgono come decise; qui ci sono quell
     `VideoStreamParams::bit_rate` è il tetto (maxrate).
 16. **AMF non verificato**: su questo PC non c'è una GPU AMD (`amfrt64.dll` assente). Le opzioni AMF
     sono scritte ma da provare su una Radeon.
-
-12. **Spegnimento del PC: non lo esegue ClipRec.** AVVIO.md, regola 6, vieta di spegnere o riavviare
-    il PC. Alle 03:47 la sessione «Pokewilds Godot iOS build setup» ha comunicato che, su indicazione di
-    Luca, lo spegnimento forzato lo fa lei: un suo watcher dalle 09:00 controlla
-    `.coordinamento/` e lancia `shutdown /s /f /t 60` quando ci sono sia `pokewilds-finito.txt` sia
-    `cliprec-finito.txt`, e comunque alle 09:30. ClipRec scrive `cliprec-finito.txt` solo se Luca lo
-    conferma direttamente in questa chat; altrimenti vale la scadenza delle 09:30. `.coordinamento/`
-    è ignorata da git.
