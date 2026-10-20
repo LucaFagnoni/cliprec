@@ -457,4 +457,15 @@ mod tests {
         let mut r = BufReader::new(&b"x"[..]);
         assert_eq!(read_bounded_line(&mut r, &mut Vec::new(), 64, || false), LineResult::TimedOut);
     }
+
+    #[test]
+    fn save_clip_requests_map_to_commands() {
+        let (c, rx, _) = ctx();
+        assert_eq!(handle_request(&c, IpcRequest::SaveVideoClip), IpcResponse::Ok);
+        assert_eq!(handle_request(&c, IpcRequest::SaveAudioClip), IpcResponse::Ok);
+        assert_eq!(rx.try_iter().collect::<Vec<_>>(), [AppCommand::SaveVideoClip, AppCommand::SaveAudioClip]);
+        // Motore non in ascolto: errore, non panic.
+        drop(rx);
+        assert!(matches!(handle_request(&c, IpcRequest::SaveVideoClip), IpcResponse::Error(_)));
+    }
 }
