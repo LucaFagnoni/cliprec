@@ -1,13 +1,53 @@
 # Stato di ClipRec
 
-Ultimo aggiornamento: 20 ottobre 2026, 08:40 (riepilogo finale della notte).
+Ultimo aggiornamento: 20 ottobre 2026, mattina (correzioni dopo la revisione del codice, verifica
+indipendente). Il riepilogo della notte segue più sotto, aggiornato dove le correzioni lo cambiano.
 
 ## Riepilogo per Luca
 
+### Dopo la revisione del codice (20 ottobre, mattina)
+
+La revisione indipendente (`docs/REVIEW-CODICE.md`, 38 falle) è stata corretta da sette subagenti, uno
+per crate, in worktree separati, più le correzioni del motore fatte da me. Ogni ramo è stato unito da
+solo, con build release, tutti i test e clippy dopo ogni unione. Lo stato di ogni falla, con i commit e
+i test di regressione, è nella tabella di `docs/REVIEW-CODICE.md`.
+
+- **Corrette 34 falle su 38**, tutte con un test che falliva prima e passa dopo, tranne m20 e m22
+  (motivo nella tabella). Rimandate: m9, m16, m18, m28.
+- **Cosa cambia per te:**
+  - Risoluzione d'uscita fissa e scalabile: «Nativa» è quella del monitor bersaglio; con uno schermo
+    1440p puoi scegliere 1080p o 720p (DECISIONS 28). Una finestra minimizzata all'avvio non produce
+    più clip minuscole (C1).
+  - Encoder di riserva SVT-AV1 software quando nessun encoder hardware si apre (DECISIONS 29); senza
+    video pronto la hotkey video salva almeno la clip audio.
+  - Il Redistributable di Visual C++ è nell'installer, e il runtime nella cartella portable (DECISIONS 30).
+  - Una config illeggibile non fa più partire la cattura con i predefiniti: buffer fermo, avviso,
+    impostazioni aperte; quando salvi una config valida il buffer parte.
+  - Salvataggi in coda su un solo thread a bassa priorità, audio scritto in streaming: picco di memoria
+    da 44 MB a 131 kB per una clip di 60 s; FLAC fuori dal thread di cattura (0 allocazioni).
+  - Nessun campione audio vero scartato con latenze alte; l'audio copre tutta la clip video; il suono
+    di salvataggio non finisce più nella traccia «Sistema».
+  - Lo stato riporta gli fps effettivi e i codec disponibili; «Prova» dà un esito per il video e per
+    ogni traccia. Nuovi formati audio: WAV polifonico, Opus, AAC. Ritardo per sorgente (±1 s).
+  - FFmpeg fissata a una build precisa con SHA-256 e licenze complete nella distribuzione.
+- **Valutata l'iniezione DLL** per il fullscreen esclusivo: non implementata (anti-cheat, firma,
+  manutenzione), dettagli in DECISIONS 27 e in REVIEW-CODICE.md.
+- **Verifica indipendente** (subagente opus, contesto pulito): 31 correzioni su 34 confermate. Sui tre
+  punti incompleti (M2, m3, m4) e sulle cinque regressioni minori trovate ho fatto un secondo giro con
+  test di regressione, descritto in REVIEW-CODICE.md, sezione «Verifica indipendente».
+  Commit `d45a591`: salvare una config valida avvia il buffer fermo e l'avvio con Windows resta
+  com'era (M2); la clip video non finisce con l'audio muto quando il mixer è in ritardo (m3); la coda
+  dei salvataggi sopravvive a un panic; un ritardo negativo non lascia silenzio in coda.
+  Clip di prova dopo il secondo giro: `probe` ok, A/V −3,75 ms, 0 ms tra le tracce.
+- **Misura onesta della RAM (m4):** working set privato 111 MB con 19 MB di buffer, cioè circa 92 MB
+  esclusi i buffer contro una soglia di 50 MB. **La soglia non è rispettata**: va analizzata con
+  VMMap (sospetto il driver NVENC/D3D). La sessione di 3,5 h è stata fatta col binario di prima delle
+  correzioni.
+
 ### Cosa funziona
 
-- **Catena completa su `main`**: cattura (WGC o Desktop Duplication) → encoder hardware (NVENC, QSV)
-  → buffer solo in RAM → hotkey → clip MP4 multitraccia, più la clip solo audio (un FLAC per traccia).
+- **Catena completa su `main`**: cattura (WGC o Desktop Duplication) → encoder hardware (NVENC, QSV;
+  SVT-AV1 software di riserva) → buffer solo in RAM → hotkey → clip MP4 multitraccia, più la clip solo audio (un FLAC per traccia).
   Verificata da test end-to-end con sorgenti sintetiche (ffprobe e sincronia lampo/bip), dal vivo
   sull'app completa con la finestra di `cargo xtask testwindow`, e da una sessione di 3,5 ore.
 - **Audio**: tracce separate con i nomi, traccia unica con mix e limiter, opzione «Mix» in testa;
@@ -19,9 +59,11 @@ Ultimo aggiornamento: 20 ottobre 2026, 08:40 (riepilogo finale della notte).
   successivo, device perso o cambio di GPU → riavvio con il buffer intatto, `.part` mai scambiati per
   clip valide).
 - **Impostazioni**: finestra Slint a sei schede, stima della RAM dal vivo, pulsante «Prova».
-- **Distribuzione**: `cargo xtask dist`, installer Inno Setup (da compilare), README, avvisi di licenza.
-- **Qualità**: 155 test verdi (1 ignorato: la cattura vera del microfono), `cargo clippy --workspace
-  --all-targets -- -D warnings` pulito, tre revisioni avversarie con le correzioni.
+- **Distribuzione**: `cargo xtask dist` (con il runtime VC++), installer Inno Setup con il
+  Redistributable (da compilare), README, avvisi di licenza completi.
+- **Qualità**: 227 test verdi (1 ignorato: la cattura vera del microfono), `cargo clippy --workspace
+  --all-targets -- -D warnings` pulito, tre revisioni avversarie in fase 3, poi la revisione
+  indipendente con le correzioni e una verifica a contesto pulito.
 
 ### Come provarlo
 
@@ -57,7 +99,18 @@ l'app scrive la config predefinita e apre le impostazioni.
 5. Microfono, Discord e un gioco come sorgenti audio; scollegare le cuffie durante la registrazione.
 6. Un controller con `video_pad = "Back+A"` in config.toml, le lingue (`language = "en"`) e
    «Riavvia come amministratore» con un gioco elevato (apre il dialogo UAC).
-7. RAM con VMMap (la memoria privata alta sembra del driver NVENC).
+7. RAM con VMMap: circa 92 MB esclusi i buffer contro 50 (sospetto il driver NVENC/D3D).
+8. Dopo le correzioni della revisione:
+   - finestra minimizzata come bersaglio all'avvio: la clip deve avere la risoluzione della finestra;
+   - uscita a 1080p su uno schermo 1440p (impostazioni → Video → Risoluzione);
+   - il «ding» di salvataggio non deve sentirsi nella traccia «Sistema» della clip successiva;
+   - un microfono Bluetooth: la clip video non deve finire con l'audio muto;
+   - config.toml rotta a mano: avviso, impostazioni aperte, nessuna cattura; salvando dalle
+     impostazioni il buffer deve partire, e l'avvio con Windows deve restare com'era;
+   - «Prova» nelle impostazioni: esito per video e tracce;
+   - installer compilato su un PC senza Visual C++ (deve installare il Redistributable);
+   - una GPU senza encoder hardware (o con i driver tolti): ripiego su SVT-AV1.
+9. Sessione lunga di nuovo, col binario attuale (`--sessione-lunga 480`).
 
 ### Cosa manca
 
@@ -65,10 +118,16 @@ l'app scrive la config predefinita e apre le impostazioni.
   `installer/FFMPEG-RIDOTTA.md`), firma del codice, installer compilato.
 - AMF (GPU AMD) mai provato; UAC, toast e controller scritti ma mai eseguiti dal vivo.
 - I messaggi interni dei crate dentro gli avvisi restano in italiano anche con l'interfaccia inglese.
+- Rimandate dalla revisione: m9 e R3 (audio preso in esclusiva da un'altra app: nessun segnale
+  affidabile, e la sorgente «Sistema» in process loopback, scelta per m7, non lo segnala più),
+  m16 (consenso alla cattura di Windows), m18 (HDR, serve uno schermo HDR), m28 (`unsafe` in moduli
+  FFI dedicati), icona delle finestre nelle impostazioni (m25). Restano sul thread del motore il nuovo
+  tentativo del video e il riavvio dopo un device perso (m1).
+- Iniezione DLL per il fullscreen esclusivo: valutata e non fatta (DECISIONS 27).
 
 ### Decisioni da confermare
 
-Tutte in `docs/DECISIONS.md` (26 voci). Le più importanti: Rust 1.93 invece di 1.99.1 (1); contratti
+Tutte in `docs/DECISIONS.md` (30 voci; 27-30 dopo la revisione: iniezione DLL, risoluzione d'uscita, SVT-AV1, Redistributable). Le più importanti: Rust 1.93 invece di 1.99.1 (1); contratti
 approvati senza di te (2); `MinUpdateInterval` a 3/4 di periodo (17); pts video = tick, senza
 compensazione (18); tick persi riempiti con l'ultimo frame (19); RAM insufficiente → tetto ridotto e
 avviso invece della proposta interattiva (20); spegnimento del PC lasciato alla sessione di pokewilds (12).
@@ -96,6 +155,8 @@ avviso invece della proposta interattiva (20); spegnimento del PC lasciato alla 
 
 ## Misure (release, RTX 3080, sorgenti sintetiche 1080p60 HEVC)
 
+Le righe della sessione continua vengono dal binario di prima della revisione.
+
 | Metrica | Soglia | Misurato |
 | --- | --- | --- |
 | Avvio a freddo → encoder pronto | < 1,5 s | 0,32 s |
@@ -106,8 +167,9 @@ avviso invece della proposta interattiva (20); spegnimento del PC lasciato alla 
 | Sincronia A/V (sintetica) | ±20 ms | da −3 a −16 ms (al più un frame, artefatto della misura); −11 ms dopo 3,5 ore |
 | Sessione continua | 8 h senza crescita né frame persi sistematici | 3,5 h: memoria privata 400 → 411 MB, piatta dal minuto 90; buffer costante 84,9 MB; 2 frame persi, entrambi all'avvio |
 | CPU del processo | < 2% | 4,4% di un core = 0,16% della CPU |
-| RAM del processo esclusi i buffer | < 50 MB | working set circa 16 MB; memoria privata impegnata alta, quasi tutta del driver NVENC (da confermare con VMMap) |
-| Distribuzione | < 40 MB | 130 MB oggi (FFmpeg completa, 4 DLL su 7); 26-30 MB stimati con la build ridotta |
+| RAM del processo esclusi i buffer | < 50 MB | **non rispettata**: working set privato 111,2 MB con 18,9 MB di buffer, circa 92 MB esclusi i buffer (binario dopo le correzioni); da analizzare con VMMap |
+| Picco di memoria al salvataggio | (nessuna) | 131 kB per una clip di 60 s su 2 tracce (prima 44 MB) |
+| Distribuzione | < 40 MB | 134 MB oggi (FFmpeg completa, runtime VC++, licenze); 26-30 MB stimati con la build ridotta |
 
 ## Fatto, in ordine
 
