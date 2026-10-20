@@ -51,7 +51,6 @@ pub(crate) struct DdaCapture {
     running: Arc<AtomicBool>,
     closed: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
-    size: (u32, u32),
 }
 
 impl DdaCapture {
@@ -72,21 +71,16 @@ impl DdaCapture {
                         return;
                     }
                 };
-                // SAFETY: interfaccia valida.
-                let mode = unsafe { dup.GetDesc() }.ModeDesc;
-                let _ = tx.send(Ok((mode.Width, mode.Height)));
+                let _ = tx.send(Ok(()));
                 if let Err(e) = pump(&dup, &slots, &stats, &run) {
                     tracing::info!("Desktop Duplication interrotta: {e}");
                 }
                 done.store(true, Ordering::Release);
             })
             .map_err(|e| SourceError::Failed(format!("thread Desktop Duplication: {e}")))?;
-        let mut this = Self { running, closed, thread: Some(thread), size: (0, 0) };
+        let this = Self { running, closed, thread: Some(thread) };
         match rx.recv() {
-            Ok(Ok(size)) => {
-                this.size = size;
-                Ok(this)
-            }
+            Ok(Ok(())) => Ok(this),
             Ok(Err(e)) => Err(SourceError::Failed(format!("Desktop Duplication: {e}"))),
             Err(_) => Err(SourceError::Failed("Desktop Duplication: thread terminato".into())),
         }
@@ -94,11 +88,6 @@ impl DdaCapture {
 
     pub fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Acquire)
-    }
-
-    /// Dimensione della modalità video del monitor (pixel fisici).
-    pub fn size(&self) -> (u32, u32) {
-        self.size
     }
 }
 

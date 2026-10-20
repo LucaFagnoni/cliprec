@@ -72,7 +72,6 @@ pub(crate) struct WgcCapture {
     arrived_token: i64,
     closed_token: i64,
     closed: Arc<AtomicBool>,
-    size: (u32, u32),
 }
 
 /// `MinUpdateInterval` per `fps` in uscita: tre quarti di periodo, almeno 1 ms. Un periodo intero
@@ -135,13 +134,7 @@ impl WgcCapture {
             }
         }
         session.StartCapture()?;
-        let size = (size.Width.max(1) as u32, size.Height.max(1) as u32);
-        Ok(Self { item, pool, session, arrived_token, closed_token, closed, size })
-    }
-
-    /// Dimensione dell'elemento all'avvio (pixel fisici): quella del primo frame atteso.
-    pub fn size(&self) -> (u32, u32) {
-        self.size
+        Ok(Self { item, pool, session, arrived_token, closed_token, closed })
     }
 
     /// `true` se l'elemento catturato non esiste più (finestra chiusa, monitor scollegato).
@@ -180,15 +173,19 @@ fn on_frame_arrived(
     let mut desc = D3D11_TEXTURE2D_DESC::default();
     // SAFETY: puntatore locale.
     unsafe { src.GetDesc(&mut desc) };
-    // Dopo un ridimensionamento il contenuto può superare la superficie finché il pool non è ricreato.
-    let width = (content.Width.max(1) as u32).min(desc.Width);
-    let height = (content.Height.max(1) as u32).min(desc.Height);
-    slots.publish(width, height, captured, |dst| {
-        let region = D3D11_BOX { left: 0, top: 0, front: 0, right: width, bottom: height, back: 1 };
-        // SAFETY: regione dentro entrambe le texture (stesso formato BGRA); contesto immediato protetto.
-        unsafe { slots.device.context.CopySubresourceRegion(dst, 0, 0, 0, 0, &src, 0, Some(&region)) };
-        Ok(())
-    })?;
+    // Se il contenuto supera la superficie (finestra ingrandita o ripristinata, pool non ancora
+    // ricreato) il frame sarebbe un ritaglio, magari della dimensione minimizzata: si scarta e si
+    // aspetta il primo frame del pool ricreato.
+    let width = content.Width.max(1) as u32;
+    let height = content.Height.max(1) as u32;
+    if width <= desc.Width && height <= desc.Height {
+        slots.publish(width, height, captured, |dst| {
+            let region = D3D11_BOX { left: 0, top: 0, front: 0, right: width, bottom: height, back: 1 };
+            // SAFETY: regione dentro entrambe le texture (stesso formato BGRA); contesto immediato protetto.
+            unsafe { slots.device.context.CopySubresourceRegion(dst, 0, 0, 0, 0, &src, 0, Some(&region)) };
+            Ok(())
+        })?;
+    }
     // Nessun riferimento alla superficie oltre il rilascio del frame.
     drop(src);
     drop(access);
