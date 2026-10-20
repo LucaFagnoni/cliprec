@@ -3,14 +3,18 @@
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::os::windows::io::{FromRawHandle, RawHandle};
-use std::sync::mpsc::Sender;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{RecvTimeoutError, Sender};
+use std::os::windows::io::AsRawHandle;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use cliprec_core::ipc::{IpcRequest, IpcResponse, decode_line, encode_line};
 use cliprec_core::{AppCommand, EngineStatus};
-use windows::Win32::Foundation::{ERROR_PIPE_CONNECTED, GetLastError, HLOCAL, LocalFree};
+use windows::Win32::Foundation::{ERROR_PIPE_CONNECTED, GetLastError, HANDLE, HLOCAL, LocalFree};
 use windows::Win32::Security::Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1};
 use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
+use windows::Win32::System::IO::CancelIoEx;
 use windows::Win32::Storage::FileSystem::{FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX};
 use windows::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
@@ -58,17 +62,135 @@ pub fn handle_request(ctx: &Context, req: IpcRequest) -> IpcResponse {
     }
 }
 
-fn serve_connection(ctx: &Context, file: File) {
+#[derive(Debug, PartialEq, Eq)]
+enum LineResult {
+    Line,
+    Eof,
+    TooLong,
+    TimedOut,
+}
+
+/// Legge una riga in `out` (compreso il `\n`) senza superare `max` byte. `wait` è chiamata quando il
+/// buffer è vuoto, prima di leggere: restituisce `false` se è scaduto il tempo o il client è sparito.
+fn read_bounded_line<R: std::io::Read>(r: &mut BufReader<R>, out: &mut Vec<u8>, max: usize, mut wait: impl FnMut() -> bool) -> LineResult {
+    loop {
+        if r.buffer().is_empty() && !wait() {
+            return LineResult::TimedOut;
+        }
+        let buf = match r.fill_buf() {
+            Ok([]) | Err(_) => return LineResult::Eof,
+            Ok(b) => b,
+        };
+        let newline = buf.iter().position(|&b| b == b'\n');
+        let take = newline.map_or(buf.len(), |i| i + 1);
+        // Si copia al massimo ciò che manca al limite (+1 per accorgersi dello sforamento).
+        let room = (max + 1).saturating_sub(out.len()).min(take);
+        out.extend_from_slice(&buf[..room]);
+        r.consume(take);
+        if out.len() > max {
+            return LineResult::TooLong;
+        }
+        if newline.is_some() {
+            return LineResult::Line;
+        }
+    }
+}
+
+/// Limiti di una connessione: riga massima e tempo massimo per riceverla.
+#[derive(Clone, Copy, Debug)]
+pub struct Limits {
+    pub max_line: usize,
+    pub idle: Duration,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self { max_line: 64 * 1024, idle: Duration::from_secs(30) }
+    }
+}
+
+/// Guardiano di una connessione: se la richiesta non arriva entro `deadline` annulla la lettura
+/// bloccata (`CancelIoEx`) e alza `expired`. Al `drop` si ferma e viene atteso, quindi non usa mai
+/// l'handle dopo la sua chiusura.
+struct Watchdog {
+    done: Option<Sender<()>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Watchdog {
+    fn start(handle: usize, deadline: Arc<Mutex<Instant>>, expired: Arc<AtomicBool>) -> Self {
+        let (done, done_rx) = std::sync::mpsc::channel::<()>();
+        let thread = std::thread::Builder::new()
+            .name("ipc-watchdog".into())
+            .spawn(move || {
+                while matches!(done_rx.recv_timeout(Duration::from_millis(50)), Err(RecvTimeoutError::Timeout)) {
+                    if deadline.lock().map(|d| Instant::now() >= *d).unwrap_or(true) {
+                        expired.store(true, Ordering::SeqCst);
+                        // SAFETY: l'handle è quello della connessione, che aspetta questo thread prima di chiuderlo.
+                        let _ = unsafe { CancelIoEx(HANDLE(handle as *mut _), None) };
+                    }
+                }
+            })
+            .ok();
+        Self { done: Some(done), thread }
+    }
+}
+
+impl Drop for Watchdog {
+    fn drop(&mut self) {
+        drop(self.done.take());
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}
+
+/// Limita la frequenza di un messaggio (log «tutte le istanze impegnate»).
+#[derive(Debug)]
+pub struct RateLimit {
+    every: Duration,
+    last: Option<Instant>,
+}
+
+impl RateLimit {
+    pub fn new(every: Duration) -> Self {
+        Self { every, last: None }
+    }
+
+    pub fn allow(&mut self, now: Instant) -> bool {
+        if self.last.is_some_and(|t| now.duration_since(t) < self.every) {
+            return false;
+        }
+        self.last = Some(now);
+        true
+    }
+}
+
+fn serve_connection(ctx: &Context, file: File, limits: Limits) {
     let mut reader = BufReader::new(&file);
     let mut writer = &file;
-    let mut line = String::new();
+    let mut line = Vec::new();
+    let deadline = Arc::new(Mutex::new(Instant::now() + limits.idle));
+    let expired = Arc::new(AtomicBool::new(false));
+    let _watchdog = Watchdog::start(file.as_raw_handle() as usize, Arc::clone(&deadline), Arc::clone(&expired));
     loop {
         line.clear();
-        match reader.read_line(&mut line) {
-            Ok(0) | Err(_) => return,
-            Ok(_) => {}
+        if let Ok(mut d) = deadline.lock() {
+            *d = Instant::now() + limits.idle;
         }
-        let resp = match decode_line::<IpcRequest>(&line) {
+        match read_bounded_line(&mut reader, &mut line, limits.max_line, || !expired.load(Ordering::SeqCst)) {
+            LineResult::Line => {}
+            LineResult::Eof => return,
+            LineResult::TooLong => {
+                tracing::warn!("pipe: riga oltre {} byte, connessione chiusa", limits.max_line);
+                return;
+            }
+            LineResult::TimedOut => {
+                tracing::info!("pipe: connessione inattiva, chiusa");
+                return;
+            }
+        }
+        let resp = match std::str::from_utf8(&line).map_err(|e| e.to_string()).and_then(|l| decode_line::<IpcRequest>(l).map_err(|e| e.to_string())) {
             // Un panic nel gestore non deve uccidere la connessione: risposta d'errore e si prosegue.
             Ok(req) => std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handle_request(ctx, req)))
                 .unwrap_or_else(|_| IpcResponse::Error("errore interno".into())),
@@ -119,15 +241,19 @@ fn create_instance(name: &[u16], sddl: &[u16], first: bool) -> anyhow::Result<Ra
 /// Thread in ascolto contemporaneo sulla pipe.
 const ACCEPTORS: usize = 4;
 
-fn accept_loop(name: &[u16], sddl: &[u16], ctx: &Context, pending: &mut Option<usize>) {
+fn accept_loop(name: &[u16], sddl: &[u16], ctx: &Context, limits: Limits, pending: &mut Option<usize>) {
+    let mut log_limit = RateLimit::new(Duration::from_secs(60));
     loop {
         let raw = match pending.take() {
             Some(h) => h as RawHandle,
             None => match create_instance(name, sddl, false) {
                 Ok(h) => h,
                 Err(e) => {
-                    tracing::error!("pipe: {e}");
-                    std::thread::sleep(std::time::Duration::from_secs(1));
+                    // Con tutte le istanze impegnate (ERROR_PIPE_BUSY) si riprova ogni secondo, ma si logga di rado.
+                    if log_limit.allow(Instant::now()) {
+                        tracing::error!("pipe: nessuna istanza disponibile ({e})");
+                    }
+                    std::thread::sleep(Duration::from_secs(1));
                     continue;
                 }
             },
@@ -142,7 +268,7 @@ fn accept_loop(name: &[u16], sddl: &[u16], ctx: &Context, pending: &mut Option<u
             continue;
         }
         let ctx = ctx.clone();
-        if let Err(e) = std::thread::Builder::new().name("ipc-conn".into()).spawn(move || serve_connection(&ctx, file)) {
+        if let Err(e) = std::thread::Builder::new().name("ipc-conn".into()).spawn(move || serve_connection(&ctx, file, limits)) {
             tracing::error!("thread connessione: {e}");
         }
     }
@@ -151,6 +277,10 @@ fn accept_loop(name: &[u16], sddl: &[u16], ctx: &Context, pending: &mut Option<u
 /// Avvia il server su `pipe_name` in un thread supervisionato. Se un'altra istanza possiede già
 /// la pipe (o la creazione fallisce) restituisce l'errore e non parte.
 pub fn spawn(pipe_name: String, ctx: Context) -> anyhow::Result<()> {
+    spawn_with_limits(pipe_name, ctx, Limits::default())
+}
+
+pub fn spawn_with_limits(pipe_name: String, ctx: Context, limits: Limits) -> anyhow::Result<()> {
     let name = wide(&pipe_name);
     let sddl = wide(&format!("D:P(A;;GA;;;{})", crate::sys::current_user_sid()?));
     // La prima istanza è creata qui per riportare subito un conflitto; poi passa al thread.
@@ -160,7 +290,7 @@ pub fn spawn(pipe_name: String, ctx: Context) -> anyhow::Result<()> {
     for i in 0..ACCEPTORS {
         let (name, sddl, ctx) = (name.clone(), sddl.clone(), ctx.clone());
         let mut pending = (i == 0).then_some(first);
-        spawn_supervised("ipc", move || accept_loop(&name, &sddl, &ctx, &mut pending))?;
+        spawn_supervised("ipc", move || accept_loop(&name, &sddl, &ctx, limits, &mut pending))?;
     }
     Ok(())
 }
@@ -275,5 +405,56 @@ mod tests {
             w.join().unwrap();
         }
         assert_eq!(busy.load(Ordering::SeqCst), 0, "ERROR_PIPE_BUSY su 2000 connessioni");
+    }
+
+    #[test]
+    fn m6_oversized_line_is_cut_and_memory_stays_bounded() {
+        use std::io::Read;
+        // 150 MB senza a capo, come un client ostile.
+        let mut r = BufReader::new(std::io::repeat(b'a').take(150 * 1024 * 1024));
+        let mut out = Vec::new();
+        let res = read_bounded_line(&mut r, &mut out, 64 * 1024, || true);
+        assert_eq!(res, LineResult::TooLong);
+        assert!(out.len() <= 64 * 1024 + 8 * 1024, "buffer cresciuto fino a {} byte", out.len());
+    }
+
+    #[test]
+    fn m6_idle_or_partial_connection_is_closed_after_the_timeout() {
+        let (c, ..) = ctx();
+        let name = format!(r"\\.\pipe\cliprec-test-m6-{}", std::process::id());
+        spawn_with_limits(name.clone(), c, Limits { max_line: 64 * 1024, idle: Duration::from_millis(300) }).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut pipe = OpenOptions::new().read(true).write(true).open(&name).unwrap();
+            pipe.write_all(b"\"Stat").unwrap(); // riga a metà, senza a capo
+            let mut buf = [0u8; 16];
+            let n = std::io::Read::read(&mut pipe, &mut buf);
+            let _ = tx.send(n);
+        });
+        let r = rx.recv_timeout(Duration::from_secs(5)).expect("il server deve chiudere la connessione inattiva");
+        assert!(matches!(r, Ok(0) | Err(_)));
+    }
+
+    #[test]
+    fn m6_log_rate_limit() {
+        let mut l = RateLimit::new(Duration::from_secs(60));
+        let t0 = Instant::now();
+        assert!(l.allow(t0));
+        assert!(!l.allow(t0 + Duration::from_secs(1)));
+        assert!(l.allow(t0 + Duration::from_secs(61)));
+    }
+
+    #[test]
+    fn m6_normal_lines_and_closed_peers() {
+        let mut r = BufReader::new(&b"\"Status\"\n\"Quit\"\n"[..]);
+        let mut out = Vec::new();
+        assert_eq!(read_bounded_line(&mut r, &mut out, 64, || true), LineResult::Line);
+        assert_eq!(out, b"\"Status\"\n");
+        out.clear();
+        assert_eq!(read_bounded_line(&mut r, &mut out, 64, || true), LineResult::Line);
+        out.clear();
+        assert_eq!(read_bounded_line(&mut r, &mut out, 64, || true), LineResult::Eof);
+        let mut r = BufReader::new(&b"x"[..]);
+        assert_eq!(read_bounded_line(&mut r, &mut Vec::new(), 64, || false), LineResult::TimedOut);
     }
 }
