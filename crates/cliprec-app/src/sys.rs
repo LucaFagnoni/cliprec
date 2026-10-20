@@ -164,6 +164,58 @@ fn is_fullscreen(hwnd: windows::Win32::Foundation::HWND) -> bool {
     r.left <= m.left && r.top <= m.top && r.right >= m.right && r.bottom >= m.bottom
 }
 
+/// Argomento con cui l'istanza riavviata come amministratore sa di dover aspettare la vecchia.
+pub const RESTART_ARG: &str = "--dopo-riavvio";
+
+/// La voce «Riavvia come amministratore» ha senso solo se ClipRec non lo è già.
+pub fn restart_menu_visible(self_elevated: bool) -> bool {
+    !self_elevated
+}
+
+/// Come [`acquire_single_instance`], ma riprova ogni `step` fino a `timeout`: la vecchia istanza
+/// sta chiudendo e rilascia il mutex all'uscita.
+pub fn acquire_single_instance_wait(
+    name: &str,
+    timeout: std::time::Duration,
+    step: std::time::Duration,
+) -> anyhow::Result<Option<InstanceGuard>> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if let Some(g) = acquire_single_instance(name)? {
+            return Ok(Some(g));
+        }
+        if std::time::Instant::now() >= deadline {
+            return Ok(None);
+        }
+        std::thread::sleep(step);
+    }
+}
+
+/// Rilancia questo exe con il verbo «runas» (dialogo UAC). Se l'utente rifiuta restituisce un
+/// errore e non cambia nulla: il chiamante decide se uscire solo a `Ok`.
+pub fn restart_elevated() -> anyhow::Result<()> {
+    use windows::Win32::UI::Shell::{SEE_MASK_NOASYNC, SHELLEXECUTEINFOW, ShellExecuteExW};
+    let exe = wide(&std::env::current_exe()?.to_string_lossy());
+    let args = wide(RESTART_ARG);
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_NOASYNC,
+        lpVerb: windows::core::w!("runas"),
+        lpFile: PCWSTR(exe.as_ptr()),
+        lpParameters: PCWSTR(args.as_ptr()),
+        nShow: SW_SHOWNORMAL.0,
+        ..Default::default()
+    };
+    // SAFETY: `info` è completa e le stringhe terminate da NUL vivono per tutta la chiamata.
+    unsafe { ShellExecuteExW(&mut info) }.map_err(|e| {
+        if e.code() == windows::Win32::Foundation::ERROR_CANCELLED.to_hresult() {
+            anyhow::anyhow!("richiesta di amministratore annullata dall'utente")
+        } else {
+            anyhow::anyhow!("ShellExecuteExW: {e}")
+        }
+    })
+}
+
 /// Messaggio registrato con cui una seconda istanza avvisa la prima.
 pub fn second_instance_msg() -> u32 {
     // SAFETY: stringa statica terminata da NUL; il valore è lo stesso in tutti i processi.
@@ -204,6 +256,25 @@ mod tests {
         assert!(acquire_single_instance(&name).unwrap().is_none());
         drop(first);
         assert!(acquire_single_instance(&name).unwrap().is_some());
+    }
+
+    #[test]
+    fn restart_logic_without_uac() {
+        assert!(restart_menu_visible(false) && !restart_menu_visible(true));
+        let name = format!(r"Local\ClipRec-test-wait-{}", std::process::id());
+        let (t, step) = (std::time::Duration::from_millis(300), std::time::Duration::from_millis(10));
+        let held = acquire_single_instance(&name).unwrap().unwrap();
+        // finché la vecchia istanza tiene il mutex l'attesa scade
+        assert!(acquire_single_instance_wait(&name, t, step).unwrap().is_none());
+        // la vecchia rilascia a metà attesa: la nuova lo prende
+        let n = name.clone();
+        let waiter = std::thread::spawn(move || {
+            acquire_single_instance_wait(&n, std::time::Duration::from_secs(5), step).unwrap().is_some()
+        });
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        drop(held);
+        assert!(waiter.join().unwrap());
+        assert_eq!(RESTART_ARG, "--dopo-riavvio");
     }
 
     #[test]

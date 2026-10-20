@@ -175,6 +175,7 @@ struct Ui {
     folder_item: MenuItem,
     settings_item: MenuItem,
     quit_item: MenuItem,
+    restart_item: Option<MenuItem>,
     recent_menu: Submenu,
     recent_items: Vec<MenuItem>,
     recent_paths: Arc<Mutex<Vec<PathBuf>>>,
@@ -241,6 +242,9 @@ impl Ui {
         self.folder_item.set_text(fmt(l, K::MenuFolder, &[]));
         self.settings_item.set_text(fmt(l, K::MenuSettings, &[]));
         self.quit_item.set_text(fmt(l, K::MenuQuit, &[]));
+        if let Some(it) = &self.restart_item {
+            it.set_text(fmt(l, K::MenuRestartAdmin, &[]));
+        }
         self.shown_text.clear();
         self.shown_running = None;
         self.shown_recent = vec![PathBuf::from("\0")];
@@ -422,17 +426,17 @@ fn build_ui(app: &Arc<App>, hwnd: HWND) -> anyhow::Result<Ui> {
     let folder_item = MenuItem::with_id("folder", fmt(l, K::MenuFolder, &[]), true, None);
     let settings_item = MenuItem::with_id("settings", fmt(l, K::MenuSettings, &[]), true, None);
     let quit_item = MenuItem::with_id("quit", fmt(l, K::MenuQuit, &[]), true, None);
+    let restart_item = crate::sys::restart_menu_visible(crate::sys::self_elevated())
+        .then(|| MenuItem::with_id("restart", fmt(l, K::MenuRestartAdmin, &[]), true, None));
+    let sep = PredefinedMenuItem::separator();
+    let mut items: Vec<&dyn tray_icon::menu::IsMenuItem> = vec![&status_item, &sep, &toggle_item, &recent_menu, &folder_item, &settings_item];
+    if let Some(r) = &restart_item {
+        items.push(r);
+    }
+    let sep2 = PredefinedMenuItem::separator();
+    items.extend([&sep2 as &dyn tray_icon::menu::IsMenuItem, &quit_item]);
     let menu = Menu::new();
-    menu.append_items(&[
-        &status_item,
-        &PredefinedMenuItem::separator(),
-        &toggle_item,
-        &recent_menu,
-        &folder_item,
-        &settings_item,
-        &PredefinedMenuItem::separator(),
-        &quit_item,
-    ])?;
+    menu.append_items(&items)?;
     let icon = icon::tray_icon(IconState::Stopped).context("icona della tray")?;
     let tray = TrayIconBuilder::new().with_menu(Box::new(menu)).with_icon(icon).with_tooltip("ClipRec").build()?;
 
@@ -446,6 +450,17 @@ fn build_ui(app: &Arc<App>, hwnd: HWND) -> anyhow::Result<Ui> {
         }
         "folder" => h_app.open_clips_folder(),
         "settings" => h_app.launch_settings(),
+        "restart" => match crate::sys::restart_elevated() {
+            Ok(()) => {
+                h_app.send(AppCommand::Quit);
+                // SAFETY: il gestore gira sul thread del loop di messaggi.
+                unsafe { PostQuitMessage(0) };
+            }
+            Err(e) => {
+                tracing::warn!("riavvio come amministratore: {e}");
+                h_app.process_event(&EngineEvent::Warning(fmt(i18n::current(), K::RestartFailed, &[&e.to_string()])));
+            }
+        },
         "quit" => {
             h_app.send(AppCommand::Quit);
             // SAFETY: il gestore gira sul thread del loop di messaggi.
@@ -473,6 +488,7 @@ fn build_ui(app: &Arc<App>, hwnd: HWND) -> anyhow::Result<Ui> {
         folder_item,
         settings_item,
         quit_item,
+        restart_item,
         recent_menu,
         recent_items: Vec::new(),
         recent_paths,
