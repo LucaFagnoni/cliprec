@@ -6,7 +6,7 @@
 #define AppName "ClipRec"
 ; Da `ISCC /DAppVersion=x.y.z`; altrimenti questa.
 #ifndef AppVersion
-  #define AppVersion "0.1.4"
+  #define AppVersion "0.1.5"
 #endif
 #define AppExe "cliprec-app.exe"
 ; Uguale a APP_ID in crates/cliprec-app/src/notify.rs (serve ai toast).

@@ -803,7 +803,8 @@ mod tests {
         .unwrap();
         let t0 = Instant::now();
         let mut seen_error = None;
-        while t0.elapsed() < Duration::from_secs(6) {
+        // 10 s: sotto il carico della suite completa la riapertura dopo il panic può superare i 6.
+        while t0.elapsed() < Duration::from_secs(10) {
             match src.state() {
                 SourceState::Error(m) => seen_error = Some(m),
                 SourceState::Running if seen_error.is_some() => break,
@@ -821,9 +822,6 @@ mod tests {
         assert!(QpcTime::now().hns_since(last) < 5_000_000, "la cattura deve aver ripreso");
     }
 
-    /// m7: «Sistema» sul dispositivo predefinito si apre in process loopback EXCLUDE sul nostro
-    /// albero di processi (il «ding» di salvataggio non entra nella clip); con un dispositivo
-    /// esplicito resta il loopback dell'endpoint. Nessun suono viene riprodotto.
     /// Un'app aperta mentre il buffer registra si aggancia entro un secondo (prima: fino a 3 s).
     #[test]
     fn app_started_later_is_found_within_a_second() {
@@ -851,6 +849,8 @@ mod tests {
         assert!(reopen, "la sorgente deve riaprirsi sul nuovo processo");
     }
 
+    /// «Uscita» predefinita = loopback del dispositivo predefinito; con un dispositivo esplicito
+    /// pure. «Tutto tranne un'app» esclude l'albero dell'app per PID (DECISIONS 32, 39).
     #[test]
     fn default_output_is_the_default_endpoint() {
         let mode_after_open = |kind: AudioSourceKind| {

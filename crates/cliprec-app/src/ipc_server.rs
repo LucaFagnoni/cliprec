@@ -294,12 +294,35 @@ pub fn spawn(pipe_name: String, ctx: Context) -> anyhow::Result<()> {
 pub fn spawn_with_limits(pipe_name: String, ctx: Context, limits: Limits) -> anyhow::Result<()> {
     let name = wide(&pipe_name);
     let sddl = wide(&format!("D:P(A;;GA;;;{})", crate::sys::current_user_sid()?));
-    // La prima istanza è creata qui per riportare subito un conflitto; poi passa al thread.
-    let first = create_instance(&name, &sddl, true)? as usize;
-    // Più thread in ascolto: mentre uno crea la sua prossima istanza gli altri hanno già una pipe
-    // libera, così un secondo client non trova mai la pipe occupata (m5).
+    match create_instance(&name, &sddl, true) {
+        Ok(first) => start_acceptors(&name, &sddl, &ctx, limits, first as usize),
+        Err(e) => {
+            // Dopo un aggiornamento il core vecchio può tenere ancora la pipe per qualche istante:
+            // si riprova finché non la libera, invece di restare senza IPC (impostazioni e finestra
+            // di aggiornamento vedrebbero ClipRec «non in esecuzione»).
+            tracing::warn!("pipe del core ancora occupata ({e}): riprovo finché si libera");
+            std::thread::Builder::new().name("ipc-attesa".into()).spawn(move || {
+                loop {
+                    std::thread::sleep(Duration::from_millis(250));
+                    if let Ok(first) = create_instance(&name, &sddl, true) {
+                        match start_acceptors(&name, &sddl, &ctx, limits, first as usize) {
+                            Ok(()) => tracing::info!("server IPC avviato dopo l'attesa"),
+                            Err(e) => tracing::error!("server IPC non avviato: {e}"),
+                        }
+                        return;
+                    }
+                }
+            })?;
+            Ok(())
+        }
+    }
+}
+
+/// Più thread in ascolto: mentre uno crea la sua prossima istanza gli altri hanno già una pipe
+/// libera, così un secondo client non trova mai la pipe occupata (m5). `first` è la prima istanza.
+fn start_acceptors(name: &[u16], sddl: &[u16], ctx: &Context, limits: Limits, first: usize) -> anyhow::Result<()> {
     for i in 0..ACCEPTORS {
-        let (name, sddl, ctx) = (name.clone(), sddl.clone(), ctx.clone());
+        let (name, sddl, ctx) = (name.to_vec(), sddl.to_vec(), ctx.clone());
         let mut pending = (i == 0).then_some(first);
         spawn_supervised("ipc", move || accept_loop(&name, &sddl, &ctx, limits, &mut pending))?;
     }
@@ -344,9 +367,10 @@ mod tests {
         let (c, rx, _) = ctx();
         let name = format!(r"\\.\pipe\cliprec-test-{}", std::process::id());
         spawn(name.clone(), c).unwrap();
-        // Un secondo server sullo stesso nome non deve poter rubare la pipe.
+        // Un secondo server sullo stesso nome non ruba la pipe: aspetta che il primo la liberi (le
+        // richieste qui sotto arrivano al primo, come dice `rx` in fondo).
         let (c2, ..) = ctx();
-        assert!(spawn(name.clone(), c2).is_err());
+        spawn(name.clone(), c2).unwrap();
 
         let mut pipe = OpenOptions::new().read(true).write(true).open(&name).unwrap();
         let mut reader_pipe = pipe.try_clone().unwrap();
@@ -417,6 +441,36 @@ mod tests {
             w.join().unwrap();
         }
         assert_eq!(busy.load(Ordering::SeqCst), 0, "ERROR_PIPE_BUSY su 2000 connessioni");
+    }
+
+    /// Riavvio dopo un aggiornamento: la pipe è ancora del core vecchio quando parte il nuovo. Il
+    /// nuovo non deve rinunciare: appena il vecchio la libera, risponde.
+    #[test]
+    fn pipe_still_held_by_the_old_core_is_retried() {
+        let (c, _rx, _) = ctx();
+        let name = format!(r"\\.\pipe\cliprec-test-vecchio-{}", std::process::id());
+        let wname = wide(&name);
+        let sddl = wide(&format!("D:P(A;;GA;;;{})", crate::sys::current_user_sid().unwrap()));
+        let old = create_instance(&wname, &sddl, true).unwrap();
+        spawn(name.clone(), c).expect("il core nuovo parte anche con la pipe occupata");
+        std::thread::sleep(Duration::from_millis(300));
+        // Il core vecchio esce.
+        // SAFETY: handle della pipe creata qui sopra, chiusa una sola volta.
+        unsafe {
+            let _ = windows::Win32::Foundation::CloseHandle(windows::Win32::Foundation::HANDLE(old as *mut _));
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let answer = loop {
+            if let Ok(mut p) = OpenOptions::new().read(true).write(true).open(&name) {
+                p.write_all(encode_line(&IpcRequest::Status).unwrap().as_bytes()).unwrap();
+                let mut line = String::new();
+                BufReader::new(&p).read_line(&mut line).unwrap();
+                break line;
+            }
+            assert!(std::time::Instant::now() < deadline, "il core nuovo non ha mai aperto la pipe");
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        assert!(answer.contains("Status"), "{answer}");
     }
 
     #[test]
