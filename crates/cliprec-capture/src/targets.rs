@@ -251,6 +251,14 @@ pub(crate) fn fullscreen_foreground() -> Option<(HWND, String)> {
     Some((hwnd, window_exe(hwnd).unwrap_or_default()))
 }
 
+/// Un'app Direct3D è a schermo intero esclusivo (`QUNS_RUNNING_D3D_FULL_SCREEN`): WGC la vede nera o
+/// ferma, Desktop Duplication no.
+pub(crate) fn d3d_fullscreen() -> bool {
+    use windows::Win32::UI::Shell::{QUNS_RUNNING_D3D_FULL_SCREEN, SHQueryUserNotificationState};
+    // SAFETY: nessun argomento.
+    matches!(unsafe { SHQueryUserNotificationState() }, Ok(QUNS_RUNNING_D3D_FULL_SCREEN))
+}
+
 /// La finestra copre tutto il suo monitor (schermo intero, esclusivo o senza bordi).
 pub(crate) fn covers_monitor(hwnd: HWND) -> bool {
     let (Some(r), Some(m)) = (window_rect(hwnd), window_monitor(hwnd).and_then(monitor_rect)) else { return false };

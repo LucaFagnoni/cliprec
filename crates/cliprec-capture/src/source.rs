@@ -16,7 +16,7 @@ use crate::dda::DdaCapture;
 use crate::health::Health;
 use crate::pacer::{FrameSlots, Pacer, PacerOptions, Stats};
 use crate::targets::{
-    adapter_luid_for_monitor, covers_monitor, exe_matches, find_window_by_exe, find_window_by_title, fullscreen_foreground,
+    adapter_luid_for_monitor, covers_monitor, d3d_fullscreen, exe_matches, find_window_by_exe, find_window_by_title, fullscreen_foreground,
     is_foreground, is_minimized, is_window, monitor_pixels, monitors, primary_monitor, window_exe, window_monitor,
     window_title,
 };
@@ -194,6 +194,8 @@ impl VideoSource for CaptureSource {
             target_monitor: None,
             other_adapter: false,
             usable_adapters: Vec::new(),
+            exclusive_dda: false,
+            switch_retry: Instant::now(),
         };
         // Primo giro sincrono: un monitor inesistente o una sessione rifiutata sono errori d'avvio.
         watch.poll()?;
@@ -273,6 +275,11 @@ struct Watch {
     other_adapter: bool,
     /// Adattatori già provati: (LUID, si può creare un device lì sopra).
     usable_adapters: Vec<(i64, bool)>,
+    /// Il monitor è passato a Desktop Duplication per lo schermo intero esclusivo (per una finestra
+    /// lo dice già il tipo di cattura).
+    exclusive_dda: bool,
+    /// Dopo un cambio di cattura non riuscito si riprova da questo istante.
+    switch_retry: Instant,
 }
 
 /// `true` se conviene riaprire device e sorgente: il bersaglio è su un adattatore diverso da quello
@@ -321,12 +328,13 @@ pub const FIRST_FRAME_WAIT: Duration = Duration::from_millis(500);
 pub const ADAPTER_CHANGED: &str =
     "il bersaglio è su un monitor collegato a un'altra GPU: riapri la sorgente per catturare senza copie tra adattatori";
 
-/// Fullscreen esclusivo: la cattura WGC di una finestra a schermo intero esclusivo dà frame neri o
-/// fermi, Desktop Duplication del suo monitor no (come «Cattura schermo» di OBS, senza iniettare
-/// nulla nel gioco). `Some(true)`: passa a Desktop Duplication; `Some(false)`: torna a WGC appena
-/// il gioco non è più a schermo intero in primo piano (DDA vedrebbe il desktop).
-fn exclusive_switch(on_dda: bool, frames_bad: bool, fullscreen_foreground: bool) -> Option<bool> {
-    match (on_dda, frames_bad, fullscreen_foreground) {
+/// Fullscreen esclusivo: WGC (di una finestra o di un monitor) dà frame neri o fermi, Desktop
+/// Duplication del monitor no (come «Cattura schermo» di OBS, senza iniettare nulla nel gioco).
+/// `exclusive`: Windows dice che c'è un'app Direct3D a schermo intero esclusivo, oppure WGC dà frame
+/// neri o fermi. `Some(true)`: passa a Desktop Duplication; `Some(false)`: torna alla cattura
+/// normale appena il gioco non è più a schermo intero in primo piano (DDA vedrebbe il desktop).
+fn exclusive_switch(switched: bool, exclusive: bool, fullscreen_foreground: bool) -> Option<bool> {
+    match (switched, exclusive, fullscreen_foreground) {
         (false, true, true) => Some(true),
         (true, _, false) => Some(false),
         _ => None,
@@ -378,7 +386,19 @@ impl Watch {
             let (slots, stats) = (self.slots.clone(), self.stats.clone());
             Ok(Capture::Wgc(WgcCapture::start(item, window, slots, stats, self.fps, self.cursor)?))
         };
-        let Resolved::Monitor(h) = r else { return wgc() };
+        let h = match r {
+            Resolved::Monitor(h) => h,
+            // WGC rifiuta la finestra (es. un gioco protetto): se copre il monitor, DDA vede lo stesso.
+            Resolved::Window(w) => {
+                return wgc().or_else(|e| match window_monitor(w).filter(|_| covers_monitor(w)) {
+                    Some(m) => {
+                        tracing::warn!("WGC non disponibile per la finestra ({e}): uso Desktop Duplication del suo monitor");
+                        DdaCapture::start(m, self.slots.clone(), self.stats.clone(), self.cursor).map(Capture::Dda)
+                    }
+                    None => Err(e),
+                });
+            }
+        };
         let dda = || DdaCapture::start(h, self.slots.clone(), self.stats.clone(), self.cursor).map(Capture::Dda);
         if self.prefer_dda {
             dda().or_else(|e| {
@@ -407,6 +427,7 @@ impl Watch {
             .is_some_and(|(r, c)| c.is_closed() || matches!(r, Resolved::Window(h) if !is_window(*h)));
         if gone || self.current.as_ref().map(|(r, _)| *r) != want {
             self.current = None;
+            self.exclusive_dda = false;
             self.health.reset(now);
             if let Some(r) = want {
                 let cap = self.open(r)?;
@@ -449,11 +470,16 @@ impl Watch {
                 SourceState::Waiting("finestra minimizzata".into())
             }
             Some(_) if self.other_adapter => SourceState::Waiting(ADAPTER_CHANGED.into()),
-            // DDA del monitor vede tutto, fullscreen esclusivo compreso: un frame nero è davvero nero
-            // (schermata di caricamento), non un gioco che sfugge alla cattura.
-            Some((Resolved::Monitor(_), Capture::Dda(_))) => SourceState::Running,
+            // DDA vede tutto, fullscreen esclusivo compreso: un frame nero è davvero nero (schermata
+            // di caricamento), non un gioco che sfugge alla cattura.
+            Some((_, Capture::Dda(_))) => SourceState::Running,
             Some((r, _)) => {
-                let foreground = matches!(r, Resolved::Window(h) if is_foreground(*h));
+                // Frame fermi: per una finestra in primo piano, o per un monitor con un'app a schermo
+                // intero davanti (un desktop fermo non produce frame da 24H2 ed è normale).
+                let foreground = match r {
+                    Resolved::Window(h) => is_foreground(*h),
+                    Resolved::Monitor(m) => fullscreen_on(*m),
+                };
                 let arrived = self.stats.arrived.load(Ordering::Relaxed);
                 match self.health.check(&self.slots, arrived, foreground, now) {
                     Some(warning) => SourceState::Waiting(warning.into()),
@@ -467,15 +493,24 @@ impl Watch {
         Ok(())
     }
 
-    /// Passa la finestra a Desktop Duplication del suo monitor quando è a schermo intero esclusivo,
-    /// e torna a WGC quando non lo è più ([`exclusive_switch`]).
+    /// Passa a Desktop Duplication del monitor quando il bersaglio è a schermo intero esclusivo, e
+    /// torna alla cattura normale quando non lo è più ([`exclusive_switch`]).
     fn exclusive_fullscreen(&mut self, frames_bad: bool, now: Instant) {
-        let Some((Resolved::Window(h), cap)) = &self.current else { return };
-        let (h, on_dda) = (*h, matches!(cap, Capture::Dda(_)));
-        let Some(to_dda) = exclusive_switch(on_dda, frames_bad, is_foreground(h) && covers_monitor(h)) else { return };
-        let r = Resolved::Window(h);
+        let Some((r, cap)) = &self.current else { return };
+        let (r, on_dda) = (*r, matches!(cap, Capture::Dda(_)));
+        let (monitor, fullscreen, switched) = match r {
+            Resolved::Window(h) => (window_monitor(h), is_foreground(h) && covers_monitor(h), on_dda),
+            Resolved::Monitor(m) => (Some(m), fullscreen_on(m), self.exclusive_dda),
+        };
+        // Il segnale di Windows arriva subito; i frame neri o fermi dopo qualche secondo.
+        let exclusive = frames_bad || (fullscreen && d3d_fullscreen());
+        let Some(to_dda) = exclusive_switch(switched, exclusive, fullscreen) else { return };
+        // Un monitor già su DDA (preferito o ripiego) vede anche lo schermo intero esclusivo.
+        if (to_dda && on_dda) || now < self.switch_retry {
+            return;
+        }
         let opened = if to_dda {
-            match window_monitor(h) {
+            match monitor {
                 Some(m) => DdaCapture::start(m, self.slots.clone(), self.stats.clone(), self.cursor).map(Capture::Dda),
                 None => return,
             }
@@ -485,14 +520,24 @@ impl Watch {
         match opened {
             Ok(cap) => {
                 let desc = format!("{} · {}", r.describe(), cap.backend());
-                tracing::info!(source = %desc, "schermo intero esclusivo: {}", if to_dda { "uso Desktop Duplication" } else { "torno a WGC" });
+                let what = if to_dda { "uso Desktop Duplication" } else { "torno alla cattura normale" };
+                tracing::info!(source = %desc, "schermo intero esclusivo: {what}");
                 *lock(&self.description) = desc;
                 self.current = Some((r, cap));
+                self.exclusive_dda = to_dda;
                 self.health.reset(now);
             }
-            Err(e) => tracing::warn!("cambio di cattura per lo schermo intero non riuscito: {e}"),
+            Err(e) => {
+                tracing::warn!("cambio di cattura per lo schermo intero non riuscito: {e}");
+                self.switch_retry = now + RETRY;
+            }
         }
     }
+}
+
+/// Un'app a schermo intero in primo piano copre il monitor `m`.
+fn fullscreen_on(m: HMONITOR) -> bool {
+    fullscreen_foreground().is_some_and(|(w, _)| window_monitor(w) == Some(m))
 }
 
 #[cfg(test)]
@@ -841,7 +886,8 @@ mod tests {
 
     #[test]
     fn exclusive_fullscreen_switches_to_dda_and_back() {
-        // WGC, frame neri o fermi, gioco a schermo intero in primo piano: Desktop Duplication.
+        // WGC, schermo intero esclusivo (segnale di Windows o frame neri/fermi), gioco in primo
+        // piano: Desktop Duplication.
         assert_eq!(exclusive_switch(false, true, true), Some(true));
         // Frame neri ma non a schermo intero (caricamento, finestra nera): resta WGC.
         assert_eq!(exclusive_switch(false, true, false), None);
