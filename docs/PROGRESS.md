@@ -73,7 +73,12 @@ approvati senza di te (2); `MinUpdateInterval` a 3/4 di periodo (17); pts video 
 compensazione (18); tick persi riempiti con l'ultimo frame (19); RAM insufficiente → tetto ridotto e
 avviso invece della proposta interattiva (20); spegnimento del PC lasciato alla sessione di pokewilds (12).
 
-### Spegnimento del PC: ClipRec lo lascia acceso
+### Spegnimento del PC: annullato da Luca, il PC resta acceso
+
+- **08:50: Luca ha scritto in questa chat «annullate lo spegnimento, comunicalo anche all'altro
+  agente».** Ho inoltrato la richiesta alla sessione «Pokewilds Godot iOS build setup» chiedendo di
+  fermare il watcher (niente `shutdown /s` né alla scadenza delle 09:30) e, se partito, di eseguire
+  `shutdown /a`. Sul PC non risultano operazioni pianificate di spegnimento.
 
 - ClipRec non spegne e non riavvia il PC: lo vieta AVVIO.md, regola 6, e la decisione spetta a te.
 - La sessione «Pokewilds Godot iOS build setup» ha scritto (03:47) che le hai chiesto lo spegnimento
