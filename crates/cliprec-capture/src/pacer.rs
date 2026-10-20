@@ -429,6 +429,26 @@ mod tests {
     }
 
     #[test]
+    fn panic_in_callback_stops_pacer_with_error() {
+        let slots = Arc::new(FrameSlots::new(GpuDevice::create(None).unwrap()));
+        slots.publish(16, 16, |_| Ok(())).unwrap();
+        let stats = Arc::new(Stats::default());
+        let mut pacer = Pacer::start(
+            60,
+            slots,
+            stats.clone(),
+            None,
+            Box::new(|f| assert!(f.index < 3, "panic voluto nel test")),
+        )
+        .unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        pacer.stop();
+        let s = stats.snapshot();
+        assert_eq!(s.frames_delivered, 3);
+        assert!(matches!(s.state, SourceState::Error(_)), "{s:?}");
+    }
+
+    #[test]
     fn rejects_unsupported_fps() {
         let slots = Arc::new(FrameSlots::new(GpuDevice::create(None).unwrap()));
         assert!(Pacer::start(50, slots, Arc::default(), None, Box::new(|_| ())).is_err());

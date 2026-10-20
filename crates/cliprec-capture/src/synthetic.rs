@@ -178,18 +178,33 @@ mod tests {
         let device = GpuDevice::create(None).unwrap();
         let mut src = SyntheticSource::new(device, 320, 240);
         let (tx, rx) = mpsc::channel();
-        src.start(60, Box::new(move |f| tx.send((f.pts, f.index, f.repeated, f.width, f.height)).unwrap())).unwrap();
+        src.start(
+            60,
+            Box::new(move |f| {
+                let late = QpcTime::now().hns_since(f.pts);
+                tx.send((f.pts, f.index, f.repeated, f.width, f.height, late)).unwrap();
+            }),
+        )
+        .unwrap();
         std::thread::sleep(Duration::from_secs(2));
         src.stop();
         let stats = src.stats();
         let frames: Vec<_> = rx.try_iter().collect();
+        // Ritardo della consegna rispetto al pts (comprende il disegno del frame sintetico).
+        let mut late: Vec<i64> = frames.iter().map(|f| f.5).collect();
+        late.sort_unstable();
+        let p50 = late[late.len() / 2] as f64 / 1e4;
+        let p95 = late[late.len() * 95 / 100] as f64 / 1e4;
+        let max = late[late.len() - 1] as f64 / 1e4;
+        println!("ritardo consegna: mediana {p50:.3} ms, p95 {p95:.3} ms, max {max:.3} ms");
+        assert!(p95 < 4.0, "consegna in ritardo: p95 {p95} ms");
         assert!((114..=122).contains(&frames.len()), "{} frame", frames.len());
         let (pts0, idx0, ..) = frames[0];
         let start = pts0.add_hns(-grid_pts(QpcTime(0), idx0, 60).0);
         for w in frames.windows(2) {
             assert!(w[1].1 > w[0].1, "indici crescenti");
         }
-        for &(pts, index, _, w, h) in &frames {
+        for &(pts, index, _, w, h, _) in &frames {
             assert_eq!(pts, grid_pts(start, index, 60), "pts fuori griglia al frame {index}");
             assert_eq!((w, h), (320, 240));
         }
