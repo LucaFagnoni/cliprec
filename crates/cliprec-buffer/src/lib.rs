@@ -189,14 +189,25 @@ impl ReplayBuffer {
         let mut v = lock(&self.video);
         let params = v.params.clone()?;
         let frame = HNS_PER_SEC / i64::from(params.fps.max(1));
-        let mut shown: Vec<QpcTime> =
-            v.ring.iter().filter(|(_, e)| e.meta.dts <= end).map(|(_, e)| e.meta.pts).collect();
+        // Il buco si cerca solo dopo l'ultimo keyframe: i buchi interni (pacer bloccato) restano nel
+        // file come salto di timestamp, non troncano la clip.
+        let tail_from = v.keyframes.back().copied()?;
+        let mut shown: Vec<QpcTime> = v
+            .ring
+            .iter()
+            .filter(|(seq, e)| *seq >= tail_from && e.meta.dts <= end)
+            .map(|(_, e)| e.meta.pts)
+            .collect();
         shown.sort_unstable();
         let cut = shown.windows(2).find(|w| w[1].hns_since(w[0]) > frame * 3 / 2).map_or(*shown.last()?, |w| w[0]);
         // Ultimo pacchetto tenuto (ordine di decodifica) e fine dell'ultimo frame tenuto.
         let mut stop = None;
         let mut last_end = None;
-        for (seq, e) in v.ring.iter().take_while(|(_, e)| e.meta.dts <= end && e.meta.pts <= cut) {
+        for (seq, e) in v
+            .ring
+            .iter()
+            .take_while(|(seq, e)| e.meta.dts <= end && (*seq < tail_from || e.meta.pts <= cut))
+        {
             stop = Some(seq);
             let frame_end = e.meta.pts.add_hns(e.meta.duration.max(frame));
             last_end = Some(last_end.map_or(frame_end, |t: QpcTime| t.max(frame_end)));

@@ -376,3 +376,16 @@ fn snapshot_seconds_are_measured_from_last_frame() {
     assert!(last_end.hns_since(start) >= 2 * HNS_PER_SEC, "clip più corta di 2 s");
     assert!(last_end.hns_since(start) <= 3 * HNS_PER_SEC, "clip oltre un GOP in più");
 }
+
+/// Un buco interno (pacer bloccato 1 s, molti GOP fa) non tronca la clip: resta un salto di
+/// timestamp nel mezzo e la clip arriva fino all'ultimo frame.
+#[test]
+fn internal_gap_does_not_truncate_snapshot() {
+    let b = buffer(10.0, 64 * MB);
+    for seq in (0..100).chain(150..400) {
+        push(&b, seq, 32, seq % 50 == 0);
+    }
+    let s = b.snapshot_video(7.0, QpcTime(1_000_000_000 + 400 * FRAME_HNS)).unwrap();
+    assert_eq!(seq_of(s.packets.last().unwrap()), 399);
+    assert_eq!(seq_of(&s.packets[0]), 50);
+}
