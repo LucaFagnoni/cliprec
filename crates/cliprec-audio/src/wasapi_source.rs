@@ -3,7 +3,6 @@
 //! a eventi con attesa massima di 10 ms; i vuoti diventano silenzio tramite [`Continuity`].
 
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
-use std::sync::mpsc::{SyncSender, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -32,6 +31,9 @@ const RETRY: Duration = Duration::from_secs(3);
 const BUFFER_HNS: i64 = 1_000_000;
 /// Pacchetto massimo gestito senza allocare (1 s).
 const MAX_PACKET_FRAMES: usize = SAMPLE_RATE as usize;
+
+/// Stato `Waiting` tra `start` e la fine del primo tentativo di apertura.
+pub const OPENING: &str = "apertura in corso";
 
 const MIC_PRIVACY: &str = "Windows nega l'accesso al microfono: apri Impostazioni → Privacy e sicurezza → Microfono \
      e attiva «Consenti alle app desktop di accedere al microfono»";
@@ -142,8 +144,9 @@ fn watch_pid(exe: String, pid: Arc<AtomicU32>, flags: Arc<DeviceFlags>, stop: Ar
 }
 
 impl AudioSource for WasapiSource {
-    /// Avvia il thread di cattura e aspetta il primo tentativo di apertura (al massimo 10 s), così
-    /// `state()` è già significativo al ritorno. Nessun errore di apertura ferma la sorgente:
+    /// Avvia il thread di cattura e torna subito, in stato `Waiting("apertura in corso")`: il primo
+    /// tentativo di apertura procede sul thread della sorgente, che poi riporta `Running`, `Waiting`
+    /// o `Error` in `state()`. Nessun errore di apertura ferma la sorgente:
     /// dispositivo o app assenti danno `Waiting`, privacy del microfono, modalità esclusiva o altri
     /// errori danno `Error(messaggio)`; in entrambi i casi si consegna silenzio e si ritenta ogni
     /// 3 s (o subito a una notifica), quindi la traccia riprende da sola quando la causa sparisce.
@@ -166,7 +169,9 @@ impl AudioSource for WasapiSource {
                     .map_err(|e| SourceError::Failed(format!("thread di ricerca dell'app: {e}")))?,
             );
         }
-        let (tx, rx) = sync_channel(1);
+        if let Ok(mut g) = self.state.lock() {
+            *g = SourceState::Waiting(OPENING.into());
+        }
         let ctx = Capture {
             kind: self.kind.clone(),
             stop: self.stop.clone(),
@@ -178,15 +183,13 @@ impl AudioSource for WasapiSource {
             #[cfg(test)]
             fail_open: self.fail_open.clone(),
         };
-        let thread = match std::thread::Builder::new().name(format!("audio {}", self.name)).spawn(move || ctx.run(tx)) {
+        let thread = match std::thread::Builder::new().name(format!("audio {}", self.name)).spawn(move || ctx.run()) {
             Ok(t) => t,
             Err(e) => {
                 self.stop();
                 return Err(SourceError::Failed(format!("thread di cattura: {e}")));
             }
         };
-        // Pronto, oppure ancora in apertura: il thread prosegue e riferisce tramite `state`.
-        let _ = rx.recv_timeout(Duration::from_secs(10));
         self.thread = Some(thread);
         Ok(())
     }
@@ -277,10 +280,10 @@ impl Capture {
         }
     }
 
-    fn run(mut self, ready: SyncSender<()>) {
+    fn run(mut self) {
         let com = wasapi::initialize_mta();
         let mmcss = Mmcss::register();
-        self.capture_loop(ready);
+        self.capture_loop();
         drop(mmcss);
         if com.is_ok() {
             wasapi::deinitialize();
@@ -288,8 +291,7 @@ impl Capture {
         self.set_state(SourceState::Stopped);
     }
 
-    fn capture_loop(&mut self, ready: SyncSender<()>) {
-        let mut ready = Some(ready);
+    fn capture_loop(&mut self) {
         let flags = self.flags.clone();
         // Notifiche dei dispositivi (IMMNotificationClient): solo segnali atomici nei callback.
         let enumerator = DeviceEnumerator::new().ok();
@@ -299,13 +301,9 @@ impl Capture {
 
         while !self.stop.load(Ordering::Acquire) {
             let outcome = self.open(enumerator.as_ref());
-            // Lo stato si aggiorna prima di sbloccare `start`.
             match &outcome {
                 Ok(_) => self.set_state(SourceState::Running),
                 Err(e) => self.set_failure(e),
-            }
-            if let Some(tx) = ready.take() {
-                let _ = tx.send(());
             }
             match outcome {
                 Ok(session) => {
@@ -700,6 +698,10 @@ mod tests {
             sink.lock().unwrap().push((c.qpc, c.samples.len() / 2, peak));
         }))
         .unwrap();
+        assert!(t0.elapsed() < Duration::from_millis(200), "start non deve aspettare l'apertura");
+        while src.state() == SourceState::Waiting(OPENING.into()) && t0.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
         match src.state() {
             SourceState::Error(m) => assert!(m.contains("Privacy e sicurezza → Microfono"), "{m}"),
             s => panic!("atteso Error, stato {s:?}"),

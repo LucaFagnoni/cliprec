@@ -322,6 +322,39 @@ mod tests {
         }
     }
 
+    /// Riavvio della sessione: `start` non aspetta le aperture WASAPI, e gli stati poi diventano
+    /// significativi da soli.
+    #[test]
+    fn start_with_three_sources_returns_quickly() {
+        use crate::wasapi_source::OPENING;
+        use cliprec_core::config::{AudioSourceConfig, AudioSourceKind};
+        let src = |name: &str, kind| AudioSourceConfig { name: name.into(), kind, volume: 1.0 };
+        let cfg = AudioConfig {
+            mode: TrackMode::Merged,
+            add_mix_track: false,
+            sources: vec![
+                src("Sistema", AudioSourceKind::Output { device: None }),
+                src("Explorer", AudioSourceKind::App { exe: "explorer.exe".into() }),
+                src("Assente", AudioSourceKind::App { exe: "nessuna-app-cliprec.exe".into() }),
+            ],
+        };
+        let sink = Arc::new(TestSink::default());
+        let t0 = std::time::Instant::now();
+        let mut engine = AudioEngine::start(&cfg, sink).unwrap();
+        let took = t0.elapsed();
+        println!("AudioEngine::start con 3 sorgenti: {took:?}");
+        assert!(took < Duration::from_secs(1), "{took:?}");
+        let opening = SourceState::Waiting(OPENING.into());
+        while engine.states().iter().any(|(_, s)| *s == opening) && t0.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let states = engine.states();
+        println!("{states:?} dopo {:?}", t0.elapsed());
+        engine.stop();
+        assert_eq!(states[0].1, SourceState::Running);
+        assert!(matches!(states[2].1, SourceState::Waiting(ref m) if m.contains("non è in esecuzione")));
+    }
+
     struct Denied;
     impl AudioSource for Denied {
         fn start(&mut self, _: cliprec_core::ChunkCallback) -> Result<(), SourceError> {
