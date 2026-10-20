@@ -825,6 +825,50 @@ mod tests {
         }
     }
 
+    /// Modalità audio nella catena completa: traccia unica (una sola traccia «Mix») e tracce separate
+    /// con il «Mix» in testa (tre tracce, la prima predefinita), con i bip ancora sincronizzati.
+    #[test]
+    fn merged_and_mix_track_modes_end_to_end() {
+        use cliprec_tests::probe::{Expect, check};
+        for (mode, add_mix, names) in [
+            (TrackMode::Merged, false, vec!["Mix"]),
+            (TrackMode::Separate, true, vec!["Mix", "Bip 1 kHz", "Bip 1,5 kHz"]),
+        ] {
+            let mut config = Config::default();
+            config.clips.folder = Some(fault_dir(&format!("modo-{mode:?}-{add_mix}")));
+            config.clips.video_seconds = 3;
+            config.audio.mode = mode;
+            config.audio.add_mix_track = add_mix;
+            let (tx, rx) = std::sync::mpsc::channel();
+            let device = GpuDevice::create(None).unwrap();
+            let video = cliprec_capture::SyntheticSource::new(device.clone(), 1280, 720);
+            let overrides = SourceOverrides { video: Some((device, Box::new(video))), audio: Some(beeps()) };
+            let session = Session::start(&config, new_buffer(&config, &tx), Shared::default(), overrides, tx).unwrap();
+            std::thread::sleep(Duration::from_secs(5));
+            session.save(ClipKind::Video, 3).unwrap().join().unwrap();
+            let clip = rx
+                .try_iter()
+                .find_map(|e| match e {
+                    EngineEvent::ClipSaved(c) => Some(c.path),
+                    _ => None,
+                })
+                .expect("clip salvata");
+            let names: Vec<String> = names.into_iter().map(String::from).collect();
+            let expect = Expect {
+                min_duration: Some(3.0),
+                audio_tracks: Some(names.len()),
+                track_names: Some(names),
+                fps: Some(60.0),
+                ..Expect::default()
+            };
+            let v = check(&clip, &expect).unwrap();
+            assert!(v.is_empty(), "{mode:?} mix={add_mix}: {v:?}");
+            let sync = cliprec_tests::sync::measure_sync(&clip).unwrap();
+            let v = sync.violations(20.0);
+            assert!(v.is_empty(), "{mode:?} mix={add_mix}: {v:?}");
+        }
+    }
+
     #[test]
     fn reload_restarts_only_for_capture_settings() {
         let a = Config::default();
