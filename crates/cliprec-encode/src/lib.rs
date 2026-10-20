@@ -24,7 +24,7 @@ mod ffi;
 mod nal;
 mod yuv;
 
-use cliprec_core::config::{CodecChoice, OutputResolution, VideoConfig, default_max_bitrate_kbps};
+use cliprec_core::config::{CodecChoice, ColorFormat, EncoderAdvanced, OutputResolution, VideoConfig, default_max_bitrate_kbps};
 use cliprec_core::{EncodeError, GpuDevice, VideoCodec, VideoEncoder};
 
 /// Famiglia di encoder.
@@ -64,19 +64,45 @@ pub struct EncoderSettings {
     pub quality: u8,
     /// Tetto in kbit/s; `None` = [`default_max_bitrate_kbps`] per codec, altezza e fps.
     pub max_bitrate_kbps: Option<u32>,
+    /// Formato colore, controllo del bitrate, preset, GOP, B-frame, look-ahead, AQ.
+    pub advanced: EncoderAdvanced,
 }
 
 impl EncoderSettings {
     /// Impostazioni dalla configurazione e dalla dimensione della prima texture della sorgente.
     pub fn from_config(cfg: &VideoConfig, source_width: u32, source_height: u32) -> Self {
         let (width, height) = output_size(cfg.resolution, source_width, source_height);
-        Self { codec: cfg.codec, fps: cfg.fps, width, height, quality: cfg.quality, max_bitrate_kbps: cfg.max_bitrate_kbps }
+        Self {
+            codec: cfg.codec,
+            fps: cfg.fps,
+            width,
+            height,
+            quality: cfg.quality,
+            max_bitrate_kbps: cfg.max_bitrate_kbps,
+            advanced: cfg.advanced.clone(),
+        }
+    }
+
+    /// Bitrate obiettivo per VBR e CBR in kbit/s: quello scelto, altrimenti 2/3 del tetto.
+    pub fn target_bitrate_kbps_for(&self, codec: VideoCodec) -> u32 {
+        self.advanced.bitrate_kbps.unwrap_or_else(|| self.max_bitrate_kbps_for(codec) * 2 / 3).max(100)
+    }
+
+    /// Il 4:4:4 è chiesto e `encoder_name` lo sa fare.
+    pub fn chroma444_for(&self, encoder_name: &str) -> bool {
+        self.advanced.color_format == ColorFormat::Yuv444 && supports_444(encoder_name)
     }
 
     /// Tetto effettivo in kbit/s per `codec`.
     pub fn max_bitrate_kbps_for(&self, codec: VideoCodec) -> u32 {
         self.max_bitrate_kbps.unwrap_or_else(|| default_max_bitrate_kbps(codec, self.height, self.fps))
     }
+}
+
+/// Encoder che codificano in 4:4:4 da frame BGRA: NVENC in H.264 e HEVC. AMF e AV1 no; QSV solo su
+/// alcune generazioni, per ora escluso.
+pub fn supports_444(encoder_name: &str) -> bool {
+    matches!(encoder_name, "h264_nvenc" | "hevc_nvenc")
 }
 
 /// Risoluzione d'uscita: la nativa della sorgente o l'altezza scelta con le proporzioni della
@@ -133,7 +159,7 @@ pub fn open(device: &GpuDevice, settings: &EncoderSettings, encoder_name: &str) 
             .ok_or_else(unsupported)?;
         (codec, Vendor::HARDWARE.into_iter().find(|v| v.suffix() == suffix).ok_or_else(unsupported)?)
     };
-    let b_frames = match vendor {
+    let auto_b_frames = match vendor {
         // NVENC: FFmpeg tiene almeno 4 × (B + 1) superfici, ognuna con un buffer di bitstream in RAM
         // di ~2,5 byte per pixel che il driver tiene residente; con 2 B-frame sono 12 (84 MB a 1080p
         // contro 30 senza, `tests/memory.rs`). Il costo: ~15% di bitrate in più a qualità costante
@@ -144,8 +170,20 @@ pub fn open(device: &GpuDevice, settings: &EncoderSettings, encoder_name: &str) 
         Vendor::Software => 0,
         _ => B_FRAMES,
     };
+    let b_frames = match (vendor, settings.advanced.b_frames) {
+        (Vendor::Software, _) => 0,
+        (_, Some(b)) => u32::from(b.min(4)),
+        (_, None) => auto_b_frames,
+    };
     let enc = with_bframe_fallback(encoder_name, b_frames, |b| ffi::HwEncoder::open(device, settings, encoder_name, codec, vendor, b))?;
-    tracing::info!(encoder = encoder_name, width = settings.width, height = settings.height, fps = settings.fps, "encoder aperto");
+    tracing::info!(
+        encoder = encoder_name,
+        width = settings.width,
+        height = settings.height,
+        fps = settings.fps,
+        colore_444 = settings.chroma444_for(encoder_name),
+        "encoder aperto"
+    );
     Ok(Box::new(enc))
 }
 
@@ -204,7 +242,7 @@ pub fn set_gpu_priority(device: &GpuDevice, high: bool) -> Result<(), EncodeErro
 /// Combinazioni codec/encoder hardware che si aprono davvero su `device` (1280×720 a 60 fps,
 /// CQ 23). Il ripiego software [`SOFTWARE_ENCODER`] non è incluso: c'è sempre.
 pub fn probe(device: &GpuDevice) -> Vec<(VideoCodec, String)> {
-    let settings = EncoderSettings { codec: CodecChoice::Auto, fps: 60, width: 1280, height: 720, quality: 23, max_bitrate_kbps: None };
+    let settings = EncoderSettings { codec: CodecChoice::Auto, fps: 60, width: 1280, height: 720, quality: 23, max_bitrate_kbps: None, advanced: EncoderAdvanced::default() };
     candidates(CodecChoice::Av1)
         .into_iter()
         .filter(|(_, name)| name != SOFTWARE_ENCODER)

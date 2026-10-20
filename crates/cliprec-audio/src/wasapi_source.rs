@@ -625,6 +625,7 @@ fn processes() -> Vec<(u32, u32, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::windows::process::CommandExt;
     use cliprec_core::time::frames_to_hns;
 
     type Chunks = Arc<Mutex<Vec<(QpcTime, usize, f32)>>>;
@@ -844,6 +845,7 @@ mod tests {
         let mut child = std::process::Command::new(r"C:\Windows\System32\PING.EXE")
             .args(["-n", "6", "127.0.0.1"])
             .stdout(std::process::Stdio::null())
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
             .spawn()
             .unwrap();
         let t0 = Instant::now();

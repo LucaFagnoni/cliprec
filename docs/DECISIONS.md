@@ -130,3 +130,11 @@ Le voci [DEFAULT] e [PROPOSTA] di SPEC.md valgono come decise; qui ci sono quell
     i valori predefiniti fermerebbero ClipRec dopo 3 giorni e lo farebbero girare a priorità bassa.
     Un segnaposto accanto a config.toml evita di richiedere il permesso a ogni avvio. La finestra
     delle impostazioni è stata ridisegnata sul modello delle Impostazioni di Windows 11.
+34. **Colore 4:4:4 e codifica avanzata** (20 ottobre, richiesta di Luca). Gli aloni colorati sul
+    testo vengono dal 4:2:0 (un campione di colore ogni 2×2 pixel), non dalla conversione, che già
+    media correttamente. Con `video.advanced.color_format = "yuv444"` il processore video consegna
+    BGRA a colori pieni e NVENC converte in 4:4:4 (`rgb_mode=yuv444`, profilo `rext` o `high444p`):
+    su una linea rossa da 1 pixel l'alone passa da 100 a 2 livelli su 255, i colori pieni restano
+    entro 8 livelli. Solo NVENC H.264/HEVC; con gli altri encoder si registra in 4:2:0 con un
+    avviso. Le altre opzioni (controllo del bitrate, preset, fotogrammi chiave, B-frame, look-ahead,
+    AQ, bitrate AAC) hanno predefiniti uguali al comportamento precedente.

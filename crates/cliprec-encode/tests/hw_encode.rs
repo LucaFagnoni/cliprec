@@ -339,6 +339,7 @@ fn encode_and_probe(
         height: out.1,
         quality: 23,
         max_bitrate_kbps: None,
+        advanced: Default::default(),
     };
     let mut enc = cliprec_encode::open(&gpu, &settings, encoder).unwrap();
     let params = enc.params().clone();
@@ -527,4 +528,94 @@ fn open_best_and_probe() {
     let enc = cliprec_encode::open_best(&gpu, &settings).unwrap();
     assert_eq!(enc.params().encoder_name, "hevc_nvenc");
     assert_eq!(enc.params().bit_rate, 16_666_000);
+}
+
+/// Testo colorato: linee rosse larghe 1 pixel su nero, una colonna ogni 4. Restituisce il rosso
+/// massimo (0-255) finito sulla colonna accanto dopo codifica NVENC e decodifica.
+fn red_line_bleed(color_format: cliprec_core::config::ColorFormat) -> Option<(i32, i32, String)> {
+    let Some(gpu) = device(NVIDIA) else {
+        eprintln!("SALTATO: nessun adattatore NVIDIA");
+        return None;
+    };
+    let (w, h) = (256u32, 64u32);
+    // BGRA in little-endian: 0xAARRGGBB.
+    let pixels: Vec<u32> = (0..w * h).map(|i| if i % w % 4 == 1 { 0xffff_0000 } else { 0xff00_0000 }).collect();
+    let desc = D3D11_TEXTURE2D_DESC {
+        Width: w,
+        Height: h,
+        MipLevels: 1,
+        ArraySize: 1,
+        Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+        Usage: D3D11_USAGE_DEFAULT,
+        BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+        ..Default::default()
+    };
+    let init = D3D11_SUBRESOURCE_DATA { pSysMem: pixels.as_ptr().cast(), SysMemPitch: w * 4, SysMemSlicePitch: 0 };
+    let mut tex = None;
+    // SAFETY: descrittore, dati iniziali (w×h pixel da 4 byte) e puntatore d'uscita locali.
+    unsafe { gpu.device.CreateTexture2D(&desc, Some(&init), Some(&mut tex)) }.unwrap();
+    let tex = tex.unwrap();
+    let mut settings = EncoderSettings::from_config(&Default::default(), w, h);
+    settings.quality = 18;
+    settings.advanced.color_format = color_format;
+    let mut enc = cliprec_encode::open(&gpu, &settings, "hevc_nvenc").unwrap();
+    let extradata = enc.params().extradata.clone();
+    let mut pkts = Vec::new();
+    let mut sink = |p: cliprec_core::PacketRef<'_>| pkts.push(Pkt { data: p.data.to_vec(), pts: p.pts, dts: p.dts, keyframe: p.keyframe });
+    let start = QpcTime(1_000_000_000);
+    for i in 0..30u64 {
+        let frame = GpuFrame { texture: tex.clone(), width: w, height: h, pts: start.add_hns(i as i64 * HNS_PER_SEC / 60), index: i, repeated: false };
+        enc.encode(&frame, &mut sink).unwrap();
+    }
+    enc.flush(&mut sink).unwrap();
+    let path = write_stream(&format!("righe-rosse-{color_format:?}.hevc"), &extradata, &pkts);
+    let ffmpeg = std::env::var("FFMPEG_DIR").unwrap_or_else(|_| "D:/Repositories/cliprec/third_party/ffmpeg".into());
+    let bin = PathBuf::from(ffmpeg).join("bin");
+    let out = Command::new(bin.join("ffmpeg.exe")).args(["-v", "error", "-i"]).arg(&path).args(["-f", "rawvideo", "-pix_fmt", "rgb24", "-"]).output().unwrap();
+    assert!(out.status.success(), "ffmpeg: {}", String::from_utf8_lossy(&out.stderr));
+    let size = (w * h * 3) as usize;
+    let last = &out.stdout[out.stdout.len() - size..];
+    let red = |x: u32, y: u32| i32::from(last[((y * w + x) * 3) as usize]);
+    let (mut bleed, mut line) = (0, 255);
+    for y in 8..h - 8 {
+        for x in (4..w - 4).step_by(4) {
+            bleed = bleed.max(red(x, y)).max(red(x + 2, y));
+            line = line.min(red(x + 1, y));
+        }
+    }
+    let probe = Command::new(bin.join("ffprobe.exe"))
+        .args(["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=pix_fmt", "-of", "csv=p=0"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    Some((bleed, line, String::from_utf8_lossy(&probe.stdout).trim().to_owned()))
+}
+
+/// 4:4:4 (impostazioni avanzate): niente alone di colore attorno al testo. In 4:2:0 il rosso di una
+/// linea da 1 pixel sbava sulla colonna accanto; in 4:4:4 resta nella sua.
+#[test]
+fn nvenc_444_keeps_colored_text_sharp() {
+    use cliprec_core::config::ColorFormat;
+    let Some((bleed420, line420, fmt420)) = red_line_bleed(ColorFormat::Yuv420) else { return };
+    let Some((bleed444, line444, fmt444)) = red_line_bleed(ColorFormat::Yuv444) else { return };
+    eprintln!("4:2:0 ({fmt420}): alone {bleed420}, linea {line420}; 4:4:4 ({fmt444}): alone {bleed444}, linea {line444}");
+    assert_eq!(fmt444, "yuv444p");
+    assert!(bleed420 >= 40, "il test deve vedere l'alone del 4:2:0 ({bleed420})");
+    assert!(bleed444 <= 16, "alone in 4:4:4: {bleed444}");
+    assert!(line444 >= 200, "la linea rossa deve restare rossa: {line444}");
+}
+
+/// 4:4:4: i colori pieni restano quelli disegnati (la conversione RGB→YUV è dell'encoder).
+#[test]
+fn hevc_nvenc_444_colors() {
+    let Some(gpu) = device(NVIDIA) else { return };
+    let mut settings = EncoderSettings::from_config(&Default::default(), 1920, 1080);
+    settings.advanced.color_format = cliprec_core::config::ColorFormat::Yuv444;
+    let mut enc = cliprec_encode::open(&gpu, &settings, "hevc_nvenc").unwrap();
+    let extradata = enc.params().extradata.clone();
+    let (pkts, fps) = run(&gpu, enc.as_mut(), &[(1920, 1080)], false);
+    eprintln!("hevc_nvenc 4:4:4: {fps:.0} fps di encode");
+    let path = write_stream("hevc_nvenc_444.hevc", &extradata, &pkts);
+    check_colors(&path, 1920, 1080, 0, 8);
 }

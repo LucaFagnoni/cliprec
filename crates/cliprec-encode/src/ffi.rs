@@ -11,6 +11,7 @@ use windows::core::Interface;
 use crate::d3d::{Converter, Output};
 use crate::yuv::{Plane, nv12_to_i420};
 use crate::{EncoderSettings, Vendor};
+use cliprec_core::config::RateControl;
 
 /// Texture del pool fisso per QSV (`async_depth` 4 + B-frame + margine). D3D11 rifiuta array NV12
 /// con `BIND_RENDER_TARGET` oltre 2 elementi (misurato su RTX 3080 e UHD 770), e FFmpeg con
@@ -219,7 +220,9 @@ impl HwEncoder {
             Vendor::Software => Output::Cpu,
             Vendor::Nvenc | Vendor::Amf => Output::Pool,
         };
-        let converter = Converter::new(gpu, s.width, s.height, s.fps, output)
+        // 4:4:4: frame BGRA all'encoder, che converte in YUV 4:4:4 (solo NVENC, `supports_444`).
+        let rgb = s.chroma444_for(name);
+        let converter = Converter::new(gpu, s.width, s.height, s.fps, output, rgb)
             .map_err(|e| EncodeError::Unsupported(format!("{name}: video processor D3D11: {e}")))?;
 
         let max_kbps = s.max_bitrate_kbps_for(codec);
@@ -255,7 +258,7 @@ impl HwEncoder {
         unsafe {
             let (pix_fmt, enc_frames) = match vendor {
                 Vendor::Software => (ffi::AVPixelFormat::YUV420P, ptr::null_mut()),
-                _ => enc.init_hw(gpu, s, name, vendor)?,
+                _ => enc.init_hw(gpu, s, name, vendor, rgb)?,
             };
 
             enc.ctx = ffi::avcodec_alloc_context3(av_codec);
@@ -281,10 +284,10 @@ impl HwEncoder {
                     return Err(EncodeError::Failed(format!("{name}: av_frame_get_buffer: {}", av_error_string(ret))));
                 }
             } else {
-                c.sw_pix_fmt = ffi::AVPixelFormat::NV12;
+                c.sw_pix_fmt = if rgb { ffi::AVPixelFormat::BGRA } else { ffi::AVPixelFormat::NV12 };
                 c.hw_frames_ctx = ffi::av_buffer_ref(enc_frames);
             }
-            c.gop_size = s.fps as c_int;
+            c.gop_size = (s.fps * s.advanced.keyframe_seconds.clamp(1, 10)) as c_int;
             c.max_b_frames = b_frames.min(16) as c_int;
             c.rc_max_rate = i64::from(max_kbps) * 1000;
             c.rc_buffer_size = (i64::from(max_kbps) * 1000).min(i64::from(c_int::MAX)) as c_int;
@@ -296,23 +299,68 @@ impl HwEncoder {
 
             let mut opts = Dict(ptr::null_mut());
             let q = s.quality.clamp(1, 51);
+            let a = &s.advanced;
+            let preset = a.preset as usize;
+            // VBR e CBR: obiettivo in bit/s; CBR porta tetto e buffer all'obiettivo.
+            let target = i64::from(s.target_bitrate_kbps_for(codec)) * 1000;
+            if a.rate_control == RateControl::Cbr {
+                c.rc_max_rate = target;
+                c.rc_buffer_size = target.min(i64::from(c_int::MAX)) as c_int;
+            } else if a.rate_control == RateControl::Vbr {
+                c.rc_max_rate = c.rc_max_rate.max(target);
+            }
             match vendor {
                 Vendor::Nvenc => {
-                    c.bit_rate = 0;
-                    opts.set("preset", "p5");
+                    opts.set("preset", ["p1", "p3", "p4", "p5", "p7"][preset]);
                     opts.set("tune", "hq");
-                    opts.set("rc", "vbr");
-                    opts.set("cq", q);
-                    opts.set("rc-lookahead", 0);
+                    match a.rate_control {
+                        RateControl::Quality => {
+                            c.bit_rate = 0;
+                            opts.set("rc", "vbr");
+                            opts.set("cq", q);
+                        }
+                        RateControl::Vbr => {
+                            c.bit_rate = target;
+                            opts.set("rc", "vbr");
+                        }
+                        RateControl::Cbr => {
+                            c.bit_rate = target;
+                            opts.set("rc", "cbr");
+                        }
+                    }
+                    opts.set("rc-lookahead", if a.lookahead { 20 } else { 0 });
+                    if a.adaptive_quantization {
+                        opts.set("spatial-aq", 1);
+                        // L'AQ temporale richiede il look-ahead.
+                        if a.lookahead {
+                            opts.set("temporal-aq", 1);
+                        }
+                    }
+                    if rgb {
+                        opts.set("rgb_mode", "yuv444");
+                        opts.set("profile", if codec == cliprec_core::VideoCodec::H264 { "high444p" } else { "rext" });
+                    }
                     opts.set("forced-idr", 1);
                 }
                 Vendor::Amf => {
                     // ponytail: non verificato (niente GPU AMD qui); livello QVBR = quality.
-                    c.bit_rate = i64::from(max_kbps) * 1000 * 2 / 3;
+                    c.bit_rate = target;
                     opts.set("usage", "transcoding");
-                    opts.set("quality", "quality");
-                    opts.set("rc", "qvbr");
-                    opts.set("qvbr_quality_level", q);
+                    opts.set("quality", ["speed", "speed", "balanced", "quality", "quality"][preset]);
+                    match a.rate_control {
+                        RateControl::Quality => {
+                            opts.set("rc", "qvbr");
+                            opts.set("qvbr_quality_level", q);
+                        }
+                        RateControl::Vbr => opts.set("rc", "vbr_peak"),
+                        RateControl::Cbr => opts.set("rc", "cbr"),
+                    }
+                    if a.lookahead {
+                        opts.set("preanalysis", 1);
+                    }
+                    if a.adaptive_quantization {
+                        opts.set("vbaq", 1);
+                    }
                     if codec == cliprec_core::VideoCodec::Av1 {
                         // Su RDNA3 il default storico (64x16) codifica 1080p a 1082 righe: "none"
                         // (NO_RESTRICTIONS) lascia al driver padding e ritaglio. Se la GPU non lo
@@ -324,12 +372,14 @@ impl HwEncoder {
                     }
                 }
                 Vendor::Qsv => {
-                    // global_quality + maxrate + bitrate ⇒ QVBR in qsvenc.
-                    c.bit_rate = i64::from(max_kbps) * 1000 * 2 / 3;
-                    c.global_quality = c_int::from(q);
-                    opts.set("preset", "faster");
+                    // global_quality + maxrate + bitrate ⇒ QVBR in qsvenc; senza global_quality VBR o CBR.
+                    c.bit_rate = target;
+                    if a.rate_control == RateControl::Quality {
+                        c.global_quality = c_int::from(q);
+                    }
+                    opts.set("preset", ["veryfast", "veryfast", "faster", "faster", "medium"][preset]);
                     if codec == cliprec_core::VideoCodec::H264 {
-                        opts.set("look_ahead", 0);
+                        opts.set("look_ahead", i32::from(a.lookahead));
                     }
                     opts.set("forced_idr", 1);
                     opts.set("idr_interval", 0);
@@ -375,6 +425,7 @@ impl HwEncoder {
         s: &EncoderSettings,
         name: &str,
         vendor: Vendor,
+        rgb: bool,
     ) -> Result<(ffi::AVPixelFormat, *mut ffi::AVBufferRef), EncodeError> {
         // SAFETY: sequenza documentata di libavutil. Ogni puntatore allocato finisce subito in
         // `self`, che lo libera in Drop anche se un passo successivo fallisce. I campi scritti nei
@@ -400,7 +451,7 @@ impl HwEncoder {
             }
             let fc = (*self.frames_ref).data as *mut ffi::AVHWFramesContext;
             (*fc).format = ffi::AVPixelFormat::D3D11;
-            (*fc).sw_format = ffi::AVPixelFormat::NV12;
+            (*fc).sw_format = if rgb { ffi::AVPixelFormat::BGRA } else { ffi::AVPixelFormat::NV12 };
             (*fc).width = s.width as c_int;
             (*fc).height = s.height as c_int;
             let fhw = (*fc).hwctx as *mut AVD3D11VAFramesContext;

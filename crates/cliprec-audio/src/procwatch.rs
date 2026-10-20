@@ -119,6 +119,7 @@ fn subscribe() -> Result<IEnumWbemClassObject, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::windows::process::CommandExt;
     use std::time::Instant;
 
     /// Da amministratore gli eventi arrivano; altrimenti l'errore lo dice e non blocca nulla.
@@ -134,6 +135,7 @@ mod tests {
                 let mut child = std::process::Command::new(r"C:\Windows\System32\PING.EXE")
                     .args(["-n", "2", "127.0.0.1"])
                     .stdout(std::process::Stdio::null())
+                    .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
                     .spawn()
                     .unwrap();
                 let t0 = Instant::now();

@@ -103,6 +103,35 @@ strings! {
     set_src_window: "Finestra", "Window";
     set_src_game: "Gioco", "Game";
     set_pick: "Scegli…", "Pick…";
+    set_sec_encoding: "Codifica avanzata", "Advanced encoding";
+    set_color_format: "Formato colore", "Color format";
+    set_color_format_desc: "4:4:4 elimina gli aloni colorati attorno al testo. Solo schede NVIDIA in H.264 o HEVC; alcuni lettori e siti non lo riproducono.", "4:4:4 removes colored halos around text. NVIDIA cards only, in H.264 or HEVC; some players and sites cannot play it.";
+    set_fmt_420: "4:2:0 (compatibile)", "4:2:0 (compatible)";
+    set_fmt_444: "4:4:4 (testo nitido)", "4:4:4 (sharp text)";
+    set_rate_control: "Controllo del bitrate", "Rate control";
+    set_rate_control_desc: "Qualità costante usa la qualità scelta sopra; VBR e CBR puntano a un bitrate.", "Constant quality uses the quality above; VBR and CBR aim at a bitrate.";
+    set_rc_quality: "Qualità costante", "Constant quality";
+    set_rc_vbr: "Bitrate variabile (VBR)", "Variable bitrate (VBR)";
+    set_rc_cbr: "Bitrate costante (CBR)", "Constant bitrate (CBR)";
+    set_target_bitrate: "Bitrate obiettivo", "Target bitrate";
+    set_target_bitrate_desc: "In kbit/s, per VBR e CBR. Vuoto: due terzi del tetto.", "In kbit/s, for VBR and CBR. Empty: two thirds of the cap.";
+    set_preset: "Preset dell'encoder", "Encoder preset";
+    set_preset_desc: "Più qualità a parità di bitrate costa più lavoro alla scheda video.", "More quality at the same bitrate costs the graphics card more work.";
+    set_preset_fastest: "Velocissimo", "Fastest";
+    set_preset_fast: "Veloce", "Fast";
+    set_preset_balanced: "Bilanciato", "Balanced";
+    set_preset_quality: "Qualità", "Quality";
+    set_preset_best: "Massima qualità", "Best quality";
+    set_keyframe: "Intervallo dei fotogrammi chiave", "Keyframe interval";
+    set_keyframe_desc: "Più lungo: file più piccoli, ma la clip può iniziare fino a questo intervallo prima.", "Longer: smaller files, but the clip may start up to this interval earlier.";
+    set_b_frames: "B-frame", "B-frames";
+    set_b_frames_desc: "Riducono il bitrate; con NVIDIA aumentano la memoria usata.", "They lower the bitrate; on NVIDIA they increase memory use.";
+    set_lookahead: "Look-ahead", "Look-ahead";
+    set_lookahead_desc: "Analizza i fotogrammi in anticipo per distribuire meglio i bit.", "Analyses frames ahead to spread the bits better.";
+    set_aq: "Quantizzazione adattiva", "Adaptive quantization";
+    set_aq_desc: "Più dettaglio dove l'occhio lo nota (ottimizzazione psicovisiva).", "More detail where the eye notices it (psycho-visual tuning).";
+    set_audio_bitrate: "Bitrate audio delle clip video", "Video clip audio bitrate";
+    set_audio_bitrate_desc: "AAC, per ogni traccia.", "AAC, per track.";
     set_capture_cursor: "Mostra il cursore del mouse", "Show the mouse cursor";
     set_any_fullscreen: "Qualsiasi app a schermo intero", "Any full-screen app";
     set_any_fullscreen_desc: "In automatico registra anche le app a schermo intero che non sono giochi riconosciuti.", "In automatic mode, also record full-screen apps that are not recognised games.";
@@ -203,6 +232,7 @@ pub fn problem_text(lang: Lang, p: &Problem) -> String {
         Problem::SamePad => t("Le due combinazioni del controller devono essere diverse.", "The two controller combinations must be different."),
         Problem::BadDelay(i) => format!("{} {}", t("Il ritardo deve stare tra -1000 e 1000 ms nella sorgente audio", "The delay must be between -1000 and 1000 ms in audio source"), i + 1),
         Problem::SameHotkey => t("Le due hotkey devono essere diverse.", "The two hotkeys must be different."),
+        Problem::BadTargetBitrate => t("Bitrate obiettivo non valido (numero intero in kbit/s, o vuoto).", "Invalid target bitrate (whole kbit/s, or empty)."),
         Problem::BadBitrate => t("Tetto di bitrate non valido (numero intero in kbit/s, o vuoto).", "Invalid bitrate cap (whole kbit/s, or empty)."),
         Problem::BadMaxMb => t("Tetto di RAM non valido (numero intero in MB, o vuoto).", "Invalid RAM cap (whole MB, or empty)."),
         Problem::BadMonitor => t("L'indice del monitor deve essere un numero (0 = principale).", "The monitor index must be a number (0 = primary)."),

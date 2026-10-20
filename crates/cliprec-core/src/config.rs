@@ -36,6 +36,77 @@ pub struct VideoConfig {
     pub any_fullscreen_app: bool,
     /// Eseguibili riconosciuti come giochi dalla modalità automatica.
     pub games: Vec<String>,
+    /// Opzioni avanzate dell'encoder, come le «Avanzate» di OBS.
+    pub advanced: EncoderAdvanced,
+}
+
+/// Campionamento del colore. 4:2:0 tiene il colore una volta ogni 2×2 pixel (compatibile con ogni
+/// lettore); 4:4:4 per ogni pixel, senza aloni colorati sul testo (solo NVENC H.264/HEVC).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ColorFormat {
+    #[default]
+    Yuv420,
+    Yuv444,
+}
+
+/// Controllo del bitrate.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RateControl {
+    /// Qualità costante (`quality`) con il tetto `max_bitrate_kbps`.
+    #[default]
+    Quality,
+    /// Bitrate variabile attorno a `advanced.bitrate_kbps`, fino al tetto.
+    Vbr,
+    /// Bitrate costante `advanced.bitrate_kbps`.
+    Cbr,
+}
+
+/// Compromesso tra velocità dell'encoder e qualità a parità di bitrate.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EncoderPreset {
+    Fastest,
+    Fast,
+    Balanced,
+    #[default]
+    Quality,
+    Best,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EncoderAdvanced {
+    pub color_format: ColorFormat,
+    pub rate_control: RateControl,
+    /// Obiettivo per VBR e CBR in kbit/s; `None` = 2/3 del tetto.
+    pub bitrate_kbps: Option<u32>,
+    pub preset: EncoderPreset,
+    /// Secondi tra due fotogrammi chiave (1-10): più lungo dà file più piccoli, ma la clip può
+    /// iniziare fino a questo intervallo prima di N secondi.
+    pub keyframe_seconds: u32,
+    /// B-frame; `None` = automatico (nessuno con NVENC per la memoria, 2 dove servono).
+    pub b_frames: Option<u8>,
+    /// Analisi in anticipo dei fotogrammi per distribuire meglio i bit (più memoria e latenza).
+    pub lookahead: bool,
+    /// Quantizzazione adattiva spaziale e temporale: più dettaglio dove l'occhio lo nota.
+    pub adaptive_quantization: bool,
+}
+
+impl Default for EncoderAdvanced {
+    fn default() -> Self {
+        Self {
+            color_format: ColorFormat::Yuv420,
+            rate_control: RateControl::Quality,
+            bitrate_kbps: None,
+            preset: EncoderPreset::Quality,
+            keyframe_seconds: 1,
+            b_frames: None,
+            lookahead: false,
+            adaptive_quantization: false,
+        }
+    }
 }
 
 impl Default for VideoConfig {
@@ -50,6 +121,7 @@ impl Default for VideoConfig {
             max_bitrate_kbps: None,
             capture_cursor: true,
             any_fullscreen_app: true,
+            advanced: EncoderAdvanced::default(),
             games: Vec::new(),
         }
     }
@@ -213,6 +285,8 @@ pub struct ClipsConfig {
     pub filename_template: String,
     pub container: VideoContainer,
     pub audio_format: AudioClipFormat,
+    /// Bitrate AAC per traccia delle clip video, in kbit/s.
+    pub audio_bitrate_kbps: u32,
 }
 
 impl Default for ClipsConfig {
@@ -224,6 +298,7 @@ impl Default for ClipsConfig {
             filename_template: "{game}_{date}_{time}".into(),
             container: VideoContainer::Mp4,
             audio_format: AudioClipFormat::FlacPerTrack,
+            audio_bitrate_kbps: 192,
         }
     }
 }

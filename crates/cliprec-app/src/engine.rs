@@ -515,7 +515,10 @@ impl Session {
         let folder = self.config.clips.folder();
         let game = self.video.as_ref().map(|v| game_name(&v.describe()));
         let name = clip_name(&self.config.clips.filename_template, kind, game);
-        let opts = cliprec_mux::VideoClipOptions { container: self.config.clips.container, ..Default::default() };
+        let opts = cliprec_mux::VideoClipOptions {
+            container: self.config.clips.container,
+            audio_bit_rate: self.config.clips.audio_bitrate_kbps.clamp(32, 512) * 1000,
+        };
         let format = self.config.clips.audio_format;
         let memory_limited = stats.memory_limited;
         let shared = self.shared.clone();
@@ -806,6 +809,13 @@ fn open_encoder(
     let mut name = encoder_name.lock().map_err(|_| "stato dell'encoder non disponibile".to_string())?;
     if !name.is_empty() && *name != e.params().encoder_name {
         let _ = events.send(EngineEvent::Warning(tr(K::EngEncoderChanged, &[&name, &e.params().encoder_name])));
+    }
+    // 4:4:4 chiesto ma l'encoder aperto non lo sa fare: si registra in 4:2:0 e lo si dice.
+    if *name != e.params().encoder_name
+        && settings.advanced.color_format == cliprec_core::config::ColorFormat::Yuv444
+        && !settings.chroma444_for(&e.params().encoder_name)
+    {
+        let _ = events.send(EngineEvent::Warning(tr(K::EngNo444, &[&e.params().encoder_name])));
     }
     buffer.set_video_params(e.params().clone());
     name.clone_from(&e.params().encoder_name);

@@ -2,7 +2,7 @@
 //! validazione e stima della RAM. Niente Slint a runtime qui, così si testa senza finestra.
 
 use cliprec_core::VideoCodec;
-use cliprec_core::config::{
+use cliprec_core::config::{EncoderPreset, RateControl, ColorFormat, 
     AudioClipFormat, AudioSourceConfig, AudioSourceKind, CodecChoice, Config, MAX_AUDIO_SOURCES, OutputResolution,
     TrackMode, VideoContainer, VideoSourceConfig, default_max_bitrate_kbps,
 };
@@ -29,6 +29,7 @@ pub enum Problem {
     /// Ritardo di una sorgente audio fuori da -1000..=1000 ms (indice della riga).
     BadDelay(usize),
     BadBitrate,
+    BadTargetBitrate,
     BadMaxMb,
     BadMonitor,
     EmptyVideoTarget,
@@ -40,6 +41,9 @@ pub enum Problem {
 fn trimmed(s: &slint::SharedString) -> String {
     s.trim().to_string()
 }
+
+/// Bitrate AAC offerti per le clip video, in kbit/s.
+pub const AUDIO_BITRATES: [u32; 6] = [96, 128, 160, 192, 256, 320];
 
 /// Config -> (form, righe audio).
 /// Posizione di un dispositivo nel menu della scheda Audio, che ha il predefinito di Windows in
@@ -78,6 +82,19 @@ pub fn to_form(c: &Config) -> (Form, Vec<SourceRow>) {
         fps: FPS_CHOICES.iter().position(|&f| f == c.video.fps).unwrap_or(1) as i32,
         quality: i32::from(c.video.quality),
         max_bitrate: c.video.max_bitrate_kbps.map(|v| v.to_string()).unwrap_or_default().into(),
+        color_format: i32::from(c.video.advanced.color_format == ColorFormat::Yuv444),
+        rate_control: match c.video.advanced.rate_control {
+            RateControl::Quality => 0,
+            RateControl::Vbr => 1,
+            RateControl::Cbr => 2,
+        },
+        target_bitrate: c.video.advanced.bitrate_kbps.map(|v| v.to_string()).unwrap_or_default().into(),
+        preset: c.video.advanced.preset as i32,
+        keyframe_seconds: i32::try_from(c.video.advanced.keyframe_seconds.clamp(1, 10)).unwrap_or(1),
+        b_frames: c.video.advanced.b_frames.map_or(0, |b| i32::from(b.min(4)) + 1),
+        lookahead: c.video.advanced.lookahead,
+        adaptive_quantization: c.video.advanced.adaptive_quantization,
+        audio_bitrate: AUDIO_BITRATES.iter().position(|&b| b == c.clips.audio_bitrate_kbps).and_then(|p| i32::try_from(p).ok()).unwrap_or(3),
         capture_cursor: c.video.capture_cursor,
         any_fullscreen: c.video.any_fullscreen_app,
         games: c.video.games.join(", ").into(),
@@ -182,6 +199,32 @@ pub fn build_lenient(form: &Form, rows: &[SourceRow], base: &Config) -> (Config,
             None
         }
     };
+    let a = &mut c.video.advanced;
+    a.color_format = if form.color_format == 1 { ColorFormat::Yuv444 } else { ColorFormat::Yuv420 };
+    a.rate_control = match form.rate_control {
+        1 => RateControl::Vbr,
+        2 => RateControl::Cbr,
+        _ => RateControl::Quality,
+    };
+    a.bitrate_kbps = match optional_u32(&form.target_bitrate) {
+        Ok(v) => v,
+        Err(()) => {
+            problems.push(Problem::BadTargetBitrate);
+            None
+        }
+    };
+    a.preset = match form.preset {
+        0 => EncoderPreset::Fastest,
+        1 => EncoderPreset::Fast,
+        2 => EncoderPreset::Balanced,
+        4 => EncoderPreset::Best,
+        _ => EncoderPreset::Quality,
+    };
+    a.keyframe_seconds = u32::try_from(form.keyframe_seconds.clamp(1, 10)).unwrap_or(1);
+    a.b_frames = u8::try_from(form.b_frames - 1).ok().map(|b| b.min(4));
+    a.lookahead = form.lookahead;
+    a.adaptive_quantization = form.adaptive_quantization;
+    c.clips.audio_bitrate_kbps = usize::try_from(form.audio_bitrate).ok().and_then(|i| AUDIO_BITRATES.get(i)).copied().unwrap_or(192);
     c.video.capture_cursor = form.capture_cursor;
     c.video.any_fullscreen_app = form.any_fullscreen;
     c.video.games = form.games.split([',', ';']).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).collect();
@@ -400,6 +443,17 @@ mod tests {
         c.video.fps = 144;
         c.video.resolution = OutputResolution::P1080;
         c.video.max_bitrate_kbps = Some(20_000);
+        c.video.advanced = cliprec_core::config::EncoderAdvanced {
+            color_format: ColorFormat::Yuv444,
+            rate_control: RateControl::Cbr,
+            bitrate_kbps: Some(12_000),
+            preset: EncoderPreset::Best,
+            keyframe_seconds: 2,
+            b_frames: Some(2),
+            lookahead: true,
+            adaptive_quantization: true,
+        };
+        c.clips.audio_bitrate_kbps = 320;
         c.video.games = vec!["a.exe".into(), "b.exe".into()];
         c.audio.add_mix_track = true;
         c.audio.process_events = true;

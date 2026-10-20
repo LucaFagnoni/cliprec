@@ -57,6 +57,35 @@ export global T {
     in property <string> src-window;
     in property <string> src-game;
     in property <string> pick;
+    in property <string> sec-encoding;
+    in property <string> color-format;
+    in property <string> color-format-desc;
+    in property <string> fmt-420;
+    in property <string> fmt-444;
+    in property <string> rate-control;
+    in property <string> rate-control-desc;
+    in property <string> rc-quality;
+    in property <string> rc-vbr;
+    in property <string> rc-cbr;
+    in property <string> target-bitrate;
+    in property <string> target-bitrate-desc;
+    in property <string> preset;
+    in property <string> preset-desc;
+    in property <string> preset-fastest;
+    in property <string> preset-fast;
+    in property <string> preset-balanced;
+    in property <string> preset-quality;
+    in property <string> preset-best;
+    in property <string> keyframe;
+    in property <string> keyframe-desc;
+    in property <string> b-frames;
+    in property <string> b-frames-desc;
+    in property <string> lookahead;
+    in property <string> lookahead-desc;
+    in property <string> aq;
+    in property <string> aq-desc;
+    in property <string> audio-bitrate;
+    in property <string> audio-bitrate-desc;
     in property <string> capture-cursor;
     in property <string> any-fullscreen;
     in property <string> any-fullscreen-desc;
@@ -153,6 +182,15 @@ export struct Form {
     fps: int,
     quality: int,
     max-bitrate: string,
+    color-format: int,
+    rate-control: int,
+    target-bitrate: string,
+    preset: int,
+    keyframe-seconds: int,
+    b-frames: int,
+    lookahead: bool,
+    adaptive-quantization: bool,
+    audio-bitrate: int,
     capture-cursor: bool,
     any-fullscreen: bool,
     games: string,
@@ -619,6 +657,62 @@ export component SettingsWindow inherits Window {
                         LineEdit { text <=> root.f.games; width: 300px; }
                     }
                 }
+                SectionTitle { text: T.sec-encoding; }
+                Card {
+                    SettingRow {
+                        title: T.color-format;
+                        description: T.color-format-desc;
+                        ComboBox { model: [T.fmt-420, T.fmt-444]; current-index <=> root.f.color-format; width: 220px; }
+                    }
+                    Divider { }
+                    SettingRow {
+                        title: T.rate-control;
+                        description: T.rate-control-desc;
+                        ComboBox { model: [T.rc-quality, T.rc-vbr, T.rc-cbr]; current-index <=> root.f.rate-control; width: 220px; }
+                    }
+                    Divider { }
+                    SettingRow {
+                        title: T.target-bitrate;
+                        description: T.target-bitrate-desc;
+                        enabled: root.f.rate-control > 0;
+                        LineEdit { text <=> root.f.target-bitrate; placeholder-text: T.auto; enabled: root.f.rate-control > 0; width: 220px; }
+                    }
+                    Divider { }
+                    SettingRow {
+                        title: T.preset;
+                        description: T.preset-desc;
+                        ComboBox {
+                            model: [T.preset-fastest, T.preset-fast, T.preset-balanced, T.preset-quality, T.preset-best];
+                            current-index <=> root.f.preset;
+                            width: 220px;
+                        }
+                    }
+                    Divider { }
+                    SettingRow {
+                        title: T.keyframe;
+                        description: T.keyframe-desc;
+                        SpinBox { minimum: 1; maximum: 10; value <=> root.f.keyframe-seconds; width: 140px; }
+                        Text { text: T.seconds; color: Theme.text-secondary; vertical-alignment: center; }
+                    }
+                    Divider { }
+                    SettingRow {
+                        title: T.b-frames;
+                        description: T.b-frames-desc;
+                        ComboBox { model: [T.auto, "0", "1", "2", "3", "4"]; current-index <=> root.f.b-frames; width: 220px; }
+                    }
+                    Divider { }
+                    SettingRow {
+                        title: T.lookahead;
+                        description: T.lookahead-desc;
+                        Switch { checked <=> root.f.lookahead; }
+                    }
+                    Divider { }
+                    SettingRow {
+                        title: T.aq;
+                        description: T.aq-desc;
+                        Switch { checked <=> root.f.adaptive-quantization; }
+                    }
+                }
             }
 
             if root.page == 1: Page {
@@ -839,6 +933,12 @@ export component SettingsWindow inherits Window {
                         title: T.container;
                         description: T.container-desc;
                         ComboBox { model: ["MP4", "MKV"]; current-index <=> root.f.container; width: 240px; }
+                    }
+                    Divider { }
+                    SettingRow {
+                        title: T.audio-bitrate;
+                        description: T.audio-bitrate-desc;
+                        ComboBox { model: ["96 kbit/s", "128 kbit/s", "160 kbit/s", "192 kbit/s", "256 kbit/s", "320 kbit/s"]; current-index <=> root.f.audio-bitrate; width: 240px; }
                     }
                     Divider { }
                     SettingRow {

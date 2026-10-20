@@ -139,11 +139,13 @@ pub(crate) struct Converter {
     out_w: u32,
     out_h: u32,
     fps: u32,
+    /// Uscita BGRA a colori pieni (4:4:4, convertito dall'encoder) invece di NV12.
+    rgb: bool,
     proc: Option<Processor>,
 }
 
 impl Converter {
-    pub(crate) fn new(gpu: &GpuDevice, out_w: u32, out_h: u32, fps: u32, output: Output) -> windows::core::Result<Self> {
+    pub(crate) fn new(gpu: &GpuDevice, out_w: u32, out_h: u32, fps: u32, output: Output, rgb: bool) -> windows::core::Result<Self> {
         let staging = match output {
             Output::Pool => None,
             Output::PoolViaCopy | Output::Cpu => Some(texture(&gpu.device, out_w, out_h, DXGI_FORMAT_NV12)?),
@@ -178,6 +180,7 @@ impl Converter {
             out_w,
             out_h,
             fps,
+            rgb,
             proc: None,
         })
     }
@@ -349,7 +352,8 @@ impl Converter {
             vc.VideoProcessorSetStreamFrameFormat(&processor, 0, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE);
             vc.VideoProcessorSetStreamAutoProcessingMode(&processor, 0, false);
             vc.VideoProcessorSetStreamColorSpace1(&processor, 0, DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
-            vc.VideoProcessorSetOutputColorSpace1(&processor, DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709);
+            let out_space = if self.rgb { DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709 } else { DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709 };
+            vc.VideoProcessorSetOutputColorSpace1(&processor, out_space);
             vc.VideoProcessorSetStreamSourceRect(&processor, 0, true, Some(&full_src));
             vc.VideoProcessorSetStreamDestRect(&processor, 0, true, Some(&dest));
             vc.VideoProcessorSetOutputTargetRect(&processor, true, Some(&full_out));
