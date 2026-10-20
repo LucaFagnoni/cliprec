@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use cliprec_core::config::{AudioConfig, MAX_AUDIO_SOURCES, TrackMode};
+use cliprec_core::config::{AudioConfig, PlannedTrack, TrackMode};
 use cliprec_core::time::{frames_to_hns, hns_to_frames};
 use cliprec_core::{AudioChunk, AudioSource, AudioTrackSink, CHANNELS, HNS_PER_SEC, QpcTime, SAMPLE_RATE, SourceError, SourceState};
 
@@ -42,7 +42,8 @@ struct Route {
     /// Canali uniti: media di sinistra e destra su entrambi.
     mono: bool,
     mono_buf: Vec<f32>,
-    mix: Option<MixInput>,
+    /// Un ingresso per ogni «Mix» che contiene la sorgente (uno per tipo di clip, al più due).
+    mix: Vec<MixInput>,
 }
 
 impl Route {
@@ -75,7 +76,7 @@ impl Route {
                 self.sink.push(track, qpc, out);
             }
         }
-        if let Some(mix) = &mut self.mix {
+        for mix in &mut self.mix {
             mix.push(AudioChunk { qpc, samples });
         }
     }
@@ -94,7 +95,10 @@ pub struct AudioEngine {
 impl AudioEngine {
     /// Costruisce le sorgenti WASAPI dalla configurazione (al massimo 8) e le avvia.
     pub fn start(cfg: &AudioConfig, sink: Arc<dyn AudioTrackSink>) -> Result<Self, SourceError> {
-        let specs = &cfg.sources[..cfg.sources.len().min(MAX_AUDIO_SOURCES)];
+        // Le sorgenti e le tracce che servono alle clip video e a quelle solo audio; il salvataggio
+        // sceglie le tracce di ciascuna (`AudioPlan::clip`).
+        let plan = cfg.plan();
+        let specs = &plan.captures;
         let sources = specs
             .iter()
             .map(|s| Box::new(WasapiSource::new(s.name.clone(), s.kind.clone())) as Box<dyn AudioSource>)
@@ -102,21 +106,13 @@ impl AudioEngine {
         let volumes: Vec<f32> = specs.iter().map(|s| s.volume).collect();
         let delays: Vec<i32> = specs.iter().map(|s| s.delay_ms).collect();
         let monos: Vec<bool> = specs.iter().map(|s| s.mono).collect();
-        // Le tracce che servono alle clip video e a quelle solo audio; il salvataggio sceglie.
-        let recorded = cfg.recorded();
-        Self::with_sources(sources, &volumes, &delays, &monos, recorded.mode, recorded.add_mix_track, sink)
+        Self::with_plan(sources, &volumes, &delays, &monos, &plan.tracks, sink)
     }
 
-    /// Avvia sorgenti già costruite. `volumes[i]` è il guadagno lineare della sorgente `i` (1.0 se
-    /// manca); `delays_ms[i]` il suo ritardo in millisecondi (0 se manca, limitato a
-    /// ±[`MAX_DELAY_MS`]; positivo = l'audio esce più tardi), applicato in tutte le tracce e nel
-    /// mix come lo «Sync Offset» di OBS. Tracce: in modalità separata le sorgenti nell'ordine dato, precedute da «Mix» se
-    /// `add_mix_track`; in traccia unica la sola «Mix».
-    ///
-    /// Una sorgente che non parte (es. microfono negato dalla privacy di Windows) non ferma le
-    /// altre: la sua traccia prosegue in silenzio e l'errore resta in [`AudioEngine::states`].
+    /// Come [`Self::with_plan`] con un solo elenco: in modalità separata le sorgenti nell'ordine dato,
+    /// precedute da «Mix» se `add_mix_track`; in traccia unica la sola «Mix».
     pub fn with_sources(
-        mut sources: Vec<Box<dyn AudioSource>>,
+        sources: Vec<Box<dyn AudioSource>>,
         volumes: &[f32],
         delays_ms: &[i32],
         monos: &[bool],
@@ -126,31 +122,70 @@ impl AudioEngine {
     ) -> Result<Self, SourceError> {
         let n = sources.len();
         let separate = mode == TrackMode::Separate;
-        let mixed = !separate || add_mix_track;
-        let volume = |i: usize| volumes.get(i).copied().unwrap_or(1.0);
-
-        let mut names = Vec::with_capacity(n + 1);
-        if mixed {
-            names.push(MIX_TRACK_NAME.to_string());
+        let mut tracks = Vec::with_capacity(n + 1);
+        if !separate || add_mix_track {
+            tracks.push(PlannedTrack::Mix((0..n).collect()));
         }
         if separate {
-            names.extend(sources.iter().map(|s| s.name().to_string()));
+            tracks.extend((0..n).map(PlannedTrack::Source));
         }
-        sink.set_tracks(&names);
-        let first_track = usize::from(mixed);
+        Self::with_plan(sources, volumes, delays_ms, monos, &tracks, sink)
+    }
 
-        let (mixer, inputs) = if mixed {
-            let vols: Vec<f32> = (0..n).map(volume).collect();
-            let (m, inputs) = Mixer::new(&vols)?;
-            (Some(m), inputs.into_iter().map(Some).collect::<Vec<_>>())
-        } else {
-            (None, (0..n).map(|_| None).collect())
-        };
+    /// Avvia sorgenti già costruite e registra `tracks` (vedi `AudioConfig::plan`): una sorgente
+    /// nella sua traccia, o la somma di più sorgenti in una traccia «Mix», anche più di una.
+    /// `volumes[i]` è il guadagno lineare della sorgente `i` (1.0 se manca); `delays_ms[i]` il suo
+    /// ritardo in millisecondi (0 se manca, limitato a ±[`MAX_DELAY_MS`]; positivo = l'audio esce più
+    /// tardi), applicato in tutte le tracce e nei mix come lo «Sync Offset» di OBS.
+    ///
+    /// Una sorgente che non parte (es. microfono negato dalla privacy di Windows) non ferma le
+    /// altre: la sua traccia prosegue in silenzio e l'errore resta in [`AudioEngine::states`].
+    pub fn with_plan(
+        mut sources: Vec<Box<dyn AudioSource>>,
+        volumes: &[f32],
+        delays_ms: &[i32],
+        monos: &[bool],
+        tracks: &[PlannedTrack],
+        sink: Arc<dyn AudioTrackSink>,
+    ) -> Result<Self, SourceError> {
+        let n = sources.len();
+        let volume = |i: usize| volumes.get(i).copied().unwrap_or(1.0);
+        // Tracce che nominano sorgenti inesistenti: scartate.
+        let tracks: Vec<&PlannedTrack> = tracks
+            .iter()
+            .filter(|t| match t {
+                PlannedTrack::Source(i) => *i < n,
+                PlannedTrack::Mix(set) => set.iter().all(|&i| i < n),
+            })
+            .collect();
+        let names: Vec<String> = tracks
+            .iter()
+            .map(|t| match t {
+                PlannedTrack::Source(i) => sources[*i].name().to_string(),
+                PlannedTrack::Mix(_) => MIX_TRACK_NAME.to_string(),
+            })
+            .collect();
+        sink.set_tracks(&names);
+
+        let mut mixers = Vec::new();
+        let mut inputs: Vec<Vec<MixInput>> = (0..n).map(|_| Vec::new()).collect();
+        for (t, track) in tracks.iter().enumerate() {
+            if let PlannedTrack::Mix(set) = track {
+                let vols: Vec<f32> = set.iter().map(|&i| volume(i)).collect();
+                let (m, ins) = Mixer::new(&vols)?;
+                for (&i, input) in set.iter().zip(ins) {
+                    inputs[i].push(input);
+                }
+                mixers.push((t, m));
+            }
+        }
+        let own: Vec<Option<usize>> =
+            (0..n).map(|i| tracks.iter().position(|t| matches!(t, PlannedTrack::Source(s) if *s == i))).collect();
 
         let mut errors = vec![None; n];
         for (i, (src, mix)) in sources.iter_mut().zip(inputs).enumerate() {
             let mut route = Route {
-                track: separate.then_some(first_track + i),
+                track: own[i],
                 sink: sink.clone(),
                 volume: volume(i),
                 delay_hns: i64::from(delays_ms.get(i).copied().unwrap_or(0).clamp(-MAX_DELAY_MS, MAX_DELAY_MS)) * 10_000,
@@ -166,20 +201,16 @@ impl AudioEngine {
         }
 
         // Tracce delle sorgenti fallite: silenzio sulla griglia del mixer.
-        let silent: Vec<usize> = if separate {
-            errors.iter().enumerate().filter(|(_, e)| e.is_some()).map(|(i, _)| first_track + i).collect()
-        } else {
-            Vec::new()
-        };
+        let silent: Vec<usize> = errors.iter().zip(&own).filter(|(e, _)| e.is_some()).filter_map(|(_, t)| *t).collect();
         let stop = Arc::new(AtomicBool::new(false));
         let mix_latency = Arc::new(AtomicI64::new(MIX_LATENCY_HNS));
         let mixer_error = Arc::new(Mutex::new(None));
-        let mixer_thread = if mixer.is_some() || !silent.is_empty() {
+        let mixer_thread = if !mixers.is_empty() || !silent.is_empty() {
             let (stop, latency, error) = (stop.clone(), mix_latency.clone(), mixer_error.clone());
             Some(
                 std::thread::Builder::new()
                     .name("mixer audio".into())
-                    .spawn(move || mixer_loop(mixer, silent, sink, stop, latency, error))
+                    .spawn(move || mixer_loop(mixers, silent, sink, stop, latency, error))
                     .map_err(|e| SourceError::Failed(format!("thread del mixer: {e}")))?,
             )
         } else {
@@ -232,7 +263,7 @@ impl Drop for AudioEngine {
 }
 
 fn mixer_loop(
-    mut mixer: Option<Mixer>,
+    mut mixers: Vec<(usize, Mixer)>,
     silent: Vec<usize>,
     sink: Arc<dyn AudioTrackSink>,
     stop: Arc<AtomicBool>,
@@ -247,7 +278,7 @@ fn mixer_loop(
     let block = MIX_BLOCK_FRAMES as i64;
     let mut k = hns_to_frames(now.add_hns(-MIX_LATENCY_HNS).hns_since(origin)).div_euclid(block);
     while !stop.load(Ordering::Acquire) {
-        let needed = mixer.as_ref().map_or(0, |m| m.input_latency_hns() + MIX_LATENCY_MARGIN_HNS);
+        let needed = mixers.iter().map(|(_, m)| m.input_latency_hns() + MIX_LATENCY_MARGIN_HNS).max().unwrap_or(0);
         let current = needed.clamp(MIX_LATENCY_HNS, MAX_MIX_LATENCY_HNS);
         latency.store(current, Ordering::Relaxed);
         let ready_until = QpcTime::now().add_hns(-current);
@@ -258,8 +289,8 @@ fn mixer_loop(
             }
             // Supervisione: un panic perde al più questo blocco; il mixer prosegue col successivo.
             let block = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                if let Some(m) = &mut mixer {
-                    sink.push(0, start, m.render(start));
+                for (t, m) in &mut mixers {
+                    sink.push(*t, start, m.render(start));
                 }
                 for &t in &silent {
                     sink.push(t, start, &zeros);
@@ -296,7 +327,7 @@ mod tests {
             scratch: Vec::new(),
             mono: true,
             mono_buf: Vec::new(),
-            mix: None,
+            mix: Vec::new(),
         };
         // Solo il canale destro ha segnale, come un microfono sull'ingresso 2.
         route.push(AudioChunk { qpc: QpcTime(0), samples: &[0.0, 0.5, 0.0, 0.5] });
@@ -356,6 +387,25 @@ mod tests {
         if peak(&data[1]) > 0.4 {
             assert!(peak(&data[2]) < 0.26);
         }
+    }
+
+    /// Un «Mix» per tipo di clip con sorgenti diverse: ognuno somma solo le sue.
+    #[test]
+    fn two_mixes_of_different_sources() {
+        let sink = Arc::new(TestSink::default());
+        let tracks = [PlannedTrack::Mix(vec![0]), PlannedTrack::Mix(vec![0, 1]), PlannedTrack::Source(1)];
+        let mut engine = AudioEngine::with_plan(beeps(), &[], &[], &[], &tracks, sink.clone()).unwrap();
+        std::thread::sleep(Duration::from_millis(2200));
+        engine.stop();
+        assert_eq!(*sink.names.lock().unwrap(), ["Mix", "Mix", "B"]);
+        sink.check_contiguous(1.5);
+        let data = sink.data.lock().unwrap();
+        let energy = |t: usize| data[t].iter().map(|x| f64::from(*x) * f64::from(*x)).sum::<f64>();
+        let (a, ab, b) = (energy(0), energy(1), energy(2));
+        println!("energia: Mix A {a:.1}, Mix A+B {ab:.1}, B {b:.1}");
+        assert!(a > 1.0 && b > 1.0, "i bip devono esserci");
+        // Due sinusoidi di frequenza diversa: l'energia della somma è circa la somma delle energie.
+        assert!((ab - (a + b)).abs() < 0.2 * (a + b), "Mix A+B {ab} invece di {}", a + b);
     }
 
     #[test]

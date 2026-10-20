@@ -116,7 +116,7 @@ pub fn new_buffer(config: &Config, events: &Sender<EngineEvent>) -> Arc<ReplayBu
                 .max_bitrate_kbps
                 .unwrap_or_else(|| default_max_bitrate_kbps(cliprec_core::VideoCodec::H264, 2160, config.video.fps));
             let kbps = if config.video.enabled { kbps } else { 0 };
-            BufferConfig::estimate_bytes(u64::from(kbps) * 1000, video_seconds, audio_seconds, config.audio.sources.len() + 1)
+            BufferConfig::estimate_bytes(u64::from(kbps) * 1000, video_seconds, audio_seconds, config.audio.plan().tracks.len().max(1))
         }
     };
     let max_bytes = buffer_cap(wanted, total_ram());
@@ -194,17 +194,11 @@ impl Session {
         }
         let sink = buffer.clone() as Arc<dyn AudioTrackSink>;
         let audio = match overrides.audio {
-            Some(sources) => cliprec_audio::AudioEngine::with_sources(
-                sources,
-                &[],
-                &[],
-                &[],
-                config.audio.recorded().mode,
-                config.audio.recorded().add_mix_track,
-                sink,
-            )
-            .map(Some),
-            None if !config.audio.sources.is_empty() => cliprec_audio::AudioEngine::start(&config.audio, sink).map(Some),
+            // Sorgenti di prova al posto di quelle catturate dal piano della configurazione.
+            Some(sources) => {
+                cliprec_audio::AudioEngine::with_plan(sources, &[], &[], &[], &config.audio.plan().tracks, sink).map(Some)
+            }
+            None if !config.audio.plan().captures.is_empty() => cliprec_audio::AudioEngine::start(&config.audio, sink).map(Some),
             None => Ok(None),
         }
         .unwrap_or_else(|e| {
@@ -326,7 +320,7 @@ impl Session {
         if let Some(mut a) = self.audio.take() {
             a.stop();
         }
-        if self.config.audio.sources.is_empty() {
+        if self.config.audio.plan().captures.is_empty() {
             return;
         }
         listen_process_events(&self.config, &self.events);
@@ -426,7 +420,7 @@ impl Session {
         let audio = self
             .buffer
             .snapshot_audio_refs(audio_end.add_hns(-5 * cliprec_core::HNS_PER_SEC), audio_end)
-            .map(|a| a.retain_tracks(|t| self.config.audio.keeps_track(kind, t)));
+            .map(|a| a.select_tracks(self.config.audio.plan().clip(kind)));
         let video_ok = self.video.as_ref().map(|v| {
             let st = v.stats();
             let encoder = self.encoder_name.lock().map(|n| n.clone()).unwrap_or_default();
@@ -516,7 +510,8 @@ impl Session {
         let audio = self
             .buffer
             .snapshot_audio_refs(audio_start, audio_end)
-            .map(|a| a.retain_tracks(|t| self.config.audio.keeps_track(kind, t)));
+            .map(|a| a.select_tracks(self.config.audio.plan().clip(kind)))
+            .filter(|a| a.track_count() > 0);
         if video.is_none() && audio.is_none() {
             fail(&events, kind, tr(if kind == ClipKind::Video { K::EngVideoEmpty } else { K::EngAudioEmpty }, &[]));
             return None;
@@ -901,7 +896,7 @@ fn block_exclusive(config: &Config, events: &Sender<EngineEvent>) {
     if cfg!(test) || crate::notify::headless() || !config.audio.block_exclusive {
         return;
     }
-    for name in cliprec_audio::forbid_exclusive_mode(&config.audio.sources) {
+    for name in cliprec_audio::forbid_exclusive_mode(&config.audio.plan().captures) {
         let _ = events.send(EngineEvent::Warning(tr(K::EngExclusiveOff, &[&name])));
     }
 }
@@ -920,9 +915,10 @@ fn status_problem(states: &[(String, SourceState)]) -> Option<String> {
 /// quanto non è ancora scritto, con due blocchi di margine (m3).
 fn audio_snapshot_end(now: QpcTime, config: &Config, mix_latency_hns: i64) -> QpcTime {
     let margin = 2 * cliprec_core::time::frames_to_hns(cliprec_audio::MIX_BLOCK_FRAMES as i64);
-    let mixed = config.audio.recorded().mix();
+    let plan = config.audio.plan();
+    let mixed = plan.has_mix();
     // Una sorgente con ritardo negativo scrive fino a `adesso − |ritardo|` anche nella sua traccia.
-    let early = config.audio.sources.iter().map(|s| -s.delay_ms.clamp(-cliprec_audio::MAX_DELAY_MS, 0)).max().unwrap_or(0);
+    let early = plan.captures.iter().map(|s| -s.delay_ms.clamp(-cliprec_audio::MAX_DELAY_MS, 0)).max().unwrap_or(0);
     let early = i64::from(early) * 10_000;
     let latency = if mixed { mix_latency_hns.max(early) } else { early };
     now.add_hns(-(latency + margin))
@@ -2095,6 +2091,51 @@ video_seconds = = 30").unwrap();
         let expect = Expect { audio_tracks: Some(1), ..Expect::default() };
         let v = if audio.path.is_dir() { check_audio_dir(&audio.path, &expect) } else { check(&audio.path, &expect) }.unwrap();
         assert!(v.is_empty(), "clip audio: {v:?} ({})", audio.path.display());
+    }
+
+    /// Elenchi di sorgenti diversi: la clip video ha solo la sua sorgente, la clip audio solo l'altra
+    /// (le due sorgenti di prova prendono il posto delle due catturate dal piano).
+    #[test]
+    fn video_and_audio_clips_have_their_own_sources() {
+        let _serial = heavy();
+        use cliprec_core::config::{AudioSourceConfig, AudioSourceKind};
+        use cliprec_tests::probe::{Expect, check, check_audio_dir};
+        let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/test-output/sorgenti-per-clip");
+        let _ = std::fs::remove_dir_all(&out);
+        let mut config = Config::default();
+        config.audio.sources = vec![AudioSourceConfig::new("Sistema", AudioSourceKind::Output { device: None })];
+        config.audio.audio_clip_sources = Some(vec![AudioSourceConfig::new("Microfono", AudioSourceKind::Input { device: None })]);
+        let clips = run_test_clip(config, 4, true, out).unwrap();
+        let video = clips.iter().find(|c| c.kind == ClipKind::Video).expect("clip video");
+        let audio = clips.iter().find(|c| c.kind == ClipKind::Audio).expect("clip audio");
+        let expect = Expect { audio_tracks: Some(1), track_names: Some(vec!["Bip 1 kHz".into()]), ..Expect::default() };
+        let v = check(&video.path, &expect).unwrap();
+        assert!(v.is_empty(), "clip video: {v:?}");
+        let expect = Expect { audio_tracks: Some(1), ..Expect::default() };
+        let v = if audio.path.is_dir() { check_audio_dir(&audio.path, &expect) } else { check(&audio.path, &expect) }.unwrap();
+        assert!(v.is_empty(), "clip audio: {v:?} ({})", audio.path.display());
+        // Energia a 1 kHz e a 1,5 kHz (Goertzel) della prima traccia audio di ciascuna clip.
+        let energy = |path: &std::path::Path, f: f64| {
+            let ffmpeg = std::env::var("FFMPEG_TOOLS_DIR").unwrap_or_else(|_| "D:/Repositories/cliprec/third_party/ffmpeg".into());
+            let pcm = std::process::Command::new(std::path::Path::new(&ffmpeg).join("bin").join("ffmpeg.exe"))
+                .args(["-v", "error", "-i"])
+                .arg(path)
+                .args(["-map", "0:a:0", "-ac", "1", "-ar", "48000", "-f", "f32le", "-"])
+                .output()
+                .unwrap()
+                .stdout;
+            let coeff = 2.0 * (2.0 * std::f64::consts::PI * f / 48_000.0).cos();
+            let (mut s1, mut s2) = (0.0f64, 0.0f64);
+            for b in pcm.chunks_exact(4) {
+                let s0 = f64::from(f32::from_le_bytes([b[0], b[1], b[2], b[3]])) + coeff * s1 - s2;
+                (s2, s1) = (s1, s0);
+            }
+            s1 * s1 + s2 * s2 - coeff * s1 * s2
+        };
+        let video_ratio = energy(&video.path, 1000.0) / energy(&video.path, 1500.0);
+        let audio_ratio = energy(&audio.path, 1500.0) / energy(&audio.path, 1000.0);
+        println!("energia 1 kHz / 1,5 kHz nella clip video {video_ratio:.0}, 1,5 / 1 kHz nella clip audio {audio_ratio:.0}");
+        assert!(video_ratio > 10.0 && audio_ratio > 10.0, "ogni clip deve avere solo il bip della sua sorgente");
     }
 
     /// Catena verticale con sorgenti sintetiche (lampo e bip a ogni secondo QPC): 8 s di

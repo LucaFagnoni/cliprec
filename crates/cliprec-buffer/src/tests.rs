@@ -539,3 +539,16 @@ fn audio_covers_the_whole_video_clip() {
     let missing_ms = audio.start.hns_since(start) as f64 / 10_000.0;
     assert!(missing_ms <= 0.0, "{missing_ms} ms senza audio a inizio clip");
 }
+
+/// Le tracce di un tipo di clip si scelgono per indice e nell'ordine del suo elenco.
+#[test]
+fn audio_refs_select_tracks_in_the_given_order() {
+    let b = buffer(2.0, 64 * MB);
+    b.set_tracks(&["Mix".into(), "A".into(), "B".into()]);
+    for t in 0..3 {
+        push_track(&b, t, 0, 48_000, 480);
+    }
+    let refs = b.snapshot_audio_refs(at(1000), at(40_000)).unwrap().select_tracks(&[2, 0, 7]);
+    assert_eq!(refs.track_count(), 2);
+    assert_eq!((refs.track_name(0), refs.track_name(1)), (Some("B"), Some("Mix")));
+}

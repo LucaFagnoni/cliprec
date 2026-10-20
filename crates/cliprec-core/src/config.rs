@@ -202,6 +202,9 @@ pub struct AudioConfig {
     pub add_mix_track: bool,
     /// Tracce delle clip solo audio; assente (configurazioni precedenti) = come le clip video.
     pub audio_clip: Option<TrackLayout>,
+    /// Sorgenti delle clip solo audio, fino a 8; assente (configurazioni precedenti) = quelle delle
+    /// clip video (`sources`).
+    pub audio_clip_sources: Option<Vec<AudioSourceConfig>>,
     /// Fino a 8 sorgenti, nell'ordine delle tracce.
     pub sources: Vec<AudioSourceConfig>,
     /// Eventi di Windows per agganciare subito le app aperte o chiuse (serve ClipRec da
@@ -218,6 +221,7 @@ impl Default for AudioConfig {
             mode: TrackMode::Separate,
             add_mix_track: false,
             audio_clip: None,
+            audio_clip_sources: None,
             process_events: false,
             block_exclusive: true,
             sources: vec![
@@ -260,21 +264,98 @@ impl AudioConfig {
         }
     }
 
-    /// Tracce registrate nel buffer: quelle che servono alle clip video e a quelle solo audio.
-    /// Ordine: «Mix» (se serve) e poi una traccia per sorgente (se serve).
-    pub fn recorded(&self) -> TrackLayout {
-        let (v, a) = (self.layout(crate::ClipKind::Video), self.layout(crate::ClipKind::Audio));
-        if v.sources() || a.sources() {
-            TrackLayout { mode: TrackMode::Separate, add_mix_track: v.mix() || a.mix() }
-        } else {
-            TrackLayout { mode: TrackMode::Merged, add_mix_track: false }
+    /// Sorgenti delle clip di tipo `kind`, al più [`MAX_AUDIO_SOURCES`].
+    pub fn sources_for(&self, kind: crate::ClipKind) -> &[AudioSourceConfig] {
+        let list = match (kind, &self.audio_clip_sources) {
+            (crate::ClipKind::Audio, Some(list)) => list,
+            _ => &self.sources,
+        };
+        &list[..list.len().min(MAX_AUDIO_SOURCES)]
+    }
+
+    /// Cosa catturare e registrare per servire le clip video e quelle solo audio. Una sorgente
+    /// presente in entrambi gli elenchi con le stesse impostazioni si cattura una volta; una traccia
+    /// «Mix» uguale per i due tipi di clip si registra una volta.
+    pub fn plan(&self) -> AudioPlan {
+        use crate::ClipKind::{Audio, Video};
+        let mut captures: Vec<AudioSourceConfig> = Vec::new();
+        let mut map = |list: &[AudioSourceConfig]| -> Vec<usize> {
+            list.iter()
+                .map(|s| match captures.iter().position(|c| c == s) {
+                    Some(i) => i,
+                    None => {
+                        captures.push(s.clone());
+                        captures.len() - 1
+                    }
+                })
+                .collect()
+        };
+        let lists = [map(self.sources_for(Video)), map(self.sources_for(Audio))];
+        let layouts = [self.layout(Video), self.layout(Audio)];
+        let mut tracks: Vec<PlannedTrack> = Vec::new();
+        let mut index = |t: PlannedTrack| match tracks.iter().position(|x| *x == t) {
+            Some(i) => i,
+            None => {
+                tracks.push(t);
+                tracks.len() - 1
+            }
+        };
+        // Prima i «Mix», poi le sorgenti: ogni clip li ha in testa.
+        let mut clips = [Vec::new(), Vec::new()];
+        for k in 0..2 {
+            if layouts[k].mix() && !lists[k].is_empty() {
+                let mut set = lists[k].clone();
+                set.sort_unstable();
+                set.dedup();
+                clips[k].push(index(PlannedTrack::Mix(set)));
+            }
+        }
+        for k in 0..2 {
+            if layouts[k].sources() {
+                for &c in &lists[k] {
+                    let t = index(PlannedTrack::Source(c));
+                    if !clips[k].contains(&t) {
+                        clips[k].push(t);
+                    }
+                }
+            }
+        }
+        let [video, audio] = clips;
+        AudioPlan { captures, tracks, video, audio }
+    }
+}
+
+/// Traccia registrata nel buffer audio.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PlannedTrack {
+    /// Una sorgente catturata (indice in [`AudioPlan::captures`]).
+    Source(usize),
+    /// Somma di queste sorgenti catturate, in ordine crescente: la traccia «Mix».
+    Mix(Vec<usize>),
+}
+
+/// Sorgenti da catturare, tracce da registrare e tracce di ciascun tipo di clip, nell'ordine in cui
+/// finiscono nel file. Vedi [`AudioConfig::plan`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct AudioPlan {
+    pub captures: Vec<AudioSourceConfig>,
+    pub tracks: Vec<PlannedTrack>,
+    /// Indici in `tracks` per le clip video.
+    pub video: Vec<usize>,
+    /// Indici in `tracks` per le clip solo audio.
+    pub audio: Vec<usize>,
+}
+
+impl AudioPlan {
+    pub fn clip(&self, kind: crate::ClipKind) -> &[usize] {
+        match kind {
+            crate::ClipKind::Video => &self.video,
+            crate::ClipKind::Audio => &self.audio,
         }
     }
 
-    /// La traccia `track` del buffer (vedi [`Self::recorded`]) va nelle clip di tipo `kind`.
-    pub fn keeps_track(&self, kind: crate::ClipKind, track: usize) -> bool {
-        let layout = self.layout(kind);
-        if self.recorded().mix() && track == 0 { layout.mix() } else { layout.sources() }
+    pub fn has_mix(&self) -> bool {
+        self.tracks.iter().any(|t| matches!(t, PlannedTrack::Mix(_)))
     }
 }
 
@@ -512,30 +593,43 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn video_and_audio_clips_keep_their_own_tracks() {
-        use crate::ClipKind::{Audio, Video};
-        let layout = |mode, add_mix_track| TrackLayout { mode, add_mix_track };
-        let mut a = AudioConfig { mode: TrackMode::Separate, add_mix_track: false, ..AudioConfig::default() };
-        // Configurazione vecchia: la clip audio segue la video, nessun «Mix» registrato.
-        assert_eq!(a.recorded(), layout(TrackMode::Separate, false));
-        assert!(a.keeps_track(Audio, 0) && a.keeps_track(Video, 1));
-        // Video per sorgente, audio in traccia unica: si registrano Mix + sorgenti.
-        a.audio_clip = Some(layout(TrackMode::Merged, false));
-        assert_eq!(a.recorded(), layout(TrackMode::Separate, true));
-        assert!(!a.keeps_track(Video, 0) && a.keeps_track(Video, 1) && a.keeps_track(Video, 2));
-        assert!(a.keeps_track(Audio, 0) && !a.keeps_track(Audio, 1));
-        // Entrambe in traccia unica: solo il Mix.
-        a.mode = TrackMode::Merged;
-        assert_eq!(a.recorded(), layout(TrackMode::Merged, false));
-        assert!(a.keeps_track(Video, 0) && a.keeps_track(Audio, 0));
-        // Video unica, audio per sorgente con «Mix» in testa: tutto in entrambe tranne le sorgenti nel video.
-        a.audio_clip = Some(layout(TrackMode::Separate, true));
-        assert!(a.keeps_track(Video, 0) && !a.keeps_track(Video, 1));
-        assert!(a.keeps_track(Audio, 0) && a.keeps_track(Audio, 1));
-    }
-
     use super::*;
+
+    #[test]
+    fn plan_captures_once_and_gives_each_clip_its_tracks() {
+        use PlannedTrack::{Mix, Source};
+        let src = |n: &str| AudioSourceConfig::new(n, AudioSourceKind::Output { device: Some(n.into()) });
+        let layout = |mode, add_mix_track| TrackLayout { mode, add_mix_track };
+        let mut a = AudioConfig { sources: vec![src("Sistema"), src("Discord")], ..AudioConfig::default() };
+        // Configurazione vecchia: le clip audio usano le stesse sorgenti e le stesse tracce.
+        let p = a.plan();
+        assert_eq!(p.captures.len(), 2);
+        assert_eq!(p.tracks, vec![Source(0), Source(1)]);
+        assert_eq!((p.video.as_slice(), p.audio.as_slice()), (&[0, 1][..], &[0, 1][..]));
+        // Elenchi diversi con una sorgente in comune: catturata una volta.
+        a.audio_clip_sources = Some(vec![src("Microfono"), src("Sistema")]);
+        let p = a.plan();
+        assert_eq!(p.captures.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["Sistema", "Discord", "Microfono"]);
+        assert_eq!(p.tracks, vec![Source(0), Source(1), Source(2)]);
+        assert_eq!(p.video, [0, 1]);
+        assert_eq!(p.audio, [2, 0], "ordine dell'elenco audio");
+        // Ogni clip con il suo «Mix»: due somme diverse, in testa.
+        a.add_mix_track = true;
+        a.audio_clip = Some(layout(TrackMode::Merged, false));
+        let p = a.plan();
+        assert_eq!(p.tracks[..2], [Mix(vec![0, 1]), Mix(vec![0, 2])]);
+        assert_eq!(p.video, [0, 2, 3]);
+        assert_eq!(p.audio, [1]);
+        assert!(p.has_mix());
+        // Stesse sorgenti e «Mix» in entrambe: una sola somma.
+        a.audio_clip_sources = None;
+        let p = a.plan();
+        assert_eq!(p.tracks, vec![Mix(vec![0, 1]), Source(0), Source(1)]);
+        assert_eq!((p.video.as_slice(), p.audio.as_slice()), (&[0, 1, 2][..], &[0][..]));
+        // Clip audio senza sorgenti: nessuna traccia per lei.
+        a.audio_clip_sources = Some(Vec::new());
+        assert!(a.plan().audio.is_empty());
+    }
 
     #[test]
     fn default_round_trips_and_partial_files_are_valid() {

@@ -144,13 +144,11 @@ impl AudioRefs {
         self.tracks.len()
     }
 
-    /// Tiene solo le tracce per cui `keep(indice)` è vero (le tracce di un tipo di clip).
-    pub fn retain_tracks(mut self, keep: impl Fn(usize) -> bool) -> Self {
-        let mut i = 0;
-        self.tracks.retain(|_| {
-            i += 1;
-            keep(i - 1)
-        });
+    /// Tiene le tracce `indices`, in quell'ordine (le tracce di un tipo di clip); gli indici fuori
+    /// dalle tracce registrate si ignorano.
+    pub fn select_tracks(mut self, indices: &[usize]) -> Self {
+        let mut all: Vec<Option<audio::TrackCopy>> = self.tracks.into_iter().map(Some).collect();
+        self.tracks = indices.iter().filter_map(|&i| all.get_mut(i).and_then(Option::take)).collect();
         self
     }
 
