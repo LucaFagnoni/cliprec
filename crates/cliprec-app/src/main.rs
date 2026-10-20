@@ -37,7 +37,7 @@ fn main() -> anyhow::Result<()> {
     }
     // Dopo «Riavvia come amministratore» la vecchia istanza sta ancora chiudendo: la si aspetta.
     let instance = if args.iter().any(|a| a == sys::RESTART_ARG) {
-        sys::acquire_single_instance_wait(&sys::mutex_name(), Duration::from_secs(10), Duration::from_millis(100))?
+        sys::acquire_single_instance_wait(&sys::mutex_name(), sys::RESTART_WAIT, Duration::from_millis(100))?
     } else {
         sys::acquire_single_instance(&sys::mutex_name())?
     };
