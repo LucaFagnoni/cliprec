@@ -335,9 +335,17 @@ fn refcount(dev: &windows::Win32::Graphics::Direct3D11::ID3D11Device) -> u32 {
 }
 
 #[test]
-fn com_references_are_balanced() {
-    let Some(gpu) = device(NVIDIA).or_else(|| device(INTEL)) else { return };
-    let name = if gpu.adapter_name.contains("NVIDIA") { "hevc_nvenc" } else { "hevc_qsv" };
+fn com_references_are_balanced_nvenc() {
+    com_references_are_balanced(NVIDIA, "hevc_nvenc");
+}
+
+#[test]
+fn com_references_are_balanced_qsv() {
+    com_references_are_balanced(INTEL, "hevc_qsv");
+}
+
+fn com_references_are_balanced(vendor_id: u32, name: &str) {
+    let Some(gpu) = device(vendor_id) else { return };
     let settings = EncoderSettings::from_config(&Default::default(), 1920, 1080);
     // Un giro a vuoto: il runtime D3D/driver può tenere oggetti alla prima apertura.
     drop(cliprec_encode::open(&gpu, &settings, name).unwrap());
