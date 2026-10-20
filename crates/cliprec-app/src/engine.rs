@@ -223,7 +223,7 @@ impl Session {
         let stats = self.buffer.stats();
         let capture = self.video.as_ref().map(|v| v.stats()).unwrap_or_default();
         let problem = self.states.iter().find_map(|(name, st)| match st {
-            SourceState::Waiting(m) | SourceState::Error(m) => Some(format!("{name}: {m}")),
+            SourceState::Waiting(m) | SourceState::Error(m) if m != cliprec_audio::OPENING => Some(format!("{name}: {m}")),
             _ => None,
         });
         EngineStatus {
@@ -261,7 +261,10 @@ impl Session {
         }
         for (name, st) in &now {
             let changed = !self.states.iter().any(|(n, s)| n == name && s == st);
-            if changed && let SourceState::Waiting(m) | SourceState::Error(m) = st {
+            if changed
+                && let SourceState::Waiting(m) | SourceState::Error(m) = st
+                && m != cliprec_audio::OPENING
+            {
                 let _ = self.events.send(EngineEvent::Warning(format!("{name}: {m}")));
             }
         }
