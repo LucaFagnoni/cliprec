@@ -23,7 +23,10 @@ pub fn startup_config(path: &Path, discord_running: bool, run_value_present: boo
                 // buffer fermo, errore all'utente, impostazioni aperte. Il file non si tocca.
                 tracing::error!("{}: {e}; buffer fermo", path.display());
                 let msg = crate::i18n::fmt(crate::i18n::current(), crate::i18n::K::ConfigInvalid, &[&path.display().to_string(), &e.to_string()]);
-                Startup { config: Config::default(), start_buffer: false, error: Some(msg), open_settings: true }
+                // La shell applica `start_with_windows` all'avvio: il valore Run attuale resta com'è.
+                let mut config = Config::default();
+                config.general.start_with_windows = run_value_present;
+                Startup { config, start_buffer: false, error: Some(msg), open_settings: true }
             }
         }
     } else {
@@ -79,6 +82,8 @@ mod tests {
         assert!(err.contains("config.toml"), "{err}");
         assert!(s.open_settings);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "[clips\nvideo_seconds = = 30", "il file non va sovrascritto");
+        // La shell applica `start_with_windows` all'avvio: con i predefiniti cancellerebbe il valore Run.
+        assert!(startup_config(&path, false, true).config.general.start_with_windows, "l'avvio con Windows va conservato");
     }
 
     #[test]

@@ -6,7 +6,7 @@
 //! brevissimo) e un thread a bassa priorità scrive il file.
 
 use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -80,8 +80,9 @@ impl Shared {
                 .name("clip-save".into())
                 .spawn(move || {
                     lower_thread_priority();
+                    // Un panic perde solo quel lavoro: il thread resta vivo per i salvataggi successivi.
                     for job in rx {
-                        job();
+                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
                     }
                 })
                 .ok()?;
@@ -265,7 +266,9 @@ impl Session {
         let spawned = std::thread::Builder::new().name("encoder-probe".into()).spawn(move || {
             lower_thread_priority();
             let mut codecs: Vec<cliprec_core::VideoCodec> = Vec::new();
-            for (codec, _) in cliprec_encode::probe(&device) {
+            // Un panic nel driver non lascia `probing` acceso per sempre.
+            let probed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cliprec_encode::probe(&device)));
+            for (codec, _) in probed.unwrap_or_default() {
                 if !codecs.contains(&codec) {
                     codecs.push(codec);
                 }
@@ -462,8 +465,11 @@ impl Session {
             let _ = events.send(EngineEvent::ClipFailed { kind, reason });
         };
         let stats = self.buffer.stats();
+        // Il video si ferma dove finisce l'audio già scritto: con un mixer in ritardo (dispositivo
+        // Bluetooth, ritardo negativo) la clip finirebbe altrimenti con l'audio muto (m3).
+        let video_end = if self.audio.is_some() { audio_end } else { end };
         let video = match kind {
-            ClipKind::Video => match self.buffer.snapshot_video(f64::from(seconds), end) {
+            ClipKind::Video => match self.buffer.snapshot_video(f64::from(seconds), video_end) {
                 Some(v) => Some(v),
                 None => {
                     let _ = events.send(EngineEvent::Warning(tr(K::EngVideoFallbackAudio, &[])));
@@ -887,7 +893,10 @@ fn status_problem(states: &[(String, SourceState)]) -> Option<String> {
 fn audio_snapshot_end(now: QpcTime, config: &Config, mix_latency_hns: i64) -> QpcTime {
     let margin = 2 * cliprec_core::time::frames_to_hns(cliprec_audio::MIX_BLOCK_FRAMES as i64);
     let mixed = config.audio.mode == TrackMode::Merged || config.audio.add_mix_track;
-    let latency = if mixed { mix_latency_hns } else { 0 };
+    // Una sorgente con ritardo negativo scrive fino a `adesso − |ritardo|` anche nella sua traccia.
+    let early = config.audio.sources.iter().map(|s| -s.delay_ms.clamp(-cliprec_audio::MAX_DELAY_MS, 0)).max().unwrap_or(0);
+    let early = i64::from(early) * 10_000;
+    let latency = if mixed { mix_latency_hns.max(early) } else { early };
     now.add_hns(-(latency + margin))
 }
 
@@ -917,11 +926,11 @@ fn restart_scope(old: &Config, new: &Config) -> RestartScope {
 pub fn run(
     config: Config,
     start_buffer: bool,
+    config_path: &Path,
     commands: &Receiver<AppCommand>,
     events: Sender<EngineEvent>,
     status: Arc<Mutex<EngineStatus>>,
 ) {
-    let config_path = crate::shell::config_path();
     let restored = persist().lock().ok().and_then(|p| p.clone());
     let (mut config, mut buffer, shared) = match restored {
         Some(p) => (p.config, p.buffer, p.shared),
@@ -948,6 +957,8 @@ pub fn run(
         }
     });
     let mut session = if start_buffer { start(&config, &mut buffer) } else { None };
+    // Avvio con config illeggibile: si riparte solo da un file valido, mai dalla config in memoria (M2).
+    let mut blocked = !start_buffer;
     loop {
         if let Ok(mut p) = persist().lock() {
             *p = Some(Persist { config: config.clone(), buffer: buffer.clone(), shared: shared.clone() });
@@ -976,7 +987,18 @@ pub fn run(
                 }
             }
             Ok(AppCommand::StartBuffer) => {
-                if session.is_none() {
+                if blocked {
+                    match Config::load(config_path) {
+                        Ok(new) => {
+                            config = new;
+                            blocked = false;
+                        }
+                        Err(e) => {
+                            let _ = events.send(EngineEvent::Error(format!("config.toml: {e}")));
+                        }
+                    }
+                }
+                if session.is_none() && !blocked {
                     session = start(&config, &mut buffer);
                 }
             }
@@ -984,12 +1006,15 @@ pub fn run(
                 drop(session.take());
                 buffer = None;
             }
-            Ok(AppCommand::ReloadConfig) => match Config::load(&config_path) {
+            Ok(AppCommand::ReloadConfig) => match Config::load(config_path) {
                 Ok(new) => {
                     let scope = restart_scope(&config, &new);
                     config = new;
                     let was_running = session.is_some();
-                    if scope.buffer {
+                    if std::mem::take(&mut blocked) {
+                        // Config corretta dopo un avvio con config illeggibile: il buffer parte adesso.
+                        session = start(&config, &mut buffer);
+                    } else if scope.buffer {
                         drop(session.take());
                         let reclaim = buffer.take().map(|b| b.stats().bytes).unwrap_or(0);
                         if was_running {
@@ -1504,26 +1529,31 @@ mod tests {
     /// Tono costante 0,25 a blocchi di 10 ms in tempo reale, con l'istante QPC esatto.
     struct ConstantTone {
         name: String,
+        /// Ritardo di consegna dei blocchi (dispositivo ad alta latenza, es. Bluetooth).
+        lag_hns: i64,
         stop: Arc<AtomicBool>,
         thread: Option<JoinHandle<()>>,
     }
 
     impl ConstantTone {
         fn new(name: &str) -> Self {
-            Self { name: name.into(), stop: Arc::default(), thread: None }
+            Self::late(name, 0)
+        }
+        fn late(name: &str, lag_ms: i64) -> Self {
+            Self { name: name.into(), lag_hns: lag_ms * 10_000, stop: Arc::default(), thread: None }
         }
     }
 
     impl cliprec_core::AudioSource for ConstantTone {
         fn start(&mut self, mut on_chunk: cliprec_core::ChunkCallback) -> Result<(), cliprec_core::SourceError> {
-            let stop = self.stop.clone();
+            let (stop, lag) = (self.stop.clone(), self.lag_hns);
             self.thread = Some(std::thread::spawn(move || {
                 let block = vec![0.25f32; 480 * 2];
                 let start = QpcTime::now();
                 let mut n = 0i64;
                 while !stop.load(Ordering::SeqCst) {
                     let qpc = start.add_hns(n * 100_000);
-                    while QpcTime::now().hns_since(qpc) < 100_000 {
+                    while QpcTime::now().hns_since(qpc) < 100_000 + lag {
                         std::thread::sleep(Duration::from_millis(1));
                     }
                     on_chunk(cliprec_core::AudioChunk { qpc, samples: &block });
@@ -1756,6 +1786,114 @@ mod tests {
         assert_eq!(silent, 0, "{} campioni muti negli ultimi 100 ms", silent / 2);
     }
 
+    /// m3 (verifica): anche la clip video in traccia unica non finisce con l'audio muto. Con una
+    /// sorgente ad alta latenza (500 ms, come un microfono Bluetooth) il mixer scrive più indietro
+    /// dell'encoder video: il video si deve fermare dove finisce l'audio scritto, invece di essere
+    /// completato con zeri.
+    #[test]
+    fn m3_video_clip_has_no_silent_tail() {
+        let _serial = heavy();
+        let mut config = Config::default();
+        config.audio.mode = TrackMode::Merged;
+        config.clips.video_seconds = 2;
+        config.clips.folder = Some(fault_dir("m3-video"));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let device = GpuDevice::create(None).unwrap();
+        let video = cliprec_capture::SyntheticSource::new(device.clone(), 1280, 720);
+        let buffer = new_buffer(&config, &tx, 0);
+        let sources: Vec<Box<dyn cliprec_core::AudioSource>> = vec![Box::new(ConstantTone::late("A", 500))];
+        let overrides = SourceOverrides { video: Some((device, Box::new(video))), audio: Some(sources) };
+        let session = Session::start(&config, buffer, Shared::default(), overrides, tx).unwrap();
+        std::thread::sleep(Duration::from_secs(5));
+        assert!(session.mix_latency() > 5_000_000, "il mixer non si è adattato: {} ms", session.mix_latency() / 10_000);
+        session.save(ClipKind::Video, 2).unwrap().join().unwrap();
+        drop(session);
+        let clip = rx
+            .try_iter()
+            .find_map(|e| match e {
+                EngineEvent::ClipSaved(c) => Some(c.path),
+                _ => None,
+            })
+            .expect("clip salvata");
+        let pcm = cliprec_tests::ffmpeg::output(cliprec_tests::ffmpeg::ffmpeg().arg("-i").arg(&clip).args([
+            "-map", "0:a:0", "-f", "f32le", "-ac", "1", "-ar", "48000", "-",
+        ]))
+        .unwrap();
+        let samples: Vec<f32> = pcm.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
+        let loud = samples.iter().filter(|s| s.abs() > 0.1).count();
+        assert!(loud > samples.len() / 2, "il tono non c'è: {loud} campioni su {}", samples.len());
+        let silent_ms = samples.iter().rev().take_while(|s| s.abs() < 0.05).count() as f64 / 48.0;
+        assert!(silent_ms < 40.0, "la clip video finisce con {silent_ms:.0} ms di audio muto");
+    }
+
+    /// Ritardo negativo in tracce separate (verifica, R5): i blocchi di quella sorgente finiscono a
+    /// `adesso − |ritardo|`, quindi la fine dello snapshot deve arretrare altrettanto.
+    #[test]
+    fn negative_delay_moves_the_snapshot_end_back() {
+        let mut config = Config::default();
+        config.audio.mode = TrackMode::Separate;
+        config.audio.add_mix_track = false;
+        config.audio.sources[0].delay_ms = -500;
+        let now = QpcTime::now();
+        let back = now.hns_since(audio_snapshot_end(now, &config, 0));
+        assert!(back >= 500 * 10_000, "la fine arretra di {} ms, non di 500", back / 10_000);
+        config.audio.sources[0].delay_ms = -5_000;
+        let back = now.hns_since(audio_snapshot_end(now, &config, 0));
+        assert!(back < 1_100 * 10_000, "il ritardo è limitato a 1 s");
+    }
+
+    /// Coda dei salvataggi (verifica, R4): un panic in un lavoro non ferma quelli successivi.
+    #[test]
+    fn save_queue_survives_a_panicking_job() {
+        let shared = Shared::default();
+        let first = shared.enqueue(Box::new(|| panic!("panic di prova nella coda dei salvataggi"))).unwrap();
+        assert!(first.join().is_err());
+        let second = shared.enqueue(Box::new(|| {}));
+        assert!(second.is_some_and(|h| h.join().is_ok()), "la coda è morta dopo il panic");
+    }
+
+    /// M2 (verifica, R1): dopo un avvio con config illeggibile, «Avvia buffer» non parte con la config
+    /// in memoria finché il file non è valido, e salvare una config valida avvia il buffer.
+    #[test]
+    fn m2_fixed_config_starts_the_stopped_buffer() {
+        let _serial = heavy();
+        let dir = fault_dir("m2-ricarica");
+        let path = dir.join("config.toml");
+        // Nessuna cattura vera: video spento, una sola app che non è in esecuzione.
+        let mut config = Config::default();
+        config.video.enabled = false;
+        config.audio.sources = vec![cliprec_core::config::AudioSourceConfig::new(
+            "Assente",
+            cliprec_core::config::AudioSourceKind::App { exe: "cliprec-app-assente.exe".into() },
+        )];
+        config.clips.folder = Some(dir.clone());
+        std::fs::write(&path, "[clips
+video_seconds = = 30").unwrap();
+        if let Ok(mut p) = persist().lock() {
+            *p = None;
+        }
+        let (cmd_tx, cmd_rx) = std::sync::mpsc::channel();
+        let (ev_tx, _ev_rx) = std::sync::mpsc::channel();
+        let status = Arc::new(Mutex::new(EngineStatus::default()));
+        let running = |s: &Arc<Mutex<EngineStatus>>| s.lock().unwrap().buffer_running;
+        let (cfg, st, p) = (config.clone(), status.clone(), path.clone());
+        let engine = std::thread::spawn(move || run(cfg, false, &p, &cmd_rx, ev_tx, st));
+        std::thread::sleep(Duration::from_millis(800));
+        let at_start = running(&status);
+        cmd_tx.send(AppCommand::StartBuffer).unwrap();
+        std::thread::sleep(Duration::from_millis(1200));
+        let after_start_with_bad_file = running(&status);
+        config.save(&path).unwrap();
+        cmd_tx.send(AppCommand::ReloadConfig).unwrap();
+        std::thread::sleep(Duration::from_millis(1200));
+        let after_fix = running(&status);
+        cmd_tx.send(AppCommand::Quit).unwrap();
+        engine.join().unwrap();
+        assert!(!at_start, "il buffer non deve partire con una config illeggibile");
+        assert!(!after_start_with_bad_file, "«Avvia buffer» non deve usare la config in memoria se il file è illeggibile");
+        assert!(after_fix, "la config corretta e salvata deve avviare il buffer");
+    }
+
     /// m10: una sorgente in attesa (app chiusa) non è un errore; un errore vero sì.
     #[test]
     fn m10_waiting_sources_are_not_errors() {
@@ -1779,7 +1917,7 @@ mod tests {
         let (cmd_tx, cmd_rx) = std::sync::mpsc::channel();
         let (ev_tx, _ev_rx) = std::sync::mpsc::channel();
         let status = Arc::new(Mutex::new(EngineStatus::default()));
-        let engine = std::thread::spawn(move || run(config, true, &cmd_rx, ev_tx, status));
+        let engine = std::thread::spawn(move || run(config, true, &crate::shell::config_path(), &cmd_rx, ev_tx, status));
         std::thread::sleep(Duration::from_millis(800));
         let weak = persist().lock().unwrap().as_ref().and_then(Persist::buffer_weak).unwrap();
         cmd_tx.send(AppCommand::StopBuffer).unwrap();
