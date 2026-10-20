@@ -35,7 +35,10 @@ pub trait AudioSource: Send {
 ///
 /// Per ogni traccia i blocchi sono contigui: il primo campione di un blocco segue l'ultimo del
 /// precedente. `start` è l'istante QPC del primo campione del blocco, e serve al buffer per
-/// tagliare tutte le tracce sullo stesso istante.
+/// tagliare tutte le tracce sullo stesso istante. Può scostarsi di qualche ms dalla fine calcolata
+/// del blocco precedente (QPC reale del pacchetto): il buffer tratta i campioni come contigui.
+/// Uno scarto oltre 100 ms (es. dopo una sospensione) è una discontinuità: il buffer apre un
+/// nuovo segmento e allo snapshot riempie di silenzio il tratto mancante.
 pub trait AudioTrackSink: Send + Sync {
     /// Dichiara le tracce (nell'ordine del file) prima del primo `push`.
     fn set_tracks(&self, names: &[String]);
