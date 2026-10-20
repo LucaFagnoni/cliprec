@@ -66,6 +66,48 @@ fn open_error(name: &str, step: &str, code: c_int) -> EncodeError {
     }
 }
 
+/// Callback di av_log: inoltra a `tracing` (target `ffmpeg`) i messaggi entro il livello di
+/// av_log. ERROR diventa `warn` perché molti errori sono attesi (es. il probe degli encoder).
+unsafe extern "C" fn log_to_tracing(avcl: *mut c_void, level: c_int, fmt: *const c_char, vl: ffi::va_list) {
+    // SAFETY: FFmpeg chiama la callback con argomenti validi; av_log_format_line2 scrive al più
+    // `line.len()` byte terminati da NUL nel buffer locale e consuma `vl` come vsnprintf.
+    unsafe {
+        if level > ffi::av_log_get_level() {
+            return;
+        }
+        let mut line = [0 as c_char; 1024];
+        let mut prefix: c_int = 1;
+        ffi::av_log_format_line2(avcl, level, fmt, vl, line.as_mut_ptr(), line.len() as c_int, &mut prefix);
+        let text = CStr::from_ptr(line.as_ptr()).to_string_lossy();
+        let text = text.trim_end();
+        match level {
+            _ if text.is_empty() => {}
+            l if l <= ffi::AV_LOG_FATAL => tracing::error!(target: "ffmpeg", "{text}"),
+            l if l <= ffi::AV_LOG_ERROR => tracing::warn!(target: "ffmpeg", "{text}"),
+            l if l <= ffi::AV_LOG_WARNING => tracing::info!(target: "ffmpeg", "{text}"),
+            _ => tracing::debug!(target: "ffmpeg", "{text}"),
+        }
+    }
+}
+
+/// Livello di av_log a ERROR e messaggi inoltrati a `tracing` invece che su stderr.
+pub(crate) fn quiet_logs() {
+    // SAFETY: funzioni globali di libavutil senza precondizioni; la callback è thread-safe.
+    unsafe {
+        ffi::av_log_set_level(ffi::AV_LOG_ERROR);
+        ffi::av_log_set_callback(Some(log_to_tracing));
+    }
+}
+
+/// Superficie QSV mappata una volta all'apertura su una fetta del pool D3D11 e riusata: niente
+/// `av_hwframe_get_buffer`/`av_hwframe_map` per frame. È libera quando l'encoder ha rilasciato
+/// il suo riferimento (`buf[0]` con un solo riferimento, il nostro).
+struct QsvSlot {
+    frame: *mut ffi::AVFrame,
+    texture: *mut c_void,
+    index: usize,
+}
+
 /// Encoder FFmpeg su frame D3D11 (NV12) del [`GpuDevice`] di sessione.
 pub(crate) struct HwEncoder {
     ctx: *mut ffi::AVCodecContext,
@@ -76,7 +118,8 @@ pub(crate) struct HwEncoder {
     qsv_device_ref: *mut ffi::AVBufferRef,
     qsv_frames_ref: *mut ffi::AVBufferRef,
     frame: *mut ffi::AVFrame,
-    qsv_frame: *mut ffi::AVFrame,
+    qsv_slots: Vec<QsvSlot>,
+    next_slot: usize,
     pkt: *mut ffi::AVPacket,
     converter: Converter,
     params: VideoStreamParams,
@@ -97,7 +140,9 @@ impl Drop for HwEncoder {
         unsafe {
             ffi::avcodec_free_context(&mut self.ctx);
             ffi::av_frame_free(&mut self.frame);
-            ffi::av_frame_free(&mut self.qsv_frame);
+            for slot in &mut self.qsv_slots {
+                ffi::av_frame_free(&mut slot.frame);
+            }
             ffi::av_packet_free(&mut self.pkt);
             ffi::av_buffer_unref(&mut self.qsv_frames_ref);
             ffi::av_buffer_unref(&mut self.qsv_device_ref);
@@ -164,7 +209,8 @@ impl HwEncoder {
             qsv_device_ref: ptr::null_mut(),
             qsv_frames_ref: ptr::null_mut(),
             frame: ptr::null_mut(),
-            qsv_frame: ptr::null_mut(),
+            qsv_slots: Vec::new(),
+            next_slot: 0,
             pkt: ptr::null_mut(),
             converter,
             params: VideoStreamParams {
@@ -234,7 +280,7 @@ impl HwEncoder {
                 if ret < 0 {
                     return Err(EncodeError::Unsupported(format!("{name}: frame QSV derivati: {}", av_error_string(ret))));
                 }
-                enc.qsv_frame = ffi::av_frame_alloc();
+                enc.map_qsv_slots(name)?;
                 (ffi::AVPixelFormat::QSV, enc.qsv_frames_ref)
             } else {
                 (ffi::AVPixelFormat::D3D11, enc.frames_ref)
@@ -243,7 +289,7 @@ impl HwEncoder {
             enc.ctx = ffi::avcodec_alloc_context3(av_codec);
             enc.frame = ffi::av_frame_alloc();
             enc.pkt = ffi::av_packet_alloc();
-            if enc.ctx.is_null() || enc.frame.is_null() || enc.pkt.is_null() || (vendor == Vendor::Qsv && enc.qsv_frame.is_null()) {
+            if enc.ctx.is_null() || enc.frame.is_null() || enc.pkt.is_null() {
                 return Err(EncodeError::Failed(format!("{name}: allocazione del contesto")));
             }
             let c = &mut *enc.ctx;
@@ -255,7 +301,9 @@ impl HwEncoder {
             c.sw_pix_fmt = ffi::AVPixelFormat::NV12;
             c.hw_frames_ctx = ffi::av_buffer_ref(enc_frames);
             c.gop_size = s.fps as c_int;
-            c.max_b_frames = if codec == cliprec_core::VideoCodec::Hevc && vendor == Vendor::Amf { 0 } else { 2 };
+            // AMF: niente B-frame in HEVC su nessuna generazione VCN; in AV1 da verificare a runtime,
+            // quindi spenti.
+            c.max_b_frames = if vendor == Vendor::Amf && codec != cliprec_core::VideoCodec::H264 { 0 } else { 2 };
             c.rc_max_rate = i64::from(max_kbps) * 1000;
             c.rc_buffer_size = (i64::from(max_kbps) * 1000).min(i64::from(c_int::MAX)) as c_int;
             c.flags |= ffi::AV_CODEC_FLAG_GLOBAL_HEADER as c_int | ffi::AV_CODEC_FLAG_CLOSED_GOP as c_int;
@@ -283,7 +331,15 @@ impl HwEncoder {
                     opts.set("quality", "quality");
                     opts.set("rc", "qvbr");
                     opts.set("qvbr_quality_level", q);
-                    opts.set("forced_idr", 1);
+                    if codec == cliprec_core::VideoCodec::Av1 {
+                        // Su RDNA3 il default storico (64x16) codifica 1080p a 1082 righe: "none"
+                        // (NO_RESTRICTIONS) lascia al driver padding e ritaglio. Se la GPU non lo
+                        // supporta l'apertura fallisce e si passa al candidato successivo.
+                        opts.set("align", "none");
+                        opts.set("max_b_frames", 0);
+                    } else {
+                        opts.set("forced_idr", 1);
+                    }
                 }
                 Vendor::Qsv => {
                     // global_quality + maxrate + bitrate ⇒ QVBR in qsvenc.
@@ -312,6 +368,42 @@ impl HwEncoder {
             }
         }
         Ok(enc)
+    }
+
+    /// Mappa ogni texture del pool D3D11 fisso in un frame QSV che resta vivo fino a Drop.
+    ///
+    /// # Safety
+    /// `frames_ref` e `qsv_frames_ref` devono essere inizializzati, il secondo derivato dal primo.
+    unsafe fn map_qsv_slots(&mut self, name: &str) -> Result<(), EncodeError> {
+        // SAFETY: vedi il contratto della funzione; ogni frame allocato finisce subito in
+        // `qsv_slots` (liberato in Drop) o viene liberato qui.
+        unsafe {
+            for _ in 0..QSV_POOL_SIZE {
+                let mut d3d = ffi::av_frame_alloc();
+                if d3d.is_null() || ffi::av_hwframe_get_buffer(self.frames_ref, d3d, 0) < 0 {
+                    ffi::av_frame_free(&mut d3d);
+                    break;
+                }
+                let frame = ffi::av_frame_alloc();
+                if frame.is_null() {
+                    ffi::av_frame_free(&mut d3d);
+                    return Err(EncodeError::Failed(format!("{name}: av_frame_alloc")));
+                }
+                self.qsv_slots.push(QsvSlot { frame, texture: (*d3d).data[0] as *mut c_void, index: (*d3d).data[1] as usize });
+                (*frame).format = ffi::AVPixelFormat::QSV.0;
+                (*frame).hw_frames_ctx = ffi::av_buffer_ref(self.qsv_frames_ref);
+                // La mappatura tiene un riferimento al frame D3D11 sorgente (e alla texture).
+                let ret = ffi::av_hwframe_map(frame, d3d, 0);
+                ffi::av_frame_free(&mut d3d);
+                if ret < 0 || (*frame).buf[0].is_null() {
+                    return Err(EncodeError::Unsupported(format!("{name}: mappatura D3D11→QSV: {}", av_error_string(ret))));
+                }
+            }
+        }
+        if self.qsv_slots.len() < 4 {
+            return Err(EncodeError::Failed(format!("{name}: pool QSV di {} superfici", self.qsv_slots.len())));
+        }
+        Ok(())
     }
 
     /// Errore a runtime: device perso se D3D11 lo dice, altrimenti errore dell'encoder.
@@ -352,7 +444,9 @@ impl HwEncoder {
                     pts: self.to_qpc(p.pts),
                     dts: self.to_qpc(dts),
                     duration,
-                    keyframe: p.flags & ffi::AV_PKT_FLAG_KEY != 0,
+                    // Solo gli IDR aprono un GOP chiuso: un I-frame non IDR o un CRA non bastano.
+                    keyframe: p.flags & ffi::AV_PKT_FLAG_KEY != 0
+                        && crate::nal::first_vcl_is_idr(self.params.codec, data).unwrap_or(true),
                 });
                 ffi::av_packet_unref(self.pkt);
             }
@@ -370,35 +464,38 @@ impl VideoEncoder for HwEncoder {
         let pts = (frame.index.saturating_sub(first_index) as i64).max(self.last_pts + 1);
         self.last_pts = pts;
 
-        // SAFETY: frame e pool sono di proprietà di `self`; av_hwframe_get_buffer riempie
-        // data[0] (ID3D11Texture2D*) e data[1] (indice nell'array) secondo hwcontext_d3d11va.h.
-        let (tex, slice) = unsafe {
-            ffi::av_frame_unref(self.frame);
-            let ret = ffi::av_hwframe_get_buffer(self.frames_ref, self.frame, 0);
-            if ret < 0 {
-                return Err(self.runtime_error("av_hwframe_get_buffer", av_error_string(ret)));
+        let (tex, slice, send) = if self.qsv_slots.is_empty() {
+            // SAFETY: frame e pool sono di proprietà di `self`; av_hwframe_get_buffer riempie
+            // data[0] (ID3D11Texture2D*) e data[1] (indice nell'array) secondo hwcontext_d3d11va.h.
+            unsafe {
+                ffi::av_frame_unref(self.frame);
+                let ret = ffi::av_hwframe_get_buffer(self.frames_ref, self.frame, 0);
+                if ret < 0 {
+                    return Err(self.runtime_error("av_hwframe_get_buffer", av_error_string(ret)));
+                }
+                ((*self.frame).data[0] as *mut c_void, (*self.frame).data[1] as usize, self.frame)
             }
-            ((*self.frame).data[0] as *mut c_void, (*self.frame).data[1] as usize)
+        } else {
+            let n = self.qsv_slots.len();
+            // SAFETY: i frame delle superfici sono mappati e vivi fino a Drop; buf[0] non è nullo
+            // (verificato in map_qsv_slots).
+            let free = (0..n)
+                .map(|k| (self.next_slot + k) % n)
+                .find(|&i| unsafe { ffi::av_buffer_get_ref_count((*self.qsv_slots[i].frame).buf[0]) } == 1);
+            let Some(i) = free else {
+                return Err(self.runtime_error("superficie QSV", format!("tutte le {n} superfici sono occupate")));
+            };
+            self.next_slot = (i + 1) % n;
+            let slot = &self.qsv_slots[i];
+            (slot.texture, slot.index, slot.frame)
         };
         if let Err(e) = self.converter.blit(&frame.texture, frame.width, frame.height, tex, slice) {
             return Err(self.runtime_error("VideoProcessorBlt", e.to_string()));
         }
 
-        // SAFETY: frame (e frame QSV) allocati e di proprietà di `self`; il pool QSV è derivato
-        // dal pool D3D11 da cui viene `self.frame`, come richiede av_hwframe_map.
+        // SAFETY: `send` è un frame di proprietà di `self` con un buffer hw valido; l'encoder ne
+        // prende un riferimento proprio in avcodec_send_frame.
         let ret = unsafe {
-            let send = if self.qsv_frame.is_null() {
-                self.frame
-            } else {
-                ffi::av_frame_unref(self.qsv_frame);
-                (*self.qsv_frame).format = ffi::AVPixelFormat::QSV.0;
-                (*self.qsv_frame).hw_frames_ctx = ffi::av_buffer_ref(self.qsv_frames_ref);
-                let ret = ffi::av_hwframe_map(self.qsv_frame, self.frame, 0);
-                if ret < 0 {
-                    return Err(self.runtime_error("av_hwframe_map", av_error_string(ret)));
-                }
-                self.qsv_frame
-            };
             let f = &mut *send;
             f.pts = pts;
             f.duration = 1;

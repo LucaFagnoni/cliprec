@@ -19,6 +19,7 @@
 
 mod d3d;
 mod ffi;
+mod nal;
 
 use cliprec_core::config::{CodecChoice, OutputResolution, VideoConfig, default_max_bitrate_kbps};
 use cliprec_core::{EncodeError, GpuDevice, VideoCodec, VideoEncoder};
@@ -123,8 +124,14 @@ pub fn open(device: &GpuDevice, settings: &EncoderSettings, encoder_name: &str) 
 /// Apre il primo encoder di [`candidates`]`(settings.codec)` che funziona davvero su `device`.
 /// Se nessuno si apre restituisce l'errore dell'ultimo tentativo.
 pub fn open_best(device: &GpuDevice, settings: &EncoderSettings) -> Result<Box<dyn VideoEncoder>, EncodeError> {
+    open_after(device, settings, &[])
+}
+
+/// Come [`open_best`], ma salta gli encoder in `failed` (nomi FFmpeg, es. `hevc_nvenc`): per il
+/// ripiego a runtime quando un encoder fallisce in modo ripetibile.
+pub fn open_after(device: &GpuDevice, settings: &EncoderSettings, failed: &[String]) -> Result<Box<dyn VideoEncoder>, EncodeError> {
     let mut last = EncodeError::Unsupported("nessun encoder hardware".into());
-    for (_, name) in candidates(settings.codec) {
+    for (_, name) in candidates(settings.codec).into_iter().filter(|(_, n)| !failed.contains(n)) {
         match open(device, settings, &name) {
             Ok(enc) => return Ok(enc),
             Err(e) => {
@@ -134,6 +141,12 @@ pub fn open_best(device: &GpuDevice, settings: &EncoderSettings) -> Result<Box<d
         }
     }
     Err(last)
+}
+
+/// Porta il livello dei log di FFmpeg a ERROR e li inoltra a `tracing` (target `ffmpeg`; ERROR
+/// come `warn`, FATAL come `error`) invece di scriverli su stderr. Da chiamare una volta all'avvio.
+pub fn quiet_ffmpeg_logs() {
+    ffi::quiet_logs();
 }
 
 /// Imposta la priorità GPU del processo (`D3DKMTSetProcessSchedulingPriorityClass`): HIGH con
