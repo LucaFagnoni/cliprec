@@ -17,6 +17,7 @@ scripts\gate.ps1 -Crate cliprec-xxx                  # clippy + test di un crate
 cargo xtask probe <clip> [--duration 60 --tracks 2 --names "A,B" --fps 60]   # validazione ffprobe
 cargo xtask sync <clip>                              # sincronia lampo/bip (sorgenti sintetiche)
 cargo xtask dist                                     # cartella di distribuzione in target/dist
+& "$env:LOCALAPPDATA\Programs\Inno Setup 7\ISCC.exe" /Qp installer\cliprec.iss   # installer in target/dist
 python -I scripts/icone.py                           # icone (PNG, ICO, .res, tray) da assets/cliprec.png
 target\release\cliprec-app.exe --prova 10 --sintetica --cartella <dir>   # clip video+audio di prova
 target\release\cliprec-app.exe --sessione-lunga <minuti> <dir>          # CSV di memoria e frame (config da CLIPREC_CONFIG)
@@ -70,7 +71,7 @@ I `build.rs` di `cliprec-encode` e `cliprec-mux` copiano le DLL di FFmpeg accant
 - Fase 3 · Robustezza: tre revisioni avversarie corrette; test di guasto; sessione di 3,5 h senza
   crescita di memoria. Da fare di giorno: misura A/V con cattura reale, hotkey dal vivo, toast,
   controller, UAC, AMF, monitor oltre 60 Hz, gioco vero con PresentMon.
-- Fase 4 · Distribuzione: `xtask dist`, installer Inno Setup (non compilato), README. Da fare: build
-  FFmpeg ridotta (`installer/FFMPEG-RIDOTTA.md`), firma, installer compilato.
+- Fase 4 · Distribuzione: `xtask dist`, installer Inno Setup 7 compilato e provato (installa, clip, disinstalla), zip portable, README. Da fare: build
+  FFmpeg ridotta (`installer/FFMPEG-RIDOTTA.md`), firma del codice.
 - Prove ripetibili senza schermo dell'utente: `scripts\prova-completa.ps1`.
 - Dettagli e misure in `docs/PROGRESS.md`.

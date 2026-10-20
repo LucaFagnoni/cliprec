@@ -28,11 +28,16 @@ cargo xtask ffmpeg                 # una volta: scarica FFmpeg 9 LGPL in third_p
 cargo build --release              # target\release\cliprec-app.exe e cliprec-settings.exe
 cargo xtask dist                   # target\dist\ClipRec: exe, DLL FFmpeg e runtime VC++, licenze
 cargo xtask notices                # rigenera THIRD_PARTY_NOTICES.md
+# pacchetti da distribuire, in target\dist:
+& "$env:LOCALAPPDATA\Programs\Inno Setup 7\ISCC.exe" /Qp installer\cliprec.iss   # ClipRec-Setup.exe
+tar.exe -a -c -f target\dist\ClipRec-0.1.0-portable.zip -C target\dist ClipRec      # zip portable
 ```
 
 `.cargo\config.toml` contiene percorsi assoluti (`FFMPEG_DIR`, `LIBCLANG_PATH`) da adattare su un
-altro PC. L'installer (Inno Setup 7) si compila con `ISCC.exe installer\cliprec.iss` dopo
-`cargo xtask dist`; è per utente, senza amministratore, ed è descritto nello script stesso. La
+altro PC. L'installer (Inno Setup 7, installato per utente da jrsoftware.org) si compila dopo
+`cargo xtask dist`; è per utente, senza amministratore, ed è descritto nello script stesso. Se sul
+PC manca il runtime Visual C++, l'installer lo scarica da Microsoft durante l'installazione. Senza
+firma del codice Windows SmartScreen mostra «Editore sconosciuto» al primo avvio. La
 build FFmpeg ridotta, necessaria per stare sotto i 40 MB, è pianificata in
 `installer\FFMPEG-RIDOTTA.md`.
 
@@ -88,7 +93,7 @@ una clip di 5 s. Interfaccia in italiano e inglese (`language = "it"`, `"en"` o 
   scrive la chiave `HKCU\...\Run`.
 - Giochi avviati come amministratore: Windows può non consegnare le hotkey.
 - App che usano WASAPI esclusivo non sono catturabili in loopback.
-- La distribuzione è oggi di circa 134 MB (FFmpeg completa); l'obiettivo di 40 MB richiede la
+- La distribuzione è oggi di circa 137 MB (installer 45 MB, zip 61 MB) (FFmpeg completa); l'obiettivo di 40 MB richiede la
   build ridotta. Nessun certificato di firma disponibile: gli exe non sono firmati.
 
 ## Licenze
