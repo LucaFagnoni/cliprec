@@ -133,9 +133,32 @@ pub fn open(device: &GpuDevice, settings: &EncoderSettings, encoder_name: &str) 
             .ok_or_else(unsupported)?;
         (codec, Vendor::HARDWARE.into_iter().find(|v| v.suffix() == suffix).ok_or_else(unsupported)?)
     };
-    let enc = ffi::HwEncoder::open(device, settings, encoder_name, codec, vendor)?;
+    let b_frames = match vendor {
+        // AMF: niente B-frame in HEVC su nessuna generazione VCN; in AV1 da verificare a runtime.
+        Vendor::Amf if codec != VideoCodec::H264 => 0,
+        Vendor::Software => 0,
+        _ => B_FRAMES,
+    };
+    let enc = with_bframe_fallback(encoder_name, b_frames, |b| ffi::HwEncoder::open(device, settings, encoder_name, codec, vendor, b))?;
     tracing::info!(encoder = encoder_name, width = settings.width, height = settings.height, fps = settings.fps, "encoder aperto");
     Ok(Box::new(enc))
+}
+
+/// B-frame chiesti alla prima apertura di un encoder che li supporta.
+const B_FRAMES: u32 = 2;
+
+/// Apre con `b_frames` B-frame; se `avcodec_open2` rifiuta la configurazione come non supportata
+/// (es. NVENC su Pascal/Maxwell: «Max B-frames 2 exceed 0», ENOSYS), riprova lo stesso encoder
+/// senza B-frame prima di lasciare il posto al candidato successivo. FFmpeg scrive il motivo solo
+/// nel log, quindi si riprova su ogni rifiuto di `avcodec_open2` di tipo `Unsupported`.
+fn with_bframe_fallback<T>(name: &str, b_frames: u32, mut open: impl FnMut(u32) -> Result<T, EncodeError>) -> Result<T, EncodeError> {
+    match open(b_frames) {
+        Err(EncodeError::Unsupported(msg)) if b_frames > 0 && msg.contains("avcodec_open2") => {
+            tracing::info!(encoder = name, motivo = %msg, "apertura rifiutata con B-frame, riprovo senza");
+            open(0)
+        }
+        other => other,
+    }
 }
 
 /// Apre il primo encoder di [`candidates`]`(settings.codec)` che funziona davvero su `device`.
@@ -196,6 +219,37 @@ mod tests {
         assert_eq!(output_size(OutputResolution::P1080, 2560, 1080), (2560, 1080));
         assert_eq!(output_size(OutputResolution::P1080, 1600, 1200), (1440, 1080));
         assert_eq!(output_size(OutputResolution::P1440, 3440, 1440), (3440, 1440));
+    }
+
+    #[test]
+    fn bframe_rejection_retries_without_bframes() {
+        let rejected = || EncodeError::Unsupported("hevc_nvenc: avcodec_open2: Function not implemented".into());
+        let mut calls = Vec::new();
+        let r = with_bframe_fallback("hevc_nvenc", 2, |b| {
+            calls.push(b);
+            if b > 0 { Err(rejected()) } else { Ok(b) }
+        });
+        assert_eq!((r.ok(), calls), (Some(0), vec![2, 0]), "rifiuto dei B-frame: stesso encoder senza B-frame");
+
+        // Sessione rifiutata o errore prima di avcodec_open2: nessun nuovo tentativo.
+        for err in [EncodeError::SessionRejected("x: avcodec_open2: Out of memory".into()), EncodeError::Unsupported("x: device QSV derivato".into())] {
+            let mut calls = Vec::new();
+            let mut err = Some(err);
+            let r: Result<u32, _> = with_bframe_fallback("x", 2, |b| {
+                calls.push(b);
+                Err(err.take().unwrap_or_else(rejected))
+            });
+            assert!(r.is_err());
+            assert_eq!(calls, [2]);
+        }
+
+        // Encoder senza B-frame: un solo tentativo.
+        let mut calls = Vec::new();
+        let _ = with_bframe_fallback("hevc_amf", 0, |b| -> Result<u32, _> {
+            calls.push(b);
+            Err(rejected())
+        });
+        assert_eq!(calls, [0]);
     }
 
     #[test]

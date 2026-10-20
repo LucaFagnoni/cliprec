@@ -196,7 +196,15 @@ impl Drop for Dict {
 }
 
 impl HwEncoder {
-    pub(crate) fn open(gpu: &GpuDevice, s: &EncoderSettings, name: &str, codec: cliprec_core::VideoCodec, vendor: Vendor) -> Result<Self, EncodeError> {
+    /// Apre `name` con al più `b_frames` B-frame (0 li spegne).
+    pub(crate) fn open(
+        gpu: &GpuDevice,
+        s: &EncoderSettings,
+        name: &str,
+        codec: cliprec_core::VideoCodec,
+        vendor: Vendor,
+        b_frames: u32,
+    ) -> Result<Self, EncodeError> {
         let cname = CString::new(name).map_err(|_| EncodeError::Unsupported(name.to_owned()))?;
         // SAFETY: stringa C valida; la funzione restituisce un puntatore statico o nullo.
         let av_codec = unsafe { ffi::avcodec_find_encoder_by_name(cname.as_ptr()) };
@@ -277,13 +285,7 @@ impl HwEncoder {
                 c.hw_frames_ctx = ffi::av_buffer_ref(enc_frames);
             }
             c.gop_size = s.fps as c_int;
-            // AMF: niente B-frame in HEVC su nessuna generazione VCN; in AV1 da verificare a runtime,
-            // quindi spenti.
-            c.max_b_frames = match vendor {
-                Vendor::Amf if codec != cliprec_core::VideoCodec::H264 => 0,
-                Vendor::Software => 0,
-                _ => 2,
-            };
+            c.max_b_frames = b_frames.min(16) as c_int;
             c.rc_max_rate = i64::from(max_kbps) * 1000;
             c.rc_buffer_size = (i64::from(max_kbps) * 1000).min(i64::from(c_int::MAX)) as c_int;
             c.flags |= ffi::AV_CODEC_FLAG_GLOBAL_HEADER as c_int | ffi::AV_CODEC_FLAG_CLOSED_GOP as c_int;
