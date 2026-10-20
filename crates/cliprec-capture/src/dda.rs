@@ -1,5 +1,5 @@
 //! Desktop Duplication: fallback per i monitor (oltre 60 fps prima di Windows 11 24H2, o se WGC
-//! fallisce). Il puntatore del mouse non viene disegnato.
+//! fallisce). Il puntatore, che DDA non include nell'immagine, lo disegna [`CursorOverlay`].
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,6 +16,7 @@ use windows::Win32::Graphics::Dxgi::{
 use windows::Win32::Graphics::Gdi::HMONITOR;
 use windows::core::Interface;
 
+use crate::cursor::CursorOverlay;
 use crate::pacer::{FrameSlots, Stats};
 
 /// Duplicazione dell'uscita che mostra `monitor`, sull'adattatore del device (deve essere quello).
@@ -51,11 +52,11 @@ pub(crate) struct DdaCapture {
     running: Arc<AtomicBool>,
     closed: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
-    size: (u32, u32),
 }
 
 impl DdaCapture {
-    pub fn start(monitor: HMONITOR, slots: Arc<FrameSlots>, stats: Arc<Stats>) -> Result<Self, SourceError> {
+    /// Con `cursor` il puntatore viene disegnato sui frame (DDA non lo include nell'immagine).
+    pub fn start(monitor: HMONITOR, slots: Arc<FrameSlots>, stats: Arc<Stats>, cursor: bool) -> Result<Self, SourceError> {
         let running = Arc::new(AtomicBool::new(true));
         let closed = Arc::new(AtomicBool::new(false));
         let (tx, rx) = mpsc::sync_channel(1);
@@ -72,21 +73,19 @@ impl DdaCapture {
                         return;
                     }
                 };
-                // SAFETY: interfaccia valida.
-                let mode = unsafe { dup.GetDesc() }.ModeDesc;
-                let _ = tx.send(Ok((mode.Width, mode.Height)));
-                if let Err(e) = pump(&dup, &slots, &stats, &run) {
+                let _ = tx.send(Ok(()));
+                let overlay = cursor
+                    .then(|| CursorOverlay::new(&slots.device))
+                    .and_then(|r| r.map_err(|e| tracing::warn!("puntatore non disegnabile con DDA: {e}")).ok());
+                if let Err(e) = pump(&dup, &slots, &stats, overlay, &run) {
                     tracing::info!("Desktop Duplication interrotta: {e}");
                 }
                 done.store(true, Ordering::Release);
             })
             .map_err(|e| SourceError::Failed(format!("thread Desktop Duplication: {e}")))?;
-        let mut this = Self { running, closed, thread: Some(thread), size: (0, 0) };
+        let this = Self { running, closed, thread: Some(thread) };
         match rx.recv() {
-            Ok(Ok(size)) => {
-                this.size = size;
-                Ok(this)
-            }
+            Ok(Ok(())) => Ok(this),
             Ok(Err(e)) => Err(SourceError::Failed(format!("Desktop Duplication: {e}"))),
             Err(_) => Err(SourceError::Failed("Desktop Duplication: thread terminato".into())),
         }
@@ -94,11 +93,6 @@ impl DdaCapture {
 
     pub fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Acquire)
-    }
-
-    /// Dimensione della modalità video del monitor (pixel fisici).
-    pub fn size(&self) -> (u32, u32) {
-        self.size
     }
 }
 
@@ -111,7 +105,13 @@ impl Drop for DdaCapture {
     }
 }
 
-fn pump(dup: &IDXGIOutputDuplication, slots: &FrameSlots, stats: &Stats, running: &AtomicBool) -> windows::core::Result<()> {
+fn pump(
+    dup: &IDXGIOutputDuplication,
+    slots: &FrameSlots,
+    stats: &Stats,
+    mut cursor: Option<CursorOverlay>,
+    running: &AtomicBool,
+) -> windows::core::Result<()> {
     while running.load(Ordering::Acquire) {
         let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
         let mut resource = None;
@@ -121,22 +121,37 @@ fn pump(dup: &IDXGIOutputDuplication, slots: &FrameSlots, stats: &Stats, running
             Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => continue,
             Err(e) => return Err(e),
         }
-        // LastPresentTime 0 = solo il puntatore è cambiato: nessuna immagine nuova.
+        // Posizione e forma del puntatore vanno lette prima di ReleaseFrame.
+        if let Some(c) = cursor.as_mut()
+            && let Err(e) = c.update(dup, &info)
+        {
+            tracing::debug!("puntatore non aggiornato: {e}");
+        }
+        // LastPresentTime 0 = è cambiato solo il puntatore: si ripubblica l'immagine (che resta
+        // valida) solo se il puntatore va disegnato.
+        let image = info.LastPresentTime != 0;
+        let publish = image || (cursor.is_some() && info.LastMouseUpdateTime != 0);
         let copied = match resource {
-            Some(r) if info.LastPresentTime != 0 => r.cast::<ID3D11Texture2D>().and_then(|src| {
+            Some(r) if publish => r.cast::<ID3D11Texture2D>().and_then(|src| {
                 let mut desc = D3D11_TEXTURE2D_DESC::default();
                 // SAFETY: puntatore locale.
                 unsafe { src.GetDesc(&mut desc) };
                 if desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM {
                     return Err(windows::Win32::Graphics::Dxgi::DXGI_ERROR_UNSUPPORTED.into());
                 }
-                // LastPresentTime è in tick QPC grezzi.
-                let captured = QpcTime::from_ticks(info.LastPresentTime, qpc_frequency());
-                stats.arrival.record(QpcTime::now().hns_since(captured));
+                // Tempi in tick QPC grezzi.
+                let at = if image { info.LastPresentTime } else { info.LastMouseUpdateTime };
+                let captured = QpcTime::from_ticks(at, qpc_frequency());
+                if image {
+                    stats.arrival.record(QpcTime::now().hns_since(captured));
+                }
                 slots.publish(desc.Width, desc.Height, captured, |dst| {
                     // SAFETY: stesse dimensioni e formato BGRA; contesto immediato protetto.
                     unsafe { slots.device.context.CopyResource(dst, &src) };
-                    Ok(())
+                    match cursor.as_mut() {
+                        Some(c) => c.draw(dst, desc.Width, desc.Height),
+                        None => Ok(()),
+                    }
                 })
             }),
             _ => Ok(()),
@@ -144,7 +159,7 @@ fn pump(dup: &IDXGIOutputDuplication, slots: &FrameSlots, stats: &Stats, running
         // SAFETY: c'è un frame acquisito da rilasciare.
         unsafe { dup.ReleaseFrame()? };
         copied?;
-        if info.LastPresentTime != 0 {
+        if publish {
             stats.arrived.fetch_add(1, Ordering::Relaxed);
         }
     }

@@ -89,6 +89,10 @@ impl VideoSource for SyntheticSource {
     fn describe(&self) -> String {
         format!("Sorgente sintetica ({}×{})", self.width, self.height)
     }
+
+    fn native_size(&self) -> Option<(u32, u32)> {
+        Some((self.width, self.height))
+    }
 }
 
 impl Drop for SyntheticSource {

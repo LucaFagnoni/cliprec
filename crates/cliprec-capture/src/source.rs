@@ -128,6 +128,8 @@ pub struct CaptureSource {
     prefer_dda: bool,
     stats: Arc<Stats>,
     description: Arc<Mutex<String>>,
+    /// Risoluzione del monitor del bersaglio corrente, aggiornata dalla sorveglianza.
+    native: Arc<Mutex<Option<(u32, u32)>>>,
     pacer: Option<Pacer>,
     watcher: Option<(Arc<AtomicBool>, JoinHandle<()>)>,
 }
@@ -144,6 +146,7 @@ impl CaptureSource {
             prefer_dda: false,
             stats: Arc::default(),
             description,
+            native: Arc::default(),
             pacer: None,
             watcher: None,
         }
@@ -183,6 +186,7 @@ impl VideoSource for CaptureSource {
             slots: slots.clone(),
             stats: self.stats.clone(),
             description: self.description.clone(),
+            native: self.native.clone(),
             current: None,
             health: Health::new(&self.device),
             target_monitor: None,
@@ -191,13 +195,9 @@ impl VideoSource for CaptureSource {
         };
         // Primo giro sincrono: un monitor inesistente o una sessione rifiutata sono errori d'avvio.
         watch.poll()?;
-        // Segnaposto nero della dimensione del bersaglio (quella del primo frame atteso), o del
-        // monitor principale se il bersaglio non c'è ancora: l'integrazione apre l'encoder sulla
-        // dimensione del primo frame ricevuto, e il pacer aspetta fino a FIRST_FRAME_WAIT quello vero.
-        let (w, h) = match &watch.current {
-            Some((_, cap)) => cap.size(),
-            None => monitor_pixels(primary_monitor()).unwrap_or((1920, 1080)),
-        };
+        // Segnaposto nero della dimensione nativa (il monitor del bersaglio), mai quella di una
+        // finestra minimizzata; il pacer aspetta fino a FIRST_FRAME_WAIT il primo frame vero.
+        let (w, h) = lock(&self.native).unwrap_or((1920, 1080));
         slots.publish_placeholder(w, h)?;
         let options =
             PacerOptions { first_frame_wait: FIRST_FRAME_WAIT, pts_offset: CAPTURE_PTS_OFFSET, ..Default::default() };
@@ -230,8 +230,22 @@ impl VideoSource for CaptureSource {
     }
 
     fn describe(&self) -> String {
-        self.description.lock().unwrap_or_else(PoisonError::into_inner).clone()
+        lock(&self.description).clone()
     }
+
+    /// Risoluzione fisica del monitor del bersaglio: quello della finestra (anche minimizzata, dove
+    /// stava prima) o il principale se non c'è; il monitor scelto; per Auto il bersaglio corrente.
+    /// Prima di `start` si calcola al momento.
+    fn native_size(&self) -> Option<(u32, u32)> {
+        if self.watcher.is_some() {
+            return *lock(&self.native);
+        }
+        monitor_pixels(self.target.initial_monitor().ok()?)
+    }
+}
+
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 impl Drop for CaptureSource {
@@ -249,6 +263,7 @@ struct Watch {
     slots: Arc<FrameSlots>,
     stats: Arc<Stats>,
     description: Arc<Mutex<String>>,
+    native: Arc<Mutex<Option<(u32, u32)>>>,
     current: Option<(Resolved, Capture)>,
     health: Health,
     /// Monitor su cui sta il bersaglio, e se è pilotato da un adattatore diverso dal device.
@@ -283,13 +298,6 @@ impl Capture {
         match self {
             Self::Wgc(_) => "WGC",
             Self::Dda(_) => "Desktop Duplication",
-        }
-    }
-
-    fn size(&self) -> (u32, u32) {
-        match self {
-            Self::Wgc(c) => c.size(),
-            Self::Dda(c) => c.size(),
         }
     }
 }
@@ -357,7 +365,7 @@ impl Watch {
             Ok(Capture::Wgc(WgcCapture::start(item, window, slots, stats, self.fps, self.cursor)?))
         };
         let Resolved::Monitor(h) = r else { return wgc() };
-        let dda = || DdaCapture::start(h, self.slots.clone(), self.stats.clone()).map(Capture::Dda);
+        let dda = || DdaCapture::start(h, self.slots.clone(), self.stats.clone(), self.cursor).map(Capture::Dda);
         if self.prefer_dda {
             dda().or_else(|e| {
                 tracing::warn!("Desktop Duplication non disponibile ({e}): uso WGC");
@@ -390,15 +398,19 @@ impl Watch {
                 let cap = self.open(r)?;
                 let desc = format!("{} · {}", r.describe(), cap.backend());
                 tracing::info!(source = %desc, "cattura avviata");
-                *self.description.lock().unwrap_or_else(PoisonError::into_inner) = desc;
+                *lock(&self.description) = desc;
                 self.current = Some((r, cap));
             }
         }
         let monitor = match &self.current {
             Some((Resolved::Monitor(h), _)) => Some(*h),
+            // Per una finestra minimizzata MonitorFromWindow usa la posizione prima della riduzione.
             Some((Resolved::Window(h), _)) => window_monitor(*h),
             None => None,
         };
+        if let Some(px) = monitor_pixels(monitor.unwrap_or_else(primary_monitor)) {
+            *lock(&self.native) = Some(px);
+        }
         if monitor != self.target_monitor {
             self.target_monitor = monitor;
             let luid = monitor.and_then(adapter_luid_for_monitor);
@@ -511,7 +523,8 @@ mod tests {
         let _anim = TestWindow::open("cliprec-test-anim-dda", 320, 240);
         let (mw, mh) = monitor_pixels(primary_monitor()).unwrap();
         let device = crate::device_for_monitor(0).unwrap();
-        let mut src = CaptureSource::new(device, Target::Monitor(0), false).prefer_desktop_duplication(true);
+        // Con il puntatore (m17): il disegno passa dalla pipeline del puntatore a ogni frame.
+        let mut src = CaptureSource::new(device, Target::Monitor(0), true).prefer_desktop_duplication(true);
         let rx = collect(&mut src, 144);
         std::thread::sleep(Duration::from_secs(2));
         let running = src.stats();
@@ -623,6 +636,59 @@ mod tests {
         assert_on_grid(&frames, 30);
         // Circa 72 frame nominali in 2,4 s a 30 fps; sotto carico (altri test GPU) se ne perdono alcuni.
         assert!(frames.len() >= 54, "{} frame", frames.len());
+    }
+
+    /// C1: finestra minimizzata all'avvio. La dimensione nativa è quella del monitor, il segnaposto ha
+    /// quella dimensione e nessun frame della finestra minimizzata (~146×28) viene consegnato, nemmeno
+    /// al ripristino (quando il frame pool è ancora della dimensione minimizzata).
+    #[test]
+    fn minimized_window_at_start_never_yields_tiny_frames() {
+        let _capture = shared_capture();
+        let title = format!("cliprec-test-minimized-{}", std::process::id());
+        let win = TestWindow::open(&title, 320, 240);
+        win.show(SW_MINIMIZE);
+        let hwnd = win.hwnd();
+        for _ in 0..100 {
+            if is_minimized(hwnd) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(is_minimized(hwnd), "la finestra di prova non si è minimizzata");
+        let monitor = monitor_pixels(window_monitor(hwnd).unwrap_or_else(primary_monitor)).unwrap();
+        let device = crate::device_for_monitor(0).unwrap();
+        let mut src = CaptureSource::new(device, Target::Window(title), false);
+        let rx = collect(&mut src, 60);
+        std::thread::sleep(Duration::from_millis(1000));
+        let minimized_state = src.stats().state;
+        win.show(SW_SHOWNOACTIVATE);
+        std::thread::sleep(Duration::from_millis(1000));
+        let native = src.native_size();
+        src.stop();
+        drop(win);
+        let frames: Vec<_> = rx.try_iter().collect();
+        let sizes: BTreeSet<(u32, u32)> = frames.iter().map(|f| (f.3, f.4)).collect();
+        println!("monitor {monitor:?}, nativa {native:?}, dimensioni consegnate {sizes:?}, {minimized_state:?}");
+        assert_eq!(minimized_state, SourceState::Waiting("finestra minimizzata".into()));
+        assert!(sizes.iter().all(|&(w, h)| w >= 200 && h >= 150), "frame minuscoli consegnati: {sizes:?}");
+        assert_eq!((frames[0].3, frames[0].4), monitor, "il segnaposto non ha la dimensione nativa");
+        assert!(sizes.iter().any(|&(w, _)| (200..=330).contains(&w)), "la finestra ripristinata non è arrivata");
+        assert_eq!(native, Some(monitor));
+    }
+
+    /// C1: `native_size` è la risoluzione del monitor del bersaglio, anche prima di `start` e anche
+    /// se la finestra non c'è (allora il principale); la sintetica dà la sua dimensione.
+    #[test]
+    fn native_size_is_the_target_monitor() {
+        let primary = monitor_pixels(primary_monitor()).unwrap();
+        let device = crate::device_for_monitor(0).unwrap();
+        let src = CaptureSource::new(device.clone(), Target::Monitor(0), false);
+        assert_eq!(src.native_size(), Some(primary));
+        let src = CaptureSource::new(device.clone(), Target::Window("cliprec-nessuna-finestra-così".into()), false);
+        assert_eq!(src.native_size(), Some(primary));
+        let auto = Target::Auto { games: Vec::new(), any_fullscreen: false };
+        assert_eq!(CaptureSource::new(device.clone(), auto, false).native_size(), Some(primary));
+        assert_eq!(crate::SyntheticSource::new(device, 640, 360).native_size(), Some((640, 360)));
     }
 
     /// Una finestra tutta nera porta allo stato `Waiting` con l'avviso sui frame neri.
