@@ -69,7 +69,9 @@ fn serve_connection(ctx: &Context, file: File) {
             Ok(_) => {}
         }
         let resp = match decode_line::<IpcRequest>(&line) {
-            Ok(req) => handle_request(ctx, req),
+            // Un panic nel gestore non deve uccidere la connessione: risposta d'errore e si prosegue.
+            Ok(req) => std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handle_request(ctx, req)))
+                .unwrap_or_else(|_| IpcResponse::Error("errore interno".into())),
             Err(e) => IpcResponse::Error(format!("richiesta non valida: {e}")),
         };
         let Ok(out) = encode_line(&resp) else { return };
@@ -212,5 +214,26 @@ mod tests {
         reader.read_line(&mut line).unwrap();
         assert!(matches!(decode_line::<IpcResponse>(&line).unwrap(), IpcResponse::Error(_)));
         assert_eq!(rx.try_recv().unwrap(), AppCommand::SaveTestClip);
+    }
+
+    #[test]
+    fn m9_panic_in_a_request_does_not_kill_the_connection() {
+        let (mut c, _rx, _) = ctx();
+        c.on_reload = Arc::new(|| panic!("panic iniettato nel gestore"));
+        let name = format!(r"\\.\pipe\cliprec-test-m9-{}", std::process::id());
+        spawn(name.clone(), c).unwrap();
+        let mut pipe = OpenOptions::new().read(true).write(true).open(&name).unwrap();
+        let mut reader_pipe = pipe.try_clone().unwrap();
+        let mut reader = BufReader::new(&mut reader_pipe);
+        let mut ask = |req: IpcRequest| {
+            pipe.write_all(encode_line(&req).unwrap().as_bytes()).unwrap();
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            line
+        };
+        let line = ask(IpcRequest::ReloadConfig);
+        assert!(matches!(decode_line::<IpcResponse>(&line), Ok(IpcResponse::Error(_))), "risposta all'errore interno: {line:?}");
+        let line = ask(IpcRequest::Status);
+        assert!(matches!(decode_line::<IpcResponse>(&line), Ok(IpcResponse::Status(_))), "la connessione deve restare viva: {line:?}");
     }
 }
