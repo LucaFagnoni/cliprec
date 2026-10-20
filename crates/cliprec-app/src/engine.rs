@@ -1581,6 +1581,27 @@ mod tests {
         assert_eq!(size, Some((1280, 720)), "encoder alla dimensione nativa entro 2 s");
     }
 
+    /// Uscita scalata (richiesta di Luca): con un bersaglio nativo a 1440p e l'uscita scelta a 1080p,
+    /// l'encoder lavora a 1920×1080 dal primo frame.
+    #[test]
+    fn output_can_be_scaled_below_native() {
+        let _serial = heavy();
+        let mut config = Config::default();
+        config.clips.video_seconds = 2;
+        config.video.resolution = cliprec_core::config::OutputResolution::P1080;
+        config.clips.folder = Some(fault_dir("scala"));
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let device = GpuDevice::create(None).unwrap();
+        let video = cliprec_capture::SyntheticSource::new(device.clone(), 2560, 1440);
+        let buffer = new_buffer(&config, &tx, 0);
+        let overrides = SourceOverrides { video: Some((device, Box::new(video))), audio: Some(beeps()) };
+        let session = Session::start(&config, buffer.clone(), Shared::default(), overrides, tx).unwrap();
+        std::thread::sleep(Duration::from_millis(2000));
+        let size = buffer.snapshot_video(1.0, QpcTime::now()).map(|s| (s.params.width, s.params.height));
+        drop(session);
+        assert_eq!(size, Some((1920, 1080)));
+    }
+
     /// M6: senza video nel buffer (encoder mai pronto) la hotkey video salva comunque l'audio.
     #[test]
     fn m6_video_hotkey_saves_audio_when_no_video_is_ready() {
