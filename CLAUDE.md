@@ -64,8 +64,10 @@ I `build.rs` di `cliprec-encode` e `cliprec-mux` copiano le DLL di FFmpeg accant
 - Fase 0 · Fondamenta: fatta.
 - Fase 1 · Componenti: fatta, tutti i crate uniti su `main`.
 - Fase 2 · Integrazione: catena verticale fatta (`crates/cliprec-app/src/engine.rs`, test end-to-end).
-- Fase 3 · Robustezza: prima revisione avversaria corretta; test di guasto; sessione lunga. Da fare di
-  giorno: misura A/V con cattura reale, hotkey dal vivo, toast, AMF, monitor oltre 60 Hz.
+- Fase 3 · Robustezza: tre revisioni avversarie corrette; test di guasto; sessione di 3,5 h senza
+  crescita di memoria. Da fare di giorno: misura A/V con cattura reale, hotkey dal vivo, toast,
+  controller, UAC, AMF, monitor oltre 60 Hz, gioco vero con PresentMon.
 - Fase 4 · Distribuzione: `xtask dist`, installer Inno Setup (non compilato), README. Da fare: build
-  FFmpeg ridotta (`installer/FFMPEG-RIDOTTA.md`), firma, misure finali.
+  FFmpeg ridotta (`installer/FFMPEG-RIDOTTA.md`), firma, installer compilato.
+- Prove ripetibili senza schermo dell'utente: `scripts\prova-completa.ps1`.
 - Dettagli e misure in `docs/PROGRESS.md`.
