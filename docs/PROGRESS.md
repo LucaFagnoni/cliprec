@@ -41,6 +41,7 @@ Ultimo aggiornamento: 20 ottobre 2026, 04:40.
 | Sincronia tra tracce | ±20 ms | 0 ms |
 | Sincronia A/V (sintetica) | ±20 ms | −16 ms (un frame, artefatto della misura) |
 | CPU del processo (sessione lunga) | < 2% | circa 4% di un core = 0,15% della CPU |
+| RAM del processo esclusi i buffer | < 50 MB | working set circa 16 MB (98 MB totali con 82 MB di buffer); memoria privata impegnata 336 MB con buffer di 19 MB, quasi tutta del driver NVENC/CUDA (da confermare con VMMap) |
 | Distribuzione | < 40 MB | 129,9 MB oggi (FFmpeg completa); 26-30 MB stimati con la build ridotta |
 
 ## In corso
