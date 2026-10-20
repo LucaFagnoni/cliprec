@@ -123,6 +123,7 @@ impl FrameSlots {
     }
 
     /// Frame nero della dimensione del bersaglio, consegnato solo se il primo frame vero tarda.
+    /// Se un frame vero è già arrivato (la cattura parte prima del segnaposto) non fa nulla.
     pub fn publish_placeholder(&self, width: u32, height: u32) -> windows::core::Result<()> {
         self.put(width, height, QpcTime::now(), false, |t| clear_black(&self.device, t))
     }
@@ -136,6 +137,9 @@ impl FrameSlots {
         fill: impl FnOnce(&ID3D11Texture2D) -> windows::core::Result<()>,
     ) -> windows::core::Result<()> {
         let mut g = lock(&self.inner);
+        if !real && g.real {
+            return Ok(()); // il segnaposto non copre mai un frame vero
+        }
         let (latest, in_use) = (g.latest, g.in_use);
         // Con tre slot e al massimo due occupati, uno libero c'è sempre.
         let i = (0..3).find(|&i| Some(i) != latest && Some(i) != in_use).unwrap_or(0);
@@ -526,6 +530,7 @@ mod tests {
         assert!(slots.has_real());
         // Cambio di dimensione: lo slot libero viene ricreato, quello in uso resta intatto.
         slots.publish(32, 16, QpcTime(9), |_| Ok(())).unwrap();
+        slots.publish_placeholder(8, 8).unwrap(); // ignorato: c'è già un frame vero
         let a = slots.acquire().unwrap();
         assert_ne!(a.tex, held);
         assert_eq!((a.width, a.height, a.seq, a.captured), (32, 16, 7, QpcTime(9)));

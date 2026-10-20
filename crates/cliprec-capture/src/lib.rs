@@ -15,6 +15,20 @@
 //! resta occupata per un intero periodo il tick è perso (`frames_dropped`) e l'indice salta, così
 //! `pts == start + index * HNS_PER_SEC / fps` vale sempre. Un tick scaduto mentre la callback era
 //! occupata ma prima del successivo viene consegnato in ritardo, mai più di uno.
+//!
+//! Primo frame: l'integrazione apre l'encoder sulla dimensione del primo frame ricevuto. Per questo
+//! [`CaptureSource`] aspetta fino a [`FIRST_FRAME_WAIT`] il primo frame vero prima del primo tick
+//! (`start` è l'istante in cui l'attesa finisce); se non arriva consegna un nero della dimensione
+//! del bersaglio (elemento WGC, modalità DDA, oppure il monitor principale se la finestra o il
+//! gioco non ci sono ancora).
+//!
+//! Stato: `Waiting` per finestra minimizzata o assente, frame neri o fermi (avviso sul fullscreen
+//! esclusivo) e [`ADAPTER_CHANGED`] (bersaglio su un monitor di un'altra GPU: conviene riaprire
+//! device e sorgente con [`open_source`]); `Error` per device perso o 10 panic della callback in
+//! 10 s (i panic isolati vengono superati).
+//!
+//! pts e istante di cattura: vedi `CAPTURE_PTS_OFFSET` in `source.rs` e
+//! [`CaptureSource::latency_ms`].
 
 mod dda;
 mod health;
