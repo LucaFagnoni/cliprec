@@ -286,6 +286,10 @@ impl Ui {
                     n.enabled = cfg.general.notifications;
                     n.sound = cfg.general.sound_on_save;
                 }
+                // «Avvio con Windows» cambiato dalle impostazioni: si applica subito, non al prossimo avvio.
+                if !notify::headless() {
+                    crate::autostart::apply(&cfg);
+                }
                 if let Ok(mut c) = self.app.config.lock() {
                     *c = cfg;
                 }
