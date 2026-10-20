@@ -36,12 +36,24 @@ fn pts(frame: i64) -> QpcTime {
     QpcTime(ORIGIN + frame * HNS_PER_SEC / FPS)
 }
 
-/// Codifica `frames` frame sintetici con libopenh264 e li passa al buffer.
-fn encode_into(buffer: &ReplayBuffer, frames: i64) {
+/// Encoder software della build LGPL: libopenh264 (H.264 senza B-frame) o libkvazaar (HEVC con
+/// GOP gerarchico: frame riordinati e dts negativi come NVENC con B-frame).
+#[derive(Clone, Copy)]
+enum Sw {
+    OpenH264,
+    Kvazaar,
+}
+
+/// Codifica `frames` frame sintetici e li passa al buffer.
+fn encode_into(buffer: &ReplayBuffer, frames: i64, sw: Sw) {
+    let (name, video_codec) = match sw {
+        Sw::OpenH264 => (c"libopenh264", VideoCodec::H264),
+        Sw::Kvazaar => (c"libkvazaar", VideoCodec::Hevc),
+    };
     // SAFETY: uso standard dell'API di encoding; ogni oggetto viene liberato alla fine.
     unsafe {
-        let codec = avcodec_find_encoder_by_name(c"libopenh264".as_ptr());
-        assert!(!codec.is_null(), "libopenh264 assente");
+        let codec = avcodec_find_encoder_by_name(name.as_ptr());
+        assert!(!codec.is_null(), "{name:?} assente");
         let mut ctx = avcodec_alloc_context3(codec);
         (*ctx).width = W;
         (*ctx).height = H;
@@ -52,17 +64,23 @@ fn encode_into(buffer: &ReplayBuffer, frames: i64) {
         (*ctx).max_b_frames = 0;
         (*ctx).bit_rate = 1_000_000;
         (*ctx).flags |= AV_CODEC_FLAG_GLOBAL_HEADER as i32;
-        assert!(avcodec_open2(ctx, codec, ptr::null_mut()) >= 0);
+        let mut opts: *mut AVDictionary = ptr::null_mut();
+        if let Sw::Kvazaar = sw {
+            // GOP chiuso (IDR) ogni 32 frame, GOP gerarchico da 8 con riordino.
+            av_dict_set(&mut opts, c"kvazaar-params".as_ptr(), c"preset=ultrafast,gop=8,period=32,open-gop=0".as_ptr(), 0);
+        }
+        assert!(avcodec_open2(ctx, codec, &mut opts) >= 0);
+        av_dict_free(&mut opts);
         let extradata = std::slice::from_raw_parts((*ctx).extradata, (*ctx).extradata_size as usize).to_vec();
         assert!(!extradata.is_empty(), "extradata (SPS/PPS) attesa");
         buffer.set_video_params(VideoStreamParams {
-            codec: VideoCodec::H264,
+            codec: video_codec,
             width: W as u32,
             height: H as u32,
             fps: FPS as u32,
             extradata,
             bit_rate: 1_000_000,
-            encoder_name: "libopenh264".into(),
+            encoder_name: name.to_string_lossy().into_owned(),
         });
 
         let mut frame = av_frame_alloc();
@@ -129,9 +147,13 @@ fn push_tone(buffer: &ReplayBuffer, track: usize, freq: f32, from_frame: i64, fr
 }
 
 fn filled_buffer() -> ReplayBuffer {
+    filled_buffer_with(Sw::OpenH264)
+}
+
+fn filled_buffer_with(sw: Sw) -> ReplayBuffer {
     let b = ReplayBuffer::new(BufferConfig { video_seconds: 3.0, audio_seconds: 4.0, max_bytes: 256 << 20, lock_pages: false });
     b.set_tracks(&["Gioco".into(), "Discord".into()]);
-    encode_into(&b, 6 * FPS);
+    encode_into(&b, 6 * FPS, sw);
     // «Gioco» da 0,5 s prima del video, «Discord» da 4 s: allineamenti diversi.
     push_tone(&b, 0, 440.0, -24_000, 6 * 48_000 + 24_000);
     push_tone(&b, 1, 660.0, 4 * 48_000, 2 * 48_000);
@@ -172,14 +194,21 @@ fn audio_streams(p: &Value) -> Vec<&Value> {
     p["streams"].as_array().unwrap().iter().filter(|s| s["codec_type"] == "audio").collect()
 }
 
-fn check_video_file(path: &Path, expect_secs: f64) {
-    let p = ffprobe(path, &["-show_packets", "-select_streams", "v"]);
+fn check_video_file(path: &Path, expect_secs: f64, codec: &str) {
+    let p = ffprobe(path, &["-show_packets", "-select_streams", "v", "-count_frames"]);
     println!("{}: {}", path.display(), summary(&p));
     let streams = p["streams"].as_array().unwrap();
     // -select_streams v limita gli stream mostrati: rileggiamo senza filtro per l'audio.
     let all = ffprobe(path, &[]);
     let v = &streams[0];
-    assert_eq!(v["codec_name"], "h264");
+    assert_eq!(v["codec_name"], codec);
+    // Tutti i frame si decodificano.
+    assert_eq!(f(&v["nb_read_frames"]), (expect_secs * FPS as f64).round());
+    // Il primo frame mostrato e l'audio partono entrambi da zero: audio allineato al video.
+    for s in all["streams"].as_array().unwrap() {
+        let t = f(&s["start_time"]);
+        assert!(t.abs() < 1e-3, "{} start_time {t}", s["codec_type"]);
+    }
     assert_eq!(v["r_frame_rate"], "30/1");
     assert_eq!(v["avg_frame_rate"], "30/1");
     assert_eq!(v["disposition"]["default"], 1);
@@ -249,7 +278,7 @@ fn video_clip_mp4_and_mkv() {
     assert!((saved.duration_secs - 3.0).abs() < 1e-6);
     assert!(saved.bytes > 0);
     assert!(!PathBuf::from(format!("{}.mp4.part", base.display())).exists());
-    check_video_file(&saved.path, 3.0);
+    check_video_file(&saved.path, 3.0, "h264");
 
     // Stesso nome: non sovrascrive, aggiunge « (2)».
     let again = write_video_clip(&base, &video, Some(&audio), &VideoClipOptions::default()).unwrap();
@@ -263,13 +292,35 @@ fn video_clip_mp4_and_mkv() {
         &VideoClipOptions { container: VideoContainer::Mkv, ..Default::default() },
     )
     .unwrap();
-    check_video_file(&mkv.path, 3.0);
+    check_video_file(&mkv.path, 3.0, "h264");
 
     // Senza audio: solo video.
     let base = out_dir().join("video_only");
     clean(&base);
     let saved = write_video_clip(&base, &video, None, &VideoClipOptions::default()).unwrap();
     assert_eq!(ffprobe(&saved.path, &[])["streams"].as_array().unwrap().len(), 1);
+}
+
+/// HEVC con frame riordinati: dopo aver portato a zero il primo pts, i primi dts sono negativi.
+#[test]
+fn video_clip_with_reordered_frames() {
+    let b = filled_buffer_with(Sw::Kvazaar);
+    let end = pts(6 * FPS);
+    let video = b.snapshot_video(3.0, end).unwrap();
+    assert!(video.packets[0].keyframe);
+    let start = video.start().unwrap();
+    assert!(video.packets.iter().any(|p| p.dts < start), "attesi dts prima del primo pts");
+    assert!(video.packets.windows(2).any(|w| w[1].pts < w[0].pts), "attesi frame riordinati");
+    let audio = b.snapshot_audio(start, end).unwrap();
+    for (container, ext) in [(VideoContainer::Mp4, "mp4"), (VideoContainer::Mkv, "mkv")] {
+        let base = out_dir().join("video_bframes");
+        clean(&base);
+        let saved = write_video_clip(&base, &video, Some(&audio), &VideoClipOptions { container, ..Default::default() }).unwrap();
+        assert_eq!(saved.path.extension().unwrap(), ext);
+        let secs = saved.duration_secs;
+        assert!(secs >= 3.0 - 1e-9 && secs < 3.0 + 32.0 / FPS as f64, "durata {secs}");
+        check_video_file(&saved.path, secs, "hevc");
+    }
 }
 
 #[test]
