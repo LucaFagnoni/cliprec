@@ -275,6 +275,9 @@ impl Ui {
         match Config::load(&config_path()) {
             Ok(cfg) => {
                 i18n::set_from_config(&cfg.general.language);
+                for e in crate::gamepad::set_from_config(&cfg) {
+                    self.app.process_event(&EngineEvent::Warning(e));
+                }
                 let l = i18n::current();
                 self.relabel(l);
                 self.hotkeys.video = parse_chord("video", &cfg.hotkeys.video, l);

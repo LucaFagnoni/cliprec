@@ -3,6 +3,7 @@
 
 mod autostart;
 mod engine;
+mod gamepad;
 mod hotkey;
 mod i18n;
 mod icon;
@@ -50,6 +51,12 @@ fn main() -> anyhow::Result<()> {
     };
 
     let (cmd_tx, cmd_rx) = channel::<AppCommand>();
+    for e in gamepad::set_from_config(&config) {
+        tracing::warn!("controller: {e}");
+    }
+    if let Err(e) = gamepad::spawn(cmd_tx.clone()) {
+        tracing::warn!("thread del controller non avviato: {e}");
+    }
     let (event_tx, event_rx) = channel::<EngineEvent>();
     let status = Arc::new(Mutex::new(EngineStatus::default()));
 

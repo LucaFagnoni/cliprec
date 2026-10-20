@@ -246,11 +246,15 @@ pub struct HotkeyConfig {
     /// Es. "Ctrl+Alt+F10", "Mouse5", "Ctrl+Mouse4".
     pub video: String,
     pub audio: String,
+    /// Facoltativo: tasto o combinazione del controller XInput, es. "Back+A", "LB+RB+Y"; vuoto = nessuno.
+    /// Tasti: A, B, X, Y, LB, RB, LS, RS, Back, Start, DPadUp, DPadDown, DPadLeft, DPadRight.
+    pub video_pad: String,
+    pub audio_pad: String,
 }
 
 impl Default for HotkeyConfig {
     fn default() -> Self {
-        Self { video: "Ctrl+Alt+F10".into(), audio: "Ctrl+Alt+F9".into() }
+        Self { video: "Ctrl+Alt+F10".into(), audio: "Ctrl+Alt+F9".into(), video_pad: String::new(), audio_pad: String::new() }
     }
 }
 
