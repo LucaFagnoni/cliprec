@@ -28,14 +28,16 @@ jobs:
       run:
         shell: pwsh
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Versione
         id: version
         run: |
           $v = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          # Il codice d'uscita di gh (1 = release assente) diventerebbe quello del passo: si azzera.
           gh release view "v$v" *> $null
           if ($LASTEXITCODE -eq 0) { throw "la release v$v esiste già" }
+          $global:LASTEXITCODE = 0
           "version=$v" >> $env:GITHUB_OUTPUT
 
       - name: Rust 1.93
@@ -45,7 +47,7 @@ jobs:
 
       - name: Cache della FFmpeg ridotta
         id: ffmpeg
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: third_party/ffmpeg-ridotta
           key: ffmpeg-ridotta-${{ hashFiles('xtask/src/ridotta.rs', 'scripts/ffmpeg-ridotta.sh') }}
