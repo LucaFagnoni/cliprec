@@ -175,3 +175,19 @@ pub fn pick_folder() -> Option<String> {
         item.GetDisplayName(SIGDN_FILESYSPATH).ok().map(take_pwstr)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn helper_lists_work_on_this_machine() {
+        super::init_com();
+        let m = super::monitors();
+        println!("monitor {m:?}
+finestre {}
+app {}
+ingressi {:?}
+uscite {:?}", super::window_titles().len(), super::running_apps().len(), super::input_devices(), super::output_devices());
+        assert!(!m.is_empty());
+        assert!(m[0].label.starts_with("0: "));
+    }
+}
