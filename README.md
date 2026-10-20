@@ -26,7 +26,6 @@ Specifica completa in `SPEC.md`, decisioni in `docs/DECISIONS.md`, stato in `doc
 ```powershell
 cargo xtask ffmpeg                 # una volta: scarica FFmpeg 9 LGPL in third_party\ffmpeg
 cargo build --release              # target\release\cliprec-app.exe e cliprec-settings.exe
-cargo xtask redist                 # una volta: scarica vc_redist.x64.exe (Microsoft) per l'installer
 cargo xtask dist                   # target\dist\ClipRec: exe, DLL FFmpeg e runtime VC++, licenze
 cargo xtask notices                # rigenera THIRD_PARTY_NOTICES.md
 ```

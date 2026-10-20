@@ -34,7 +34,6 @@ fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("ffmpeg") => ffmpeg(&root()?),
-        Some("redist") => dist::redist(&root()?),
         Some("dist") => dist::run_dist(&root()?),
         Some("notices") => notices::run(&root()?),
         Some("probe") => finish("probe", probe_cmd(&args[1..])?),
@@ -48,7 +47,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         _ => {
-            eprintln!("uso: cargo xtask ffmpeg | redist | dist | notices | probe | sync | mem | gen-test-clip | bench-report (vedi la testata di xtask/src/main.rs)");
+            eprintln!("uso: cargo xtask ffmpeg | dist | notices | probe | sync | mem | gen-test-clip | bench-report (vedi la testata di xtask/src/main.rs)");
             std::process::exit(2);
         }
     }

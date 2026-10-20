@@ -49,11 +49,11 @@ Name: "autostart"; Description: "Avvia ClipRec con Windows"; Flags: unchecked
 
 [Files]
 Source: "..\target\dist\ClipRec\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs
-; Visual C++ Redistributable (scelta di Luca). Scaricarlo prima con `cargo xtask redist`.
-; ATTENZIONE: il redistributable chiede l'elevazione (UAC) anche se l'installer di ClipRec e per
-; utente e senza amministratore; si lancia solo se il runtime manca (VCRedistNeeded). La cartella
-; di ClipRec contiene comunque le DLL del runtime accanto agli exe (distribuzione app-local).
-Source: "..\third_party\vc_redist\vc_redist.x64.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall; Check: VCRedistNeeded
+; Visual C++ Redistributable (scelta di Luca): non è nel pacchetto. Se manca sul PC (VCRedistNeeded)
+; l'installer lo scarica da Microsoft prima di installare (NextButtonClick) e lo lancia in [Run].
+; ATTENZIONE: il redistributable chiede l'elevazione (UAC) anche se l'installer di ClipRec è per
+; utente e senza amministratore. Senza rete ClipRec parte lo stesso: la cartella contiene le DLL
+; del runtime accanto agli exe (distribuzione app-local).
 
 [Icons]
 ; AppUserModelID uguale a quello di autostart.rs: i toast funzionano dal primo avvio.
@@ -66,7 +66,7 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
   ValueData: """{app}\{#AppExe}"" --tray"; Flags: uninsdeletevalue; Tasks: autostart
 
 [Run]
-Filename: "{tmp}\vc_redist.x64.exe"; Parameters: "/install /quiet /norestart"; StatusMsg: "Installazione del runtime Visual C++ (richiede l'autorizzazione di Windows)..."; Check: VCRedistNeeded
+Filename: "{tmp}\vc_redist.x64.exe"; Parameters: "/install /quiet /norestart"; StatusMsg: "Installazione del runtime Visual C++ (richiede l'autorizzazione di Windows)..."; Check: VCRedistDownloaded
 Filename: "{app}\{#AppExe}"; Parameters: "--tray"; Description: "Avvia ClipRec"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
@@ -75,7 +75,14 @@ Filename: "{sys}\taskkill.exe"; Parameters: "/F /IM {#AppExe}"; Flags: runhidden
 Filename: "{sys}\taskkill.exe"; Parameters: "/F /IM cliprec-settings.exe"; Flags: runhidden; RunOnceId: "KillSettings"
 
 [Code]
-// Runtime VC++ 14.x x64 gia presente? (valore Installed=1, vista a 64 bit e WOW6432Node)
+const
+  VCRedistUrl = 'https://aka.ms/vs/17/release/vc_redist.x64.exe';
+
+var
+  DownloadPage: TDownloadWizardPage;
+  RedistReady: Boolean;
+
+// Runtime VC++ 14.x x64 già presente? (valore Installed=1, vista a 64 bit e WOW6432Node)
 function VCRedistNeeded: Boolean;
 var
   v: Cardinal;
@@ -83,6 +90,42 @@ begin
   Result := not (
     (RegQueryDWordValue(HKLM64, 'SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64', 'Installed', v) and (v = 1)) or
     (RegQueryDWordValue(HKLM64, 'SOFTWARE\WOW6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\x64', 'Installed', v) and (v = 1)));
+end;
+
+// Scaricato in questa installazione: [Run] lo lancia solo in questo caso.
+function VCRedistDownloaded: Boolean;
+begin
+  Result := RedistReady;
+end;
+
+procedure InitializeWizard;
+begin
+  DownloadPage := CreateDownloadPage(SetupMessage(msgWizardPreparing), SetupMessage(msgPreparingDesc), nil);
+end;
+
+// Su «Installa»: se il runtime manca lo scarica da Microsoft (circa 25 MB) con la pagina di
+// avanzamento. Se il download fallisce o viene annullato si avvisa e si prosegue: ClipRec usa le
+// DLL del runtime nella sua cartella.
+function NextButtonClick(CurPageID: Integer): Boolean;
+begin
+  Result := True;
+  if (CurPageID <> wpReady) or (not VCRedistNeeded) then
+    Exit;
+  DownloadPage.Clear;
+  DownloadPage.Add(VCRedistUrl, 'vc_redist.x64.exe', '');
+  DownloadPage.Show;
+  try
+    try
+      DownloadPage.Download;
+      RedistReady := True;
+    except
+      if not DownloadPage.AbortedByUser then
+        SuppressibleMsgBox('Impossibile scaricare il runtime Visual C++ (' + GetExceptionMessage + ').' + #13#10 +
+          'ClipRec funziona lo stesso; potrai installarlo più tardi da ' + VCRedistUrl, mbInformation, MB_OK, IDOK);
+    end;
+  finally
+    DownloadPage.Hide;
+  end;
 end;
 
 // Alla disinstallazione la configurazione in %APPDATA%\ClipRec resta, salvo scelta.

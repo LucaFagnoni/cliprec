@@ -138,3 +138,9 @@ Le voci [DEFAULT] e [PROPOSTA] di SPEC.md valgono come decise; qui ci sono quell
     entro 8 livelli. Solo NVENC H.264/HEVC; con gli altri encoder si registra in 4:2:0 con un
     avviso. Le altre opzioni (controllo del bitrate, preset, fotogrammi chiave, B-frame, look-ahead,
     AQ, bitrate AAC) hanno predefiniti uguali al comportamento precedente.
+35. **Runtime VC++ scaricato dall'installer solo se manca** (20 ottobre, richiesta di Luca; cambia
+    la 30). Il redistributable non è più nel pacchetto né in `third_party`: su «Installa»
+    l'installer controlla il registro (`VC\Runtimes\x64`, anche WOW6432Node) e, se il runtime
+    manca, lo scarica da `aka.ms/vs/17/release/vc_redist.x64.exe` con la pagina di download di
+    Inno Setup e lo installa. Senza rete avvisa e prosegue: ClipRec usa le DLL del runtime nella
+    sua cartella. Tolto `cargo xtask redist`.

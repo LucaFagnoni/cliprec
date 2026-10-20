@@ -134,22 +134,6 @@ pub fn verify_sha256(path: &Path, expected: &str) -> Result<()> {
     Ok(())
 }
 
-const VC_REDIST_URL: &str = "https://aka.ms/vs/17/release/vc_redist.x64.exe";
-
-/// `cargo xtask redist`: scarica il redistributable VC++ da Microsoft in `third_party/vc_redist/`.
-pub fn redist(root: &Path) -> Result<()> {
-    let dir = root.join("third_party").join("vc_redist");
-    std::fs::create_dir_all(&dir)?;
-    let exe = dir.join("vc_redist.x64.exe");
-    run(Command::new("curl.exe").args(["-sSfL", "-o"]).arg(&exe).arg(VC_REDIST_URL))?;
-    let size = std::fs::metadata(&exe)?.len();
-    if size < 1_000_000 {
-        bail!("{}: file troppo piccolo ({size} byte), scaricamento non valido", exe.display());
-    }
-    println!("{} ({:.1} MB)", exe.display(), size as f64 / 1048576.0);
-    Ok(())
-}
-
 /// Cartella `Microsoft.VC143.CRT` più recente dei Build Tools / di Visual Studio 2022.
 fn crt_dir() -> Result<PathBuf> {
     let pf = std::env::var_os("ProgramFiles(x86)").map(PathBuf::from).unwrap_or_else(|| r"C:\Program Files (x86)".into());
@@ -260,7 +244,7 @@ pub fn missing_imports(dir: &Path) -> Result<Vec<String>> {
 mod tests {
     use super::*;
 
-    /// Regressione M1: l'installer include il redistributable e lo lancia solo se manca.
+    /// Regressione M1: l'installer scarica il redistributable e lo lancia solo se manca.
     const SAMPLE: &str = include_str!("../../installer/ffmpeg-version.txt");
 
     #[test]
@@ -301,13 +285,15 @@ mod tests {
     }
 
     #[test]
-    fn installer_ships_vc_redist_with_check() {
+    fn installer_downloads_vc_redist_only_if_missing() {
         let iss = include_str!("../../installer/cliprec.iss");
         let line = |needle: &str| iss.lines().find(|l| l.contains(needle) && !l.trim_start().starts_with(';')).unwrap_or("");
-        let files = line("Source: \"..\\third_party\\vc_redist\\vc_redist.x64.exe\"");
-        assert!(files.contains("deleteafterinstall") && files.contains("Check: VCRedistNeeded"), "[Files]: {files:?}");
+        // Il runtime non è nel pacchetto: lo si scarica da Microsoft solo se il registro dice che manca.
+        assert!(line("vc_redist.x64.exe\"; DestDir").is_empty(), "il redistributable non va incluso nel pacchetto");
+        assert!(iss.contains("https://aka.ms/vs/17/release/vc_redist.x64.exe") && iss.contains("CreateDownloadPage"), "download assente");
+        assert!(iss.contains("if (CurPageID <> wpReady) or (not VCRedistNeeded) then"), "il download deve dipendere dal controllo");
         let run = line("Filename: \"{tmp}\\vc_redist.x64.exe\"");
-        assert!(run.contains("/install /quiet /norestart") && run.contains("Check: VCRedistNeeded"), "[Run]: {run:?}");
+        assert!(run.contains("/install /quiet /norestart") && run.contains("Check: VCRedistDownloaded"), "[Run]: {run:?}");
         assert!(iss.contains("Runtimes\\x64") && iss.contains("WOW6432Node"), "controllo del registro assente");
     }
 
