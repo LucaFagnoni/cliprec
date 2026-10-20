@@ -7,8 +7,8 @@
 //!   i GOP più vecchi, interi, quando supera la durata o il tetto di memoria.
 //! - Audio: ogni traccia è compressa in blocchi FLAC indipendenti (4096 frame, 24 bit), ognuno con
 //!   l'istante QPC del primo campione; si tengono `max(video_seconds, audio_seconds)`.
-//! - Gli snapshot prendono i lock per il tempo di copiare riferimenti (video) o byte compressi
-//!   (audio); la decompressione avviene fuori dai lock. Il buffer non tocca mai il disco.
+//! - Gli snapshot prendono i lock solo per clonare riferimenti `Arc` ai blocchi (video e audio);
+//!   la decompressione avviene fuori dai lock. Il buffer non tocca mai il disco.
 
 mod arena;
 mod audio;
@@ -219,7 +219,7 @@ impl ReplayBuffer {
         if end <= start {
             return None;
         }
-        // Sotto lock solo la copia dei byte compressi, una traccia alla volta.
+        // Sotto lock solo i riferimenti ai blocchi compressi, una traccia alla volta.
         let copies: Vec<_> = tracks.iter().map(|t| lock(t).copy(start, end)).collect();
         drop(tracks);
         let frames = usize::try_from(hns_to_frames(end.hns_since(start))).ok()?;

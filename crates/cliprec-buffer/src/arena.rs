@@ -193,6 +193,7 @@ impl<M> ChunkRing<M> {
         while self.pop_front().is_some() {}
     }
 
+    #[cfg(test)]
     pub fn bytes(&self, e: &Entry<M>) -> &[u8] {
         let i = (e.chunk - self.first_chunk) as usize;
         self.chunks.get(i).and_then(|c| c.0.get(e.off..e.off + e.len)).unwrap_or_default()

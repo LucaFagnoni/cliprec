@@ -3,7 +3,7 @@
 use std::io::Cursor;
 
 use cliprec_core::time::{frames_to_hns, hns_to_frames};
-use cliprec_core::{AudioTrackPcm, CHANNELS, QpcTime, SAMPLE_RATE};
+use cliprec_core::{AudioTrackPcm, CHANNELS, PacketData, QpcTime, SAMPLE_RATE};
 use flacenc::bitsink::MemSink;
 use flacenc::component::{BitRepr, StreamInfo};
 use flacenc::config::Encoder;
@@ -38,11 +38,11 @@ pub(crate) struct Track {
     pub ring: ChunkRing<BlockMeta>,
 }
 
-/// Copia dei dati di una traccia presa sotto lock, da decomprimere fuori.
+/// Riferimenti ai blocchi di una traccia presi sotto lock (senza copiarne i byte), da
+/// decomprimere fuori.
 pub(crate) struct TrackCopy {
     name: String,
-    blocks: Vec<(QpcTime, usize, std::ops::Range<usize>)>,
-    bytes: Vec<u8>,
+    blocks: Vec<(QpcTime, usize, PacketData)>,
     pending: Vec<i32>,
     pending_start: QpcTime,
 }
@@ -139,22 +139,18 @@ impl Track {
         self.end
     }
 
-    /// Copia i blocchi che toccano `[start, end)` e i campioni non ancora compressi.
-    pub fn copy(&self, start: QpcTime, end: QpcTime) -> TrackCopy {
-        let mut blocks = Vec::new();
-        let mut bytes = Vec::new();
-        for (_, b) in self.ring.iter() {
-            let b_end = b.meta.start.add_hns(frames_to_hns(b.meta.frames as i64));
-            if b_end > start && b.meta.start < end {
-                let data = self.ring.bytes(b);
-                blocks.push((b.meta.start, b.meta.frames, bytes.len()..bytes.len() + data.len()));
-                bytes.extend_from_slice(data);
-            }
-        }
+    /// Riferimenti ai blocchi che toccano `[start, end)` e copia dei campioni non ancora compressi.
+    pub fn copy(&mut self, start: QpcTime, end: QpcTime) -> TrackCopy {
+        self.ring.seal();
+        let blocks = self
+            .ring
+            .iter()
+            .filter(|(_, b)| b.meta.start.add_hns(frames_to_hns(b.meta.frames as i64)) > start && b.meta.start < end)
+            .map(|(_, b)| (b.meta.start, b.meta.frames, self.ring.share(b)))
+            .collect();
         TrackCopy {
             name: self.name.clone(),
             blocks,
-            bytes,
             pending: self.pending.clone(),
             pending_start: self.pending_start,
         }
@@ -168,9 +164,8 @@ impl TrackCopy {
     pub fn render(self, start: QpcTime, frames: usize) -> AudioTrackPcm {
         let mut out = Placer { out: vec![0.0f32; frames * CHANNELS], start, next: None };
         let mut buf = Vec::new();
-        for (at, n, range) in &self.blocks {
-            let data = self.bytes.get(range.clone()).unwrap_or_default();
-            match claxon::frame::FrameReader::new(Cursor::new(data)).read_next_or_eof(std::mem::take(&mut buf)) {
+        for (at, n, data) in &self.blocks {
+            match claxon::frame::FrameReader::new(Cursor::new(&**data)).read_next_or_eof(std::mem::take(&mut buf)) {
                 Ok(Some(block)) if block.duration() as usize == *n && block.channels() as usize == CHANNELS => {
                     out.place(*at, *n, |i, ch| block.sample(ch as u32, i as u32));
                     buf = block.into_buffer();
