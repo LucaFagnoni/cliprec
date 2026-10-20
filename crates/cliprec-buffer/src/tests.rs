@@ -96,11 +96,11 @@ proptest! {
                     let pushed_kf = keyframes.len();
                     prop_assert!(st.keyframes >= pushed_kf.min(2));
                     let pushed_secs = (seq + 1) as f64 / 50.0;
-                    prop_assert!(st.video_seconds + 1e-9 >= video_seconds.min(pushed_secs) || first == 0);
+                    prop_assert!(st.video_seconds + 1e-9 >= (video_seconds + RETAIN_MARGIN_SECS).min(pushed_secs) || first == 0);
                     let kf_pos = keyframes.iter().position(|&k| k == first).unwrap();
                     if st.keyframes > 2 {
                         let second = keyframes[kf_pos + 1];
-                        prop_assert!((seq + 1 - second) as f64 / 50.0 < video_seconds + 1e-9);
+                        prop_assert!((seq + 1 - second) as f64 / 50.0 < video_seconds + RETAIN_MARGIN_SECS + 1e-9);
                     }
                 }
             }
@@ -109,7 +109,8 @@ proptest! {
         let end = QpcTime(1_000_000_000 + sizes.len() as i64 * FRAME_HNS);
         let s = b.snapshot_video(cut, end).unwrap();
         check_snapshot(&s, &sizes);
-        let target = end.add_hns(-(cut * HNS_PER_SEC as f64).round() as i64);
+        // Lo snapshot ha 1 ms di tolleranza sul punto di taglio.
+        let target = end.add_hns(-(cut * HNS_PER_SEC as f64).round() as i64 + HNS_PER_SEC / 1000);
         let start = s.packets[0].pts;
         let oldest = b.snapshot_video(1e9, end).unwrap().packets[0].pts;
         prop_assert!(start <= target || start == oldest);
@@ -168,17 +169,70 @@ fn snapshot_while_writing() {
 }
 
 #[test]
-fn params_change_clears_and_lock_pages_does_not_fail() {
-    let b = ReplayBuffer::new(BufferConfig { video_seconds: 1.0, audio_seconds: 1.0, max_bytes: 16 * MB, lock_pages: true });
+fn params_change_clears_the_ring() {
+    let b = ReplayBuffer::new(BufferConfig { video_seconds: 1.0, audio_seconds: 1.0, max_bytes: 16 * MB, lock_pages: false });
     b.set_video_params(params());
     push(&b, 0, 1000, true);
     assert!(b.snapshot_video(1.0, QpcTime(i64::MAX)).is_some());
-    println!("locked = {}", b.stats().locked); // dipende dai privilegi; non deve fallire.
     b.set_video_params(VideoStreamParams { width: 128, ..params() });
     assert!(b.snapshot_video(1.0, QpcTime(i64::MAX)).is_none());
     // Pacchetti prima del primo keyframe ignorati.
     push(&b, 1, 1000, false);
     assert_eq!(b.stats().video_packets, 0);
+}
+
+/// Con la coda dei B-frame ancora incompleta la clip si misura dall'ultimo frame completo, che è
+/// prima di `newest_end`: il margine di conservazione evita clip di qualche frame sotto N.
+#[test]
+fn retained_video_always_covers_n_seconds_with_b_frames() {
+    let n = 2.0;
+    // Ogni snapshot chiude il blocco da 4 MiB in scrittura: tetto largo e snapshot non a ogni frame.
+    let b = buffer(n, 256 * MB);
+    // Ordine di decodifica P(d+3), B(d+1), B(d+2); keyframe ogni 60 frame mostrati.
+    let mut seq = 0i64;
+    let mut push_frame = |display: i64, keyframe: bool| {
+        let pts = QpcTime(1_000_000_000 + display * FRAME_HNS);
+        let dts = QpcTime(1_000_000_000 + (seq - 2) * FRAME_HNS);
+        let data = packet_bytes(seq as u64, 100);
+        b.push_video(PacketRef { data: &data, pts, dts, duration: FRAME_HNS, keyframe });
+        seq += 1;
+    };
+    push_frame(0, true);
+    for g in 0..200 {
+        let p = 3 * g + 3;
+        for (display, key) in [(p, p % 60 == 0), (p - 2, false), (p - 1, false)] {
+            push_frame(display, key);
+            if g % 7 != 0 {
+                continue;
+            }
+            let s = b.snapshot_video(n, QpcTime(i64::MAX)).unwrap();
+            let first = s.packets.iter().map(|p| p.pts).min().unwrap();
+            let last = s.packets.iter().map(|p| p.pts.add_hns(p.duration)).max().unwrap();
+            let secs = last.hns_since(first) as f64 / HNS_PER_SEC as f64;
+            if display > 200 {
+                assert!(secs >= n - 0.001, "clip di {secs} s dopo il frame {display}");
+            }
+        }
+    }
+}
+
+/// Unico test che blocca pagine (gli altri usano `lock_pages: false`), così può controllare
+/// che il working set torni com'era.
+#[test]
+fn locked_pages_survive_repeated_reloads() {
+    let before = crate::lock::working_set().unwrap();
+    for i in 0..5 {
+        let b = ReplayBuffer::new(BufferConfig { video_seconds: 1.0, audio_seconds: 1.0, max_bytes: 256 * MB, lock_pages: true });
+        // 64 MB preallocati e bloccati (bitrate × 3 s), più un blocco audio.
+        b.set_video_params(VideoStreamParams { bit_rate: 64 * MB as u64 * 8 / 3, ..params() });
+        b.set_tracks(&["A".into()]);
+        push_track(&b, 0, 0, 48_000, 480);
+        push(&b, 0, 1000, true);
+        let st = b.stats();
+        assert!(st.locked, "ricarica {i}: pagine non bloccate ({st:?})");
+        assert!(st.bytes >= 60 * MB, "{st:?}");
+    }
+    assert_eq!(crate::lock::working_set().unwrap().0, before.0, "working set minimo ripristinato");
 }
 
 // ---- audio ----
@@ -231,6 +285,30 @@ fn flac_round_trip() {
     }
     // Compressione: meno del PCM a 24 bit.
     assert!(b.stats().audio_seconds > 1.0);
+}
+
+#[test]
+fn audio_refs_render_on_another_thread() {
+    fn send_static<T: Send + 'static>(_: &T) {}
+    let b = buffer(2.0, 64 * MB);
+    b.set_tracks(&["A".into(), "B".into()]);
+    push_track(&b, 0, 0, 96_000, 480);
+    push_track(&b, 1, 0, 96_000, 333);
+    let expected = b.snapshot_audio(at(1000), at(90_000)).unwrap();
+    let refs = b.snapshot_audio_refs(at(1000), at(90_000)).unwrap();
+    send_static(&refs);
+    // Il motore continua a scrivere (e a scartare i blocchi vecchi) mentre il thread di
+    // salvataggio decomprime: i riferimenti tengono vivi i blocchi.
+    let render = std::thread::spawn(move || refs.render());
+    push_track(&b, 0, 96_000, 96_000, 480);
+    let s = render.join().unwrap();
+    assert!(s == expected, "render diverso dallo snapshot diretto");
+    assert_eq!(s.start, at(1000));
+    for (t, track) in s.tracks.iter().enumerate() {
+        assert_eq!(track.samples.len(), 89_000 * 2);
+        assert_sample(track.samples[0], t, 1000, 0);
+        assert_sample(track.samples[88_999 * 2 + 1], t, 89_999, 1);
+    }
 }
 
 #[test]
