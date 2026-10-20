@@ -77,7 +77,7 @@ strings! {
     set_mode_merged: "Traccia unica (mix)", "Single track (mix)";
     set_add_mix: "Aggiungi in testa una traccia «Mix»", "Add a leading \"Mix\" track";
     set_add_source: "Aggiungi sorgente", "Add source";
-    set_sources_hint: "Fino a 8 sorgenti, nell'ordine delle tracce. Volume 100% = invariato.", "Up to 8 sources, in track order. Volume 100% = unchanged.";
+    set_sources_hint: "Fino a 8 sorgenti, nell'ordine delle tracce. Volume 100% = invariato; a destra il ritardo in ms (da -1000 a 1000) per compensare la latenza.", "Up to 8 sources, in track order. Volume 100% = unchanged; on the right the delay in ms (-1000 to 1000) to compensate latency.";
     set_kind_app: "App", "App";
     set_kind_input: "Ingresso", "Input";
     set_kind_output: "Uscita", "Output";
@@ -103,6 +103,9 @@ strings! {
     set_fmt_flac: "FLAC, un file per traccia", "FLAC, one file per track";
     set_fmt_wav: "WAV, un file per traccia", "WAV, one file per track";
     set_fmt_mka: "MKA unico multitraccia", "Single multi-track MKA";
+    set_fmt_polywav: "WAV polifonico unico (multitraccia)", "Single polyphonic WAV (multi-track)";
+    set_fmt_opus: "Opus, un file per traccia", "Opus, one file per track";
+    set_fmt_aac: "AAC, un file per traccia", "AAC, one file per track";
     set_container: "Contenitore video", "Video container";
     set_ram_max: "Tetto di RAM dei buffer (MB)", "Buffer RAM cap (MB)";
     set_ram_auto: "Automatico (stima)", "Automatic (estimate)";
@@ -138,6 +141,7 @@ pub fn problem_text(lang: Lang, p: &Problem) -> String {
         Problem::HotkeyEmpty(_) => t("Manca la hotkey della clip audio.", "The audio clip hotkey is missing."),
         Problem::BadPad(_) => t("Combinazione del controller non valida: usa solo A B X Y LB RB LS RS Back Start DPadUp DPadDown DPadLeft DPadRight separati da +.", "Invalid controller combination: use only A B X Y LB RB LS RS Back Start DPadUp DPadDown DPadLeft DPadRight separated by +."),
         Problem::SamePad => t("Le due combinazioni del controller devono essere diverse.", "The two controller combinations must be different."),
+        Problem::BadDelay(i) => format!("{} {}", t("Il ritardo deve stare tra -1000 e 1000 ms nella sorgente audio", "The delay must be between -1000 and 1000 ms in audio source"), i + 1),
         Problem::SameHotkey => t("Le due hotkey devono essere diverse.", "The two hotkeys must be different."),
         Problem::BadBitrate => t("Tetto di bitrate non valido (numero intero in kbit/s, o vuoto).", "Invalid bitrate cap (whole kbit/s, or empty)."),
         Problem::BadMaxMb => t("Tetto di RAM non valido (numero intero in MB, o vuoto).", "Invalid RAM cap (whole MB, or empty)."),

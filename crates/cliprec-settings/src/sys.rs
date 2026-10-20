@@ -111,12 +111,19 @@ fn open_windows() -> Vec<WindowInfo> {
     list
 }
 
+/// Etichetta dell'elenco finestre: il titolo (che è il valore salvato) più l'eseguibile.
+pub fn window_label(title: &str, exe: &str) -> String {
+    if exe.is_empty() { title.to_string() } else { format!("{title}  ·  {exe}") }
+}
+
 /// Titoli delle finestre visibili.
 pub fn window_titles() -> Vec<Choice> {
-    let mut v: Vec<Choice> =
-        open_windows().into_iter().map(|w| Choice { label: w.title.clone(), value: w.title }).collect();
+    let mut v: Vec<Choice> = open_windows()
+        .into_iter()
+        .map(|w| Choice { label: window_label(&w.title, &w.exe), value: w.title })
+        .collect();
     v.sort_by(|a, b| a.label.to_lowercase().cmp(&b.label.to_lowercase()));
-    v.dedup_by(|a, b| a.value == b.value);
+    v.dedup_by(|a, b| a.label == b.label);
     v
 }
 
@@ -178,6 +185,14 @@ pub fn pick_folder() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn window_label_shows_the_executable() {
+        assert_eq!(super::window_label("Documento - Blocco note", "notepad.exe"), "Documento - Blocco note  ·  notepad.exe");
+        assert_eq!(super::window_label("Senza exe", ""), "Senza exe");
+        // Due finestre con lo stesso titolo si distinguono dall'eseguibile.
+        assert_ne!(super::window_label("Nuova scheda", "chrome.exe"), super::window_label("Nuova scheda", "msedge.exe"));
+    }
+
     #[test]
     fn helper_lists_work_on_this_machine() {
         super::init_com();
