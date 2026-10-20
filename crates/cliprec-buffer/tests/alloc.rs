@@ -1,7 +1,10 @@
 //! Allocazioni nel percorso caldo, contate con un allocatore globale (binario di test a parte).
+//! Si contano solo le allocazioni del thread che chiama `push` (il thread di cattura), non
+//! quelle del thread di compressione FLAC.
 #![allow(clippy::unwrap_used)]
 
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use cliprec_buffer::{BufferConfig, ReplayBuffer};
@@ -13,11 +16,17 @@ struct Counting;
 static ALLOCS: AtomicUsize = AtomicUsize::new(0);
 static BYTES: AtomicUsize = AtomicUsize::new(0);
 
-// SAFETY: delega tutto a `System`, aggiunge solo due contatori atomici.
+thread_local! {
+    static COUNTING: Cell<bool> = const { Cell::new(false) };
+}
+
+// SAFETY: delega tutto a `System`, aggiunge solo contatori atomici e un flag per thread.
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOCS.fetch_add(1, Ordering::Relaxed);
-        BYTES.fetch_add(layout.size(), Ordering::Relaxed);
+        if COUNTING.try_with(Cell::get).unwrap_or(false) {
+            ALLOCS.fetch_add(1, Ordering::Relaxed);
+            BYTES.fetch_add(layout.size(), Ordering::Relaxed);
+        }
         // SAFETY: stesso contratto di `GlobalAlloc::alloc`.
         unsafe { System.alloc(layout) }
     }
@@ -30,9 +39,12 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static GLOBAL: Counting = Counting;
 
+/// Allocazioni fatte da questo thread durante `f`.
 fn counted(f: impl FnOnce()) -> (usize, usize) {
     let (a, b) = (ALLOCS.load(Ordering::Relaxed), BYTES.load(Ordering::Relaxed));
+    COUNTING.with(|c| c.set(true));
     f();
+    COUNTING.with(|c| c.set(false));
     (ALLOCS.load(Ordering::Relaxed) - a, BYTES.load(Ordering::Relaxed) - b)
 }
 
@@ -61,7 +73,8 @@ fn hot_path_allocations() {
     println!("video: {video_allocs} allocazioni in 600 pacchetti a regime");
     assert_eq!(video_allocs, 0);
 
-    // Audio: misura delle allocazioni di flacenc per blocco da 4096 frame.
+    // Audio (M7): il thread di cattura non deve allocare a regime, nemmeno quando si completa un
+    // blocco FLAC da 4096 frame.
     b.set_tracks(&["A".into()]);
     let chunk: Vec<f32> = (0..960).map(|i| (i as f32 * 0.01).sin() * 0.5).collect();
     let mut f = 0i64;
@@ -69,11 +82,13 @@ fn hot_path_allocations() {
         for _ in 0..n {
             b.push(0, QpcTime(frames_to_hns(f)), &chunk);
             f += 480;
+            // Ritmo reale (10 ms) non serve: basta lasciare al compressore il tempo di svuotare.
+            std::thread::sleep(std::time::Duration::from_micros(200));
         }
     };
     push_audio(400); // 4 s: il ring audio è pieno e ricicla i blocchi
     let blocks = 100 * 480 / 4096;
     let (allocs, bytes) = counted(|| push_audio(100));
-    println!("audio: {allocs} allocazioni, {bytes} B per {blocks} blocchi FLAC ({} per blocco, {} B per blocco)", allocs / blocks, bytes / blocks);
-    assert!(allocs / blocks < 1_000);
+    println!("audio: {allocs} allocazioni ({bytes} B) sul thread di cattura in {blocks} blocchi FLAC");
+    assert_eq!(allocs, 0, "allocazioni sul thread di cattura");
 }

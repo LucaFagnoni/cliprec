@@ -934,6 +934,7 @@ dependencies = [
  "cliprec-core",
  "flacenc",
  "proptest",
+ "rtrb",
  "thiserror 2.0.21",
  "tracing",
  "windows",
