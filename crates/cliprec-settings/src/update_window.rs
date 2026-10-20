@@ -163,6 +163,7 @@ pub fn run(lang: Lang) -> anyhow::Result<()> {
             let _ = pipe::request(&IpcRequest::InstallUpdate);
         });
     });
+    let _repaint = crate::repaint_after_restore(&ui, |ui| ui.set_repaint(!ui.get_repaint()));
     let weak = ui.as_weak();
     std::thread::spawn(move || {
         let mut tracker = Tracker::default();

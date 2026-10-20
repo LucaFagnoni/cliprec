@@ -51,7 +51,13 @@ fn main() -> anyhow::Result<()> {
     };
 
     i18n::set_from_config("auto");
-    let startup = startup::startup_config(&shell::config_path(), cliprec_audio::find_root_pid("Discord.exe").is_some(), !notify::headless() && autostart::run_value_present());
+    let installer_language = if notify::headless() { None } else { sys::take_installer_language() };
+    let startup = startup::startup_config(
+        &shell::config_path(),
+        cliprec_audio::find_root_pid("Discord.exe").is_some(),
+        !notify::headless() && autostart::run_value_present(),
+        installer_language.as_deref(),
+    );
     let config = startup.config.clone();
     open_settings_if_needed(startup.open_settings);
 

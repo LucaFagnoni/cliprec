@@ -1096,6 +1096,11 @@ export component SettingsWindow inherits Window {
             }
         }
     }
+    // Il renderer software, dopo riduci/ripristina, ridisegna solo le zone cambiate ma Windows ha
+    // già svuotato il buffer: la finestra resta trasparente. Cambiare questo velo invisibile
+    // (alfa 1/255) dal codice rende sporca tutta la finestra e la ridisegna intera.
+    in property <bool> repaint;
+    Rectangle { x: 0; y: 0; width: root.width; height: root.height; background: root.repaint ? #00000001 : #00000000; }
 }
 
 // Finestra di aggiornamento (`cliprec-settings --aggiornamento`): stesso tema delle impostazioni.
@@ -1178,4 +1183,9 @@ export component UpdateWindow inherits Window {
             }
         }
     }
+    // Il renderer software, dopo riduci/ripristina, ridisegna solo le zone cambiate ma Windows ha
+    // già svuotato il buffer: la finestra resta trasparente. Cambiare questo velo invisibile
+    // (alfa 1/255) dal codice rende sporca tutta la finestra e la ridisegna intera.
+    in property <bool> repaint;
+    Rectangle { x: 0; y: 0; width: root.width; height: root.height; background: root.repaint ? #00000001 : #00000000; }
 }

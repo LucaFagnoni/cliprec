@@ -271,6 +271,26 @@ pub fn ping_first_instance() {
     }
 }
 
+/// Titoli delle finestre di cliprec-settings (impostazioni e aggiornamenti, nelle due lingue):
+/// uguali a `window-title` in cliprec-settings/src/i18n.rs e a `update_window::TITLES`.
+const SETTINGS_TITLES: [&str; 4] = ["ClipRec · Impostazioni", "ClipRec · Settings", "ClipRec · Aggiornamenti", "ClipRec · Updates"];
+
+/// Chiude le finestre di cliprec-settings (con «Esci» dalla tray non devono restare aperte su un
+/// core che non c'è più). WM_CLOSE come la X della finestra.
+pub fn close_settings_windows() {
+    use windows::Win32::Foundation::{LPARAM, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, WM_CLOSE};
+    for title in SETTINGS_TITLES {
+        let title = wide(title);
+        // SAFETY: stringa terminata da NUL valida per la chiamata; PostMessage verso un HWND trovato è sicuro.
+        unsafe {
+            if let Ok(hwnd) = FindWindowW(None, PCWSTR(title.as_ptr())) {
+                let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+            }
+        }
+    }
+}
+
 /// Apre un file o una cartella con l'app predefinita di Windows.
 pub fn open_path(path: &Path) {
     let wpath = wide(&path.to_string_lossy());
@@ -280,6 +300,28 @@ pub fn open_path(path: &Path) {
     if r.0 as usize <= 32 {
         tracing::warn!(path = %path.display(), code = r.0 as usize, "apertura fallita");
     }
+}
+
+const INSTALLER_KEY: windows::core::PCWSTR = windows::core::w!(r"Software\ClipRec");
+const INSTALLER_VALUE: windows::core::PCWSTR = windows::core::w!("InstallerLanguage");
+
+/// Lingua scelta nell'installer (`italian`/`english`, valore `HKCU\Software\ClipRec\InstallerLanguage`),
+/// letta una sola volta: il valore viene cancellato, così una scelta successiva nelle impostazioni resta.
+pub fn take_installer_language() -> Option<String> {
+    use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_SZ, RegDeleteKeyValueW, RegGetValueW};
+    let mut buf = [0u16; 32];
+    let mut size = std::mem::size_of_val(&buf) as u32;
+    // SAFETY: buffer e dimensione validi per tutta la chiamata; chiave e valore sono stringhe statiche.
+    let read = unsafe {
+        RegGetValueW(HKEY_CURRENT_USER, INSTALLER_KEY, INSTALLER_VALUE, RRF_RT_REG_SZ, None, Some(buf.as_mut_ptr().cast()), Some(&mut size))
+    };
+    if read.is_err() {
+        return None;
+    }
+    // SAFETY: come sopra.
+    let _ = unsafe { RegDeleteKeyValueW(HKEY_CURRENT_USER, INSTALLER_KEY, INSTALLER_VALUE) };
+    let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    Some(String::from_utf16_lossy(&buf[..len]))
 }
 
 #[cfg(test)]

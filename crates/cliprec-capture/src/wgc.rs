@@ -48,9 +48,13 @@ fn borderless_allowed() -> bool {
         }
         let status = GraphicsCaptureAccess::RequestAccessAsync(GraphicsCaptureAccessKind::Borderless).and_then(|op| op.join());
         match status {
-            Ok(s) => s == AppCapabilityAccessStatus::Allowed,
+            Ok(s) if s == AppCapabilityAccessStatus::Allowed => true,
+            Ok(s) => {
+                tracing::warn!("Windows non concede la cattura senza bordo giallo: {s:?}");
+                false
+            }
             Err(e) => {
-                tracing::debug!("permesso senza bordo non disponibile: {e}");
+                tracing::warn!("permesso senza bordo giallo non disponibile: {e}");
                 false
             }
         }
@@ -146,7 +150,7 @@ impl WgcCapture {
             && borderless_allowed()
             && let Err(e) = session.SetIsBorderRequired(false)
         {
-            tracing::debug!("bordo giallo non disattivato: {e}");
+            tracing::warn!("bordo giallo non disattivato: {e}");
         }
         if has_min_update_interval() {
             // Mai il default: su 24H2 a 144 Hz il default può fermarsi intorno ai 50 fps.

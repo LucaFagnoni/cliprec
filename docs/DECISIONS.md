@@ -202,3 +202,17 @@ Le voci [DEFAULT] e [PROPOSTA] di SPEC.md valgono come decise; qui ci sono quell
     (core aggiornato mentre era aperta) si riapre dall'eseguibile nuovo sulla stessa pagina, una
     volta sola; con modifiche non salvate avvisa invece di chiudersi. Il menu dei codec scrive la
     scheda che codifica («HEVC · AMD»): sulle RX 6000 non c'è AV1, quindi H.264 e HEVC sono già AMF.
+41. **Monitor con Desktop Duplication, tetto del buffer dalla RAM totale** (20 ottobre, prove di gioco
+    di Luca e di un tester AMD). Il monitor si cattura con DDA e WGC resta il ripiego (portatili
+    ibridi, DDA non disponibile), come «Cattura schermo» di OBS sui PC fissi: WGC sul monitor mostrava
+    il bordo giallo durante il gioco e, con il fullscreen esclusivo, frame neri; DDA vede tutto e
+    costa meno. Su DDA del monitor i frame neri sono contenuto vero (caricamenti): niente avviso. Il
+    tetto del buffer era metà della RAM *libera* al momento della creazione: all'avvio di un gioco
+    scendeva a poche decine di MB e la clip copriva 20-30 s. Ora è un quarto della RAM fisica (l'arena
+    cresce solo quando serve) e l'avviso resta solo per un limite scelto dall'utente. Con priorità GPU
+    alta il processo passa anche a «sopra il normale»: nei caricamenti la CPU satura faceva perdere
+    tick al pacer e mettere in ritardo il compressore FLAC. La lingua scelta nell'installer va nel
+    registro (`HKCU\Software\ClipRec\InstallerLanguage`) e ClipRec la adotta una volta all'avvio;
+    «Esci» dalla tray chiude anche le finestre di impostazioni e aggiornamento. Il renderer software di
+    Slint dopo riduci/ripristina ridisegna solo le zone cambiate su un buffer svuotato: al ripristino
+    un velo invisibile cambia e la finestra si ridisegna intera.

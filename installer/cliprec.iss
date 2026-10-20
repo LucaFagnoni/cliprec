@@ -6,7 +6,7 @@
 #define AppName "ClipRec"
 ; Da `ISCC /DAppVersion=x.y.z`; altrimenti questa.
 #ifndef AppVersion
-  #define AppVersion "0.1.5"
+  #define AppVersion "0.1.6"
 #endif
 #define AppExe "cliprec-app.exe"
 ; Uguale a APP_ID in crates/cliprec-app/src/notify.rs (serve ai toast).
@@ -47,8 +47,20 @@ RestartApplications=no
 Name: "italian"; MessagesFile: "compiler:Languages\Italian.isl"
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
+[CustomMessages]
+italian.TaskAutostart=Avvia ClipRec con Windows
+english.TaskAutostart=Start ClipRec with Windows
+italian.RunApp=Avvia ClipRec
+english.RunApp=Start ClipRec
+italian.VCRedistStatus=Installazione del runtime Visual C++ (richiede l'autorizzazione di Windows)...
+english.VCRedistStatus=Installing the Visual C++ runtime (Windows will ask for permission)...
+italian.VCRedistFailed=Impossibile scaricare il runtime Visual C++ (%1).%nClipRec funziona lo stesso; potrai installarlo più tardi da %2
+english.VCRedistFailed=Could not download the Visual C++ runtime (%1).%nClipRec works anyway; you can install it later from %2
+italian.DeleteData=Eliminare anche configurazione e log di ClipRec (%APPDATA%\ClipRec e %LOCALAPPDATA%\ClipRec)?%nLe clip salvate non vengono toccate.
+english.DeleteData=Also delete ClipRec's settings and logs (%APPDATA%\ClipRec and %LOCALAPPDATA%\ClipRec)?%nSaved clips are not touched.
+
 [Tasks]
-Name: "autostart"; Description: "Avvia ClipRec con Windows"; Flags: unchecked
+Name: "autostart"; Description: "{cm:TaskAutostart}"; Flags: unchecked
 
 [Files]
 Source: "..\target\dist\ClipRec\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs
@@ -67,10 +79,12 @@ Name: "{userprograms}\{#AppName}"; Filename: "{app}\{#AppExe}"; AppUserModelID: 
 ; a config.general.start_with_windows. Argomento --tray come in autostart.rs.
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "ClipRec"; \
   ValueData: """{app}\{#AppExe}"" --tray"; Flags: uninsdeletevalue; Tasks: autostart
+; Lingua scelta qui: ClipRec la legge al primo avvio, la scrive in config.toml e cancella il valore.
+Root: HKCU; Subkey: "Software\ClipRec"; ValueType: string; ValueName: "InstallerLanguage"; ValueData: "{language}"; Flags: uninsdeletekey
 
 [Run]
-Filename: "{tmp}\vc_redist.x64.exe"; Parameters: "/install /quiet /norestart"; StatusMsg: "Installazione del runtime Visual C++ (richiede l'autorizzazione di Windows)..."; Check: VCRedistDownloaded
-Filename: "{app}\{#AppExe}"; Parameters: "--tray"; Description: "Avvia ClipRec"; Flags: nowait postinstall skipifsilent
+Filename: "{tmp}\vc_redist.x64.exe"; Parameters: "/install /quiet /norestart"; StatusMsg: "{cm:VCRedistStatus}"; Check: VCRedistDownloaded
+Filename: "{app}\{#AppExe}"; Parameters: "--tray"; Description: "{cm:RunApp}"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
 ; Chiude l'app prima di rimuovere i file.
@@ -123,8 +137,7 @@ begin
       RedistReady := True;
     except
       if not DownloadPage.AbortedByUser then
-        SuppressibleMsgBox('Impossibile scaricare il runtime Visual C++ (' + GetExceptionMessage + ').' + #13#10 +
-          'ClipRec funziona lo stesso; potrai installarlo più tardi da ' + VCRedistUrl, mbInformation, MB_OK, IDOK);
+        SuppressibleMsgBox(FmtMessage(CustomMessage('VCRedistFailed'), [GetExceptionMessage, VCRedistUrl]), mbInformation, MB_OK, IDOK);
     end;
   finally
     DownloadPage.Hide;
@@ -137,8 +150,7 @@ procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
   if CurUninstallStep = usPostUninstall then
     if (not UninstallSilent) and
-       (MsgBox('Eliminare anche configurazione e log di ClipRec (%APPDATA%\ClipRec e %LOCALAPPDATA%\ClipRec)?' + #13#10 +
-               'Le clip salvate non vengono toccate.', mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES) then
+       (MsgBox(CustomMessage('DeleteData'), mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES) then
     begin
       DelTree(ExpandConstant('{userappdata}\ClipRec'), True, True, True);
       DelTree(ExpandConstant('{localappdata}\ClipRec'), True, True, True);

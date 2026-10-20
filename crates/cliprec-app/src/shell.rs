@@ -519,6 +519,7 @@ fn build_ui(app: &Arc<App>, hwnd: HWND) -> anyhow::Result<Ui> {
             }
         },
         "quit" => {
+            crate::sys::close_settings_windows();
             h_app.send(AppCommand::Quit);
             // SAFETY: il gestore gira sul thread del loop di messaggi.
             unsafe { PostQuitMessage(0) };

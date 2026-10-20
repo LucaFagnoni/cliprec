@@ -240,6 +240,24 @@ fn hotkey_warning(lang: Lang, c: &Config) -> String {
     parts.join("\n")
 }
 
+/// Dopo riduci/ripristina il renderer software ridisegna solo le zone cambiate, ma Windows ha
+/// svuotato il buffer e la finestra resta trasparente: al ripristino `toggle` cambia il velo
+/// `repaint` (vedi settings.slint) e la finestra si ridisegna intera.
+pub fn repaint_after_restore<C: ComponentHandle + 'static>(ui: &C, toggle: impl Fn(&C) + 'static) -> Timer {
+    let timer = Timer::default();
+    let weak = ui.as_weak();
+    let mut was_minimized = false;
+    timer.start(TimerMode::Repeated, Duration::from_millis(100), move || {
+        let Some(ui) = weak.upgrade() else { return };
+        let minimized = ui.window().is_minimized();
+        if was_minimized && !minimized {
+            toggle(&ui);
+        }
+        was_minimized = minimized;
+    });
+    timer
+}
+
 fn main() -> anyhow::Result<()> {
     // Renderer software: niente driver GPU nel processo, quindi meno RAM. Se non disponibile
     // resta la scelta predefinita di Slint.
@@ -525,6 +543,8 @@ fn main() -> anyhow::Result<()> {
             });
         }
     });
+
+    let _repaint = repaint_after_restore(&ui, |ui| ui.set_repaint(!ui.get_repaint()));
 
     // Stima della RAM e avvisi sulle hotkey, ricalcolati mentre l'utente modifica i campi.
     let tick = Timer::default();

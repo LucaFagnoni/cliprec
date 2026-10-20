@@ -103,9 +103,8 @@ impl Shared {
     }
 }
 
-/// Buffer dimensionato dalla configurazione; con poca RAM libera il tetto scende e un avviso lo dice.
-/// `reclaim`: byte del buffer che questo sostituisce, ancora vivo durante la misura della RAM libera.
-pub fn new_buffer(config: &Config, events: &Sender<EngineEvent>, reclaim: usize) -> Arc<ReplayBuffer> {
+/// Buffer dimensionato dalla configurazione, con un tetto pari a un quarto della RAM del PC.
+pub fn new_buffer(config: &Config, events: &Sender<EngineEvent>) -> Arc<ReplayBuffer> {
     let audio_seconds = f64::from(config.clips.audio_seconds.max(config.clips.video_seconds));
     let video_seconds = f64::from(config.clips.video_seconds);
     // Senza tetto esplicito: stima generosa col bitrate massimo predefinito più alto (H.264 4K).
@@ -120,27 +119,31 @@ pub fn new_buffer(config: &Config, events: &Sender<EngineEvent>, reclaim: usize)
             BufferConfig::estimate_bytes(u64::from(kbps) * 1000, video_seconds, audio_seconds, config.audio.sources.len() + 1)
         }
     };
-    // ponytail: avviso e tetto ridotto a metà della RAM libera invece della proposta interattiva della
-    // specifica; la finestra impostazioni mostra già la stima per scegliere durata e qualità.
-    let available = available_ram().saturating_add(reclaim);
-    let max_bytes = if available > 0 && wanted > available / 2 {
+    let max_bytes = buffer_cap(wanted, total_ram());
+    // La stima automatica è volutamente larga (bitrate massimo 4K): ridurla in silenzio è normale.
+    // Un limite scelto dall'utente che non sta nel tetto invece si segnala.
+    if config.memory.max_mb.is_some() && max_bytes < wanted {
         let _ = events.send(EngineEvent::Warning(tr(
             K::EngRamLow,
-            &[&(wanted >> 20).to_string(), &((available / 2) >> 20).to_string()],
+            &[&(wanted >> 20).to_string(), &(max_bytes >> 20).to_string()],
         )));
-        available / 2
-    } else {
-        wanted
-    };
+    }
     Arc::new(ReplayBuffer::new(BufferConfig { video_seconds, audio_seconds, max_bytes, lock_pages: config.memory.lock_pages }))
 }
 
-fn available_ram() -> usize {
+/// Tetto del buffer: `wanted`, ma al massimo un quarto della RAM fisica (`total`, 0 = ignota).
+/// Mai dalla RAM libera del momento: all'avvio di un gioco può scendere a poche decine di MB e il
+/// buffer resterebbe minuscolo per tutta la sessione, mentre l'arena cresce solo quando serve.
+fn buffer_cap(wanted: usize, total: usize) -> usize {
+    if total == 0 { wanted } else { wanted.min(total / 4) }
+}
+
+fn total_ram() -> usize {
     use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
     let mut m = MEMORYSTATUSEX { dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32, ..Default::default() };
     // SAFETY: struttura valida con dwLength impostato come richiesto dall'API.
     match unsafe { GlobalMemoryStatusEx(&mut m) } {
-        Ok(()) => usize::try_from(m.ullAvailPhys).unwrap_or(usize::MAX),
+        Ok(()) => usize::try_from(m.ullTotalPhys).unwrap_or(usize::MAX),
         Err(_) => 0,
     }
 }
@@ -241,8 +244,16 @@ impl Session {
         let (device, mut source) = opened?;
         // Un flag nuovo per ogni avvio: un thread di apertura dell'avvio precedente non tocca più il buffer.
         self.alive = Arc::new(Mutex::new(true));
-        if let Err(e) = cliprec_encode::set_gpu_priority(&device, self.config.general.gpu_priority != "normal") {
+        let high = self.config.general.gpu_priority != "normal";
+        if let Err(e) = cliprec_encode::set_gpu_priority(&device, high) {
             tracing::warn!("priorità GPU: {e}");
+        }
+        // Mentre un gioco carica, CPU satura: con la classe normale pacer e compressore FLAC restano
+        // indietro e i tick si perdono. «Sopra il normale» come l'opzione di OBS, mai «alta».
+        use windows::Win32::System::Threading::{ABOVE_NORMAL_PRIORITY_CLASS, GetCurrentProcess, NORMAL_PRIORITY_CLASS, SetPriorityClass};
+        // SAFETY: pseudo-handle del processo corrente, sempre valida.
+        if let Err(e) = unsafe { SetPriorityClass(GetCurrentProcess(), if high { ABOVE_NORMAL_PRIORITY_CLASS } else { NORMAL_PRIORITY_CLASS }) } {
+            tracing::warn!("priorità del processo: {e}");
         }
         self.probe_codecs(&device);
         let on_frame = video_callback(
@@ -975,7 +986,7 @@ pub fn run(
     };
     // Il buffer esiste solo con la registrazione attiva: «Ferma buffer» ne restituisce la RAM (m11).
     let start = |config: &Config, buffer: &mut Option<Arc<ReplayBuffer>>| {
-        let b = buffer.get_or_insert_with(|| new_buffer(config, &events, 0)).clone();
+        let b = buffer.get_or_insert_with(|| new_buffer(config, &events)).clone();
         match Session::start(config, b, shared.clone(), SourceOverrides::default(), events.clone()) {
             Ok(s) => Some(s),
             Err(e) => {
@@ -1050,9 +1061,9 @@ pub fn run(
                         session = start(&config, &mut buffer);
                     } else if scope.buffer {
                         drop(session.take());
-                        let reclaim = buffer.take().map(|b| b.stats().bytes).unwrap_or(0);
+                        buffer = None;
                         if was_running {
-                            buffer = Some(new_buffer(&config, &events, reclaim));
+                            buffer = Some(new_buffer(&config, &events));
                             session = start(&config, &mut buffer);
                         }
                     } else if let Some(s) = session.as_mut() {
@@ -1122,7 +1133,7 @@ pub fn run_test_clip(mut config: Config, seconds: u32, synthetic: bool, out: Pat
         ]);
     }
     let (tx, rx) = std::sync::mpsc::channel();
-    let buffer = new_buffer(&config, &tx, 0);
+    let buffer = new_buffer(&config, &tx);
     let session = Session::start(&config, buffer, Shared::default(), overrides, tx)?;
     std::thread::sleep(Duration::from_secs(u64::from(seconds)));
     let handles: Vec<_> = [ClipKind::Video, ClipKind::Audio]
@@ -1162,7 +1173,7 @@ pub fn run_soak(mut config: Config, minutes: u32, out: PathBuf) -> anyhow::Resul
         ]),
     };
     let (tx, rx) = std::sync::mpsc::channel();
-    let buffer = new_buffer(&config, &tx, 0);
+    let buffer = new_buffer(&config, &tx);
     let session = Session::start(&config, buffer, Shared::default(), overrides, tx)?;
     let mut csv = std::fs::File::create(out.join("sessione-lunga.csv"))?;
     writeln!(csv, "minuto,memoria_privata_mb,buffer_mb,video_s,audio_s,frame_consegnati,frame_ripetuti,frame_persi,clip")?;
@@ -1228,6 +1239,16 @@ mod tests {
         HEAVY.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    /// Il tetto dipende dalla RAM totale, non da quella libera all'avvio di un gioco.
+    #[test]
+    fn buffer_cap_follows_total_ram() {
+        const GB: usize = 1 << 30;
+        assert_eq!(buffer_cap(GB, 16 * GB), GB);
+        assert_eq!(buffer_cap(8 * GB, 16 * GB), 4 * GB);
+        assert_eq!(buffer_cap(GB, 0), GB, "RAM ignota: nessun tetto");
+        assert!(total_ram() >= GB, "{}", total_ram());
+    }
+
     #[test]
     fn clip_names_are_valid_file_names() {
         let n = clip_name("{game}_{date}_{time}", ClipKind::Video, Some("a:b".into()));
@@ -1280,7 +1301,7 @@ mod tests {
             video: Some((GpuDevice::create(None).unwrap(), Box::new(FailingSource))),
             audio: Some(beeps()),
         };
-        let session = Session::start(&config, new_buffer(&config, &tx, 0), Shared::default(), overrides, tx).unwrap();
+        let session = Session::start(&config, new_buffer(&config, &tx), Shared::default(), overrides, tx).unwrap();
         assert!(session.video.is_none());
         std::thread::sleep(Duration::from_secs(3));
         session.save(ClipKind::Audio, 2).unwrap().join().unwrap();
@@ -1301,7 +1322,7 @@ mod tests {
         config.video.enabled = false;
         let (tx, rx) = std::sync::mpsc::channel();
         let overrides = SourceOverrides { video: None, audio: Some(beeps()) };
-        let session = Session::start(&config, new_buffer(&config, &tx, 0), Shared::default(), overrides, tx).unwrap();
+        let session = Session::start(&config, new_buffer(&config, &tx), Shared::default(), overrides, tx).unwrap();
         std::thread::sleep(Duration::from_millis(1500));
         if let Some(h) = session.save(ClipKind::Audio, 1) {
             h.join().unwrap();
@@ -1322,7 +1343,7 @@ mod tests {
         let device = GpuDevice::create(None).unwrap();
         let video = cliprec_capture::SyntheticSource::new(device.clone(), 1280, 720);
         let overrides = SourceOverrides { video: Some((device, Box::new(video))), audio: Some(beeps()) };
-        let session = Session::start(&config, new_buffer(&config, &tx, 0), Shared::default(), overrides, tx).unwrap();
+        let session = Session::start(&config, new_buffer(&config, &tx), Shared::default(), overrides, tx).unwrap();
         std::thread::sleep(Duration::from_secs(4));
         let a = session.save(ClipKind::Video, 2).unwrap();
         let b = session.save(ClipKind::Video, 2).unwrap();
@@ -1384,7 +1405,7 @@ mod tests {
         let device = GpuDevice::create(None).unwrap();
         let video = StallBeforeFlash(cliprec_capture::SyntheticSource::new(device.clone(), 1280, 720));
         let overrides = SourceOverrides { video: Some((device, Box::new(video))), audio: Some(beeps()) };
-        let session = Session::start(&config, new_buffer(&config, &tx, 0), Shared::default(), overrides, tx).unwrap();
+        let session = Session::start(&config, new_buffer(&config, &tx), Shared::default(), overrides, tx).unwrap();
         std::thread::sleep(Duration::from_secs(7));
         let dropped = session.video.as_ref().map(|v| v.stats().frames_dropped).unwrap_or(0);
         session.save(ClipKind::Video, 5).unwrap().join().unwrap();
@@ -1421,7 +1442,7 @@ mod tests {
             let device = GpuDevice::create(None).unwrap();
             let video = cliprec_capture::SyntheticSource::new(device.clone(), 1280, 720);
             let overrides = SourceOverrides { video: Some((device, Box::new(video))), audio: Some(beeps()) };
-            let session = Session::start(&config, new_buffer(&config, &tx, 0), Shared::default(), overrides, tx).unwrap();
+            let session = Session::start(&config, new_buffer(&config, &tx), Shared::default(), overrides, tx).unwrap();
             std::thread::sleep(Duration::from_secs(5));
             session.save(ClipKind::Video, 3).unwrap().join().unwrap();
             let clip = rx
@@ -1616,7 +1637,7 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         let device = GpuDevice::create(None).unwrap();
         let video = cliprec_capture::SyntheticSource::new(device.clone(), 1280, 720);
-        let buffer = new_buffer(config, &tx, 0);
+        let buffer = new_buffer(config, &tx);
         let overrides = SourceOverrides { video: Some((device, Box::new(video))), audio: Some(beeps()) };
         let session = Session::start(config, buffer.clone(), shared, overrides, tx).unwrap();
         (session, buffer, rx)
@@ -1637,7 +1658,7 @@ mod tests {
             device: device.clone(),
             small_for: 600,
         };
-        let buffer = new_buffer(&config, &tx, 0);
+        let buffer = new_buffer(&config, &tx);
         let overrides = SourceOverrides { video: Some((device, Box::new(video))), audio: Some(beeps()) };
         let session = Session::start(&config, buffer.clone(), Shared::default(), overrides, tx).unwrap();
         std::thread::sleep(Duration::from_millis(2000));
@@ -1658,7 +1679,7 @@ mod tests {
         let (tx, _rx) = std::sync::mpsc::channel();
         let device = GpuDevice::create(None).unwrap();
         let video = cliprec_capture::SyntheticSource::new(device.clone(), 2560, 1440);
-        let buffer = new_buffer(&config, &tx, 0);
+        let buffer = new_buffer(&config, &tx);
         let overrides = SourceOverrides { video: Some((device, Box::new(video))), audio: Some(beeps()) };
         let session = Session::start(&config, buffer.clone(), Shared::default(), overrides, tx).unwrap();
         std::thread::sleep(Duration::from_millis(2000));
@@ -1675,7 +1696,7 @@ mod tests {
         config.clips.folder = Some(fault_dir("m6"));
         let (tx, rx) = std::sync::mpsc::channel();
         let device = GpuDevice::create(None).unwrap();
-        let buffer = new_buffer(&config, &tx, 0);
+        let buffer = new_buffer(&config, &tx);
         let overrides = SourceOverrides { video: Some((device, Box::new(NeverSource))), audio: Some(beeps()) };
         let session = Session::start(&config, buffer, Shared::default(), overrides, tx).unwrap();
         std::thread::sleep(Duration::from_millis(2500));
@@ -1761,7 +1782,7 @@ mod tests {
         config.video.enabled = false;
         let (tx, rx) = std::sync::mpsc::channel();
         let overrides = SourceOverrides { video: None, audio: Some(beeps()) };
-        let session = Session::start(&config, new_buffer(&config, &tx, 0), Shared::default(), overrides, tx).unwrap();
+        let session = Session::start(&config, new_buffer(&config, &tx), Shared::default(), overrides, tx).unwrap();
         std::thread::sleep(Duration::from_millis(1500));
         let handle = session.save(ClipKind::Audio, 1);
         assert!(handle.is_some(), "lo snapshot deve precedere l'accesso al disco");
@@ -1806,7 +1827,7 @@ mod tests {
         config.audio.mode = TrackMode::Merged;
         config.clips.folder = Some(fault_dir("m3"));
         let (tx, _rx) = std::sync::mpsc::channel();
-        let buffer = new_buffer(&config, &tx, 0);
+        let buffer = new_buffer(&config, &tx);
         let sources: Vec<Box<dyn cliprec_core::AudioSource>> =
             vec![Box::new(ConstantTone::new("A")), Box::new(ConstantTone::new("B"))];
         let overrides = SourceOverrides { video: None, audio: Some(sources) };
@@ -1835,7 +1856,7 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         let device = GpuDevice::create(None).unwrap();
         let video = cliprec_capture::SyntheticSource::new(device.clone(), 1280, 720);
-        let buffer = new_buffer(&config, &tx, 0);
+        let buffer = new_buffer(&config, &tx);
         let sources: Vec<Box<dyn cliprec_core::AudioSource>> = vec![Box::new(ConstantTone::late("A", 500))];
         let overrides = SourceOverrides { video: Some((device, Box::new(video))), audio: Some(sources) };
         let session = Session::start(&config, buffer, Shared::default(), overrides, tx).unwrap();
@@ -2035,7 +2056,7 @@ video_seconds = = 30").unwrap();
         let device = GpuDevice::create(None).unwrap();
         let video = StallEvery(cliprec_capture::SyntheticSource::new(device.clone(), 1280, 720));
         let overrides = SourceOverrides { video: Some((device, Box::new(video))), audio: Some(beeps()) };
-        let mut session = Session::start(&config, new_buffer(&config, &tx, 0), Shared::default(), overrides, tx).unwrap();
+        let mut session = Session::start(&config, new_buffer(&config, &tx), Shared::default(), overrides, tx).unwrap();
         std::thread::sleep(Duration::from_secs(1));
         session.measure();
         std::thread::sleep(Duration::from_secs(2));

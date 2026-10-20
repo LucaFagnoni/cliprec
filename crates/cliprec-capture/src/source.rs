@@ -119,8 +119,8 @@ pub fn open_source(cfg: &VideoConfig) -> Result<(GpuDevice, Box<dyn VideoSource>
     Ok((device, Box::new(source)))
 }
 
-/// Sorgente video reale: Windows.Graphics.Capture, con Desktop Duplication per i monitor quando WGC
-/// fallisce o non regge oltre 60 fps (build precedenti a 26100).
+/// Sorgente video reale: Desktop Duplication per i monitor (WGC se non è disponibile, per esempio
+/// sulla GPU dedicata dei portatili ibridi), Windows.Graphics.Capture per le finestre.
 pub struct CaptureSource {
     device: GpuDevice,
     target: Target,
@@ -143,7 +143,9 @@ impl CaptureSource {
             device,
             target,
             cursor: capture_cursor,
-            prefer_dda: false,
+            // Come «Cattura schermo» di OBS sui PC fissi: DDA non mostra il bordo giallo, cattura
+            // anche il fullscreen esclusivo e costa meno di WGC sul monitor intero.
+            prefer_dda: true,
             stats: Arc::default(),
             description,
             native: Arc::default(),
@@ -152,7 +154,7 @@ impl CaptureSource {
         }
     }
 
-    /// Per i monitor prova prima Desktop Duplication (WGC resta il ripiego). Senza questa opzione
+    /// Per i monitor prova prima Desktop Duplication (WGC resta il ripiego; è il default). Con `false`
     /// DDA si usa solo se WGC fallisce o se si chiedono più di 60 fps su build precedenti a 26100.
     pub fn prefer_desktop_duplication(mut self, yes: bool) -> Self {
         self.prefer_dda = yes;
@@ -447,6 +449,9 @@ impl Watch {
                 SourceState::Waiting("finestra minimizzata".into())
             }
             Some(_) if self.other_adapter => SourceState::Waiting(ADAPTER_CHANGED.into()),
+            // DDA del monitor vede tutto, fullscreen esclusivo compreso: un frame nero è davvero nero
+            // (schermata di caricamento), non un gioco che sfugge alla cattura.
+            Some((Resolved::Monitor(_), Capture::Dda(_))) => SourceState::Running,
             Some((r, _)) => {
                 let foreground = matches!(r, Resolved::Window(h) if is_foreground(*h));
                 let arrived = self.stats.arrived.load(Ordering::Relaxed);
@@ -529,7 +534,7 @@ mod tests {
         println!("MinUpdateInterval disponibile: {}", wgc::has_min_update_interval());
         for fps in [60u32, 144] {
             let device = crate::device_for_monitor(0).unwrap();
-            let mut src = CaptureSource::new(device, Target::Monitor(0), false);
+            let mut src = CaptureSource::new(device, Target::Monitor(0), false).prefer_desktop_duplication(false);
             let rx = collect(&mut src, fps);
             std::thread::sleep(Duration::from_secs(2));
             let running = src.stats();

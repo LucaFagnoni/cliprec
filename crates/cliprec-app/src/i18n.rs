@@ -165,7 +165,7 @@ const TABLE: &[(K, &str, &str)] = &[
     ),
     (K::SettingsMissing, "cliprec-settings.exe non trovato accanto a ClipRec", "cliprec-settings.exe not found next to ClipRec"),
     (K::AlreadyRunning, "ClipRec è già in esecuzione", "ClipRec is already running"),
-    (K::EngRamLow, "RAM libera insufficiente: il buffer chiederebbe {0} MB, ne uso {1}. Riduci durata o qualità nelle impostazioni.", "Not enough free RAM: the buffer would need {0} MB, using {1}. Lower duration or quality in the settings."),
+    (K::EngRamLow, "Il limite di RAM impostato ({0} MB) supera un quarto della memoria del PC: ne uso {1}.", "The RAM limit you set ({0} MB) is more than a quarter of this PC's memory: using {1}."),
     (K::EngNotStarted, "{0} non avviato: {1}", "{0} not started: {1}"),
     (K::EngVideoOnlyAudio, "{0}; continuo solo con l'audio e riprovo tra poco", "{0}; continuing with audio only, retrying shortly"),
     (K::EngVideoRestarted, "video ripartito", "video restarted"),

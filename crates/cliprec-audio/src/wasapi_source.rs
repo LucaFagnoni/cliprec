@@ -813,13 +813,24 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         let state = src.state();
-        std::thread::sleep(Duration::from_millis(300));
+        // Il loopback dell'endpoint consegna i primi pacchetti dopo la riapertura con un po' di ritardo.
+        let resumed_at = QpcTime::now();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let resumed = loop {
+            let last = chunks.lock().unwrap().last().map(|c| c.0);
+            if last.is_some_and(|t| t.hns_since(resumed_at) > -5_000_000) {
+                break true;
+            }
+            if Instant::now() > deadline {
+                break false;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
         src.stop();
         println!("errore visto: {seen_error:?}, stato finale {state:?}");
         assert!(seen_error.is_some_and(|m| m.contains("panic")), "lo stato deve passare a Error");
         assert_eq!(state, SourceState::Running);
-        let last = chunks.lock().unwrap().last().unwrap().0;
-        assert!(QpcTime::now().hns_since(last) < 5_000_000, "la cattura deve aver ripreso");
+        assert!(resumed, "la cattura deve aver ripreso");
     }
 
     /// Un'app aperta mentre il buffer registra si aggancia entro un secondo (prima: fino a 3 s).
