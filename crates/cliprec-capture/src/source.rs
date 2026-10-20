@@ -12,6 +12,7 @@ use cliprec_core::{CaptureStats, FrameCallback, GpuDevice, SourceError, SourceSt
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Gdi::HMONITOR;
 
+use crate::dda::DdaCapture;
 use crate::pacer::{FrameSlots, Pacer, Stats, clear_black};
 use crate::targets::{
     exe_matches, find_window_by_exe, find_window_by_title, fullscreen_foreground, is_minimized, is_window, monitor_rect,
@@ -108,11 +109,13 @@ pub fn open_source(cfg: &VideoConfig) -> Result<(GpuDevice, Box<dyn VideoSource>
     Ok((device, Box::new(source)))
 }
 
-/// Sorgente video reale su Windows.Graphics.Capture.
+/// Sorgente video reale: Windows.Graphics.Capture, con Desktop Duplication per i monitor quando WGC
+/// fallisce o non regge oltre 60 fps (build precedenti a 26100).
 pub struct CaptureSource {
     device: GpuDevice,
     target: Target,
     cursor: bool,
+    prefer_dda: bool,
     stats: Arc<Stats>,
     description: Arc<Mutex<String>>,
     pacer: Option<Pacer>,
@@ -124,7 +127,23 @@ impl CaptureSource {
     /// [`crate::device_for_monitor`]). Nulla parte finché non si chiama `start`.
     pub fn new(device: GpuDevice, target: Target, capture_cursor: bool) -> Self {
         let description = Arc::new(Mutex::new(target.label()));
-        Self { device, target, cursor: capture_cursor, stats: Arc::default(), description, pacer: None, watcher: None }
+        Self {
+            device,
+            target,
+            cursor: capture_cursor,
+            prefer_dda: false,
+            stats: Arc::default(),
+            description,
+            pacer: None,
+            watcher: None,
+        }
+    }
+
+    /// Per i monitor prova prima Desktop Duplication (WGC resta il ripiego). Senza questa opzione
+    /// DDA si usa solo se WGC fallisce o se si chiedono più di 60 fps su build precedenti a 26100.
+    pub fn prefer_desktop_duplication(mut self, yes: bool) -> Self {
+        self.prefer_dda = yes;
+        self
     }
 
     /// Frame consegnati da WGC finora (per diagnostica e test).
@@ -136,7 +155,7 @@ impl CaptureSource {
 impl VideoSource for CaptureSource {
     fn start(&mut self, fps: u32, on_frame: FrameCallback) -> Result<(), SourceError> {
         self.stop();
-        if !wgc::is_supported() {
+        if !wgc::is_supported() && !matches!(self.target, Target::Monitor(_)) {
             return Err(SourceError::Unsupported("Windows.Graphics.Capture non disponibile".into()));
         }
         let slots = Arc::new(FrameSlots::new(self.device.clone()));
@@ -146,6 +165,7 @@ impl VideoSource for CaptureSource {
         let mut watch = Watch {
             target: self.target.clone(),
             cursor: self.cursor,
+            prefer_dda: self.prefer_dda || (fps > 60 && !wgc::has_min_update_interval()) || !wgc::is_supported(),
             fps,
             slots: slots.clone(),
             stats: self.stats.clone(),
@@ -195,11 +215,33 @@ impl Drop for CaptureSource {
 struct Watch {
     target: Target,
     cursor: bool,
+    prefer_dda: bool,
     fps: u32,
     slots: Arc<FrameSlots>,
     stats: Arc<Stats>,
     description: Arc<Mutex<String>>,
-    current: Option<(Resolved, WgcCapture)>,
+    current: Option<(Resolved, Capture)>,
+}
+
+enum Capture {
+    Wgc(WgcCapture),
+    Dda(DdaCapture),
+}
+
+impl Capture {
+    fn is_closed(&self) -> bool {
+        match self {
+            Self::Wgc(c) => c.is_closed(),
+            Self::Dda(c) => c.is_closed(),
+        }
+    }
+
+    fn backend(&self) -> &'static str {
+        match self {
+            Self::Wgc(_) => "WGC",
+            Self::Dda(_) => "Desktop Duplication",
+        }
+    }
 }
 
 // SAFETY: HWND/HMONITOR sono identificatori di sistema validi da qualunque thread; le sessioni WGC
@@ -232,6 +274,30 @@ impl Watch {
         self.current = None;
     }
 
+    /// Apre la cattura del bersaglio: WGC, o per i monitor DDA (preferito o come ripiego).
+    fn open(&self, r: Resolved) -> Result<Capture, SourceError> {
+        let wgc = || -> Result<Capture, SourceError> {
+            let item = match r {
+                Resolved::Monitor(h) => wgc::item_for_monitor(h),
+                Resolved::Window(h) => wgc::item_for_window(h),
+            }?;
+            Ok(Capture::Wgc(WgcCapture::start(item, self.slots.clone(), self.stats.clone(), self.fps, self.cursor)?))
+        };
+        let Resolved::Monitor(h) = r else { return wgc() };
+        let dda = || DdaCapture::start(h, self.slots.clone(), self.stats.clone()).map(Capture::Dda);
+        if self.prefer_dda {
+            dda().or_else(|e| {
+                tracing::warn!("Desktop Duplication non disponibile ({e}): uso WGC");
+                wgc()
+            })
+        } else {
+            wgc().or_else(|e| {
+                tracing::warn!("WGC non disponibile ({e}): uso Desktop Duplication");
+                dda()
+            })
+        }
+    }
+
     fn poll(&mut self) -> Result<(), SourceError> {
         let want = self.target.resolve()?;
         let gone = self
@@ -241,12 +307,8 @@ impl Watch {
         if gone || self.current.as_ref().map(|(r, _)| *r) != want {
             self.current = None;
             if let Some(r) = want {
-                let item = match r {
-                    Resolved::Monitor(h) => wgc::item_for_monitor(h),
-                    Resolved::Window(h) => wgc::item_for_window(h),
-                }?;
-                let cap = WgcCapture::start(item, self.slots.clone(), self.stats.clone(), self.fps, self.cursor)?;
-                let desc = r.describe();
+                let cap = self.open(r)?;
+                let desc = format!("{} · {}", r.describe(), cap.backend());
                 tracing::info!(source = %desc, "cattura avviata");
                 *self.description.lock().unwrap_or_else(PoisonError::into_inner) = desc;
                 self.current = Some((r, cap));
@@ -321,6 +383,29 @@ mod tests {
             assert!(src.frames_arrived() >= 1, "WGC non ha consegnato nulla");
             assert!(src.describe().starts_with("Monitor 1"), "{}", src.describe());
         }
+    }
+
+    /// Desktop Duplication forzata sul monitor principale a 144 fps per 2 s (solo conteggi).
+    #[test]
+    fn monitor_desktop_duplication_144_fps() {
+        let _anim = TestWindow::open("cliprec-test-anim-dda", 320, 240);
+        let (mw, mh) = rect_size(monitor_rect(primary_monitor()).unwrap());
+        let device = crate::device_for_monitor(0).unwrap();
+        let mut src = CaptureSource::new(device, Target::Monitor(0), false).prefer_desktop_duplication(true);
+        let rx = collect(&mut src, 144);
+        std::thread::sleep(Duration::from_secs(2));
+        let running = src.stats();
+        let desc = src.describe();
+        src.stop();
+        let frames: Vec<_> = rx.try_iter().collect();
+        let new = frames.iter().filter(|f| !f.2).count();
+        println!("{desc} a 144 fps: consegnati {}, nuovi {new}, arrivati da DDA {}", frames.len(), src.frames_arrived());
+        assert!(desc.contains("Desktop Duplication"), "{desc}");
+        assert!(frames.len() >= 273 && frames.len() <= 290, "{} frame", frames.len());
+        assert_on_grid(&frames, 144);
+        assert_eq!(running.state, SourceState::Running);
+        assert_eq!((running.source_width, running.source_height), (mw, mh));
+        assert!(src.frames_arrived() >= 1, "DDA non ha consegnato nulla");
     }
 
     /// Finestra propria catturata, ridimensionata, minimizzata e chiusa durante la cattura.

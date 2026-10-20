@@ -5,6 +5,7 @@
 //! Ingresso per l'integrazione: [`open_source`] crea il device D3D11 sull'adattatore giusto e la
 //! sorgente descritta da `VideoConfig`; [`SyntheticSource`] serve ai test e alla misura della sincronia.
 
+mod dda;
 mod pacer;
 mod source;
 mod synthetic;
