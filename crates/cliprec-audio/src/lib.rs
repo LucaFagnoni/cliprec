@@ -4,5 +4,8 @@
 
 mod beep;
 pub mod dsp;
+mod mixer;
+
+pub use mixer::{MIX_BLOCK_FRAMES, MixInput, Mixer};
 
 pub use beep::{BEEP_BLOCK_FRAMES, BEEP_FRAMES, BeepSource, render_beep};

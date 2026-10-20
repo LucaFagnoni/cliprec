@@ -126,7 +126,8 @@ mod tests {
 
     #[test]
     fn beeps_start_on_whole_seconds() {
-        let chunks: Arc<Mutex<Vec<(QpcTime, Vec<f32>)>>> = Arc::default();
+        type Chunks = Arc<Mutex<Vec<(QpcTime, Vec<f32>)>>>;
+        let chunks: Chunks = Arc::default();
         let sink = chunks.clone();
         let mut src = BeepSource::new("bip", 1000.0);
         src.start(Box::new(move |c| sink.lock().unwrap().push((c.qpc, c.samples.to_vec()))))
