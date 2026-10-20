@@ -251,6 +251,16 @@ fn hevc_nvenc_noise_respects_bitrate_cap() {
 }
 
 #[test]
+fn hevc_nvenc_1440p_noise() {
+    let Some((bps, cap)) =
+        encode_and_probe(NVIDIA, "hevc_nvenc", &[(2560, 1440)], (2560, 1440), "hevc_nvenc_1440p.hevc", "hevc", true)
+    else {
+        return;
+    };
+    assert!(bps <= cap as f64 * 1.35, "{bps} bit/s oltre il tetto {cap}");
+}
+
+#[test]
 fn hevc_qsv_on_intel() {
     encode_and_probe(INTEL, "hevc_qsv", &[(1920, 1080)], (1920, 1080), "hevc_qsv.hevc", "hevc", false);
 }

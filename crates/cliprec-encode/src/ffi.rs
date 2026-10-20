@@ -115,6 +115,24 @@ impl Dict {
         // SAFETY: chiave e valore sono stringhe C valide; av_dict_set le copia.
         unsafe { ffi::av_dict_set(&mut self.0, k.as_ptr(), v.as_ptr(), 0) };
     }
+
+    /// Chiavi rimaste: dopo avcodec_open2 sono le opzioni che l'encoder non conosce.
+    fn keys(&self) -> Vec<String> {
+        let mut keys = Vec::new();
+        let mut e: *const ffi::AVDictionaryEntry = ptr::null();
+        // SAFETY: iterazione documentata di un dizionario valido (o nullo); le voci restano valide
+        // finché il dizionario non cambia, e le copiamo subito.
+        unsafe {
+            loop {
+                e = ffi::av_dict_iterate(self.0, e);
+                if e.is_null() {
+                    break;
+                }
+                keys.push(CStr::from_ptr((*e).key).to_string_lossy().into_owned());
+            }
+        }
+        keys
+    }
 }
 
 impl Drop for Dict {
@@ -272,7 +290,9 @@ impl HwEncoder {
                     c.bit_rate = i64::from(max_kbps) * 1000 * 2 / 3;
                     c.global_quality = c_int::from(q);
                     opts.set("preset", "faster");
-                    opts.set("look_ahead", 0);
+                    if codec == cliprec_core::VideoCodec::H264 {
+                        opts.set("look_ahead", 0);
+                    }
                     opts.set("forced_idr", 1);
                     opts.set("idr_interval", 0);
                 }
@@ -281,6 +301,10 @@ impl HwEncoder {
             let ret = ffi::avcodec_open2(enc.ctx, av_codec, &mut opts.0);
             if ret < 0 {
                 return Err(open_error(name, "avcodec_open2", ret));
+            }
+            let ignored = opts.keys();
+            if !ignored.is_empty() {
+                tracing::warn!(encoder = name, ?ignored, "opzioni dell'encoder ignorate");
             }
             let c = &*enc.ctx;
             if !c.extradata.is_null() && c.extradata_size > 0 {
