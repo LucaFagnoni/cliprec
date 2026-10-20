@@ -365,7 +365,7 @@ impl Watch {
             Ok(Capture::Wgc(WgcCapture::start(item, window, slots, stats, self.fps, self.cursor)?))
         };
         let Resolved::Monitor(h) = r else { return wgc() };
-        let dda = || DdaCapture::start(h, self.slots.clone(), self.stats.clone()).map(Capture::Dda);
+        let dda = || DdaCapture::start(h, self.slots.clone(), self.stats.clone(), self.cursor).map(Capture::Dda);
         if self.prefer_dda {
             dda().or_else(|e| {
                 tracing::warn!("Desktop Duplication non disponibile ({e}): uso WGC");
@@ -523,7 +523,8 @@ mod tests {
         let _anim = TestWindow::open("cliprec-test-anim-dda", 320, 240);
         let (mw, mh) = monitor_pixels(primary_monitor()).unwrap();
         let device = crate::device_for_monitor(0).unwrap();
-        let mut src = CaptureSource::new(device, Target::Monitor(0), false).prefer_desktop_duplication(true);
+        // Con il puntatore (m17): il disegno passa dalla pipeline del puntatore a ogni frame.
+        let mut src = CaptureSource::new(device, Target::Monitor(0), true).prefer_desktop_duplication(true);
         let rx = collect(&mut src, 144);
         std::thread::sleep(Duration::from_secs(2));
         let running = src.stats();

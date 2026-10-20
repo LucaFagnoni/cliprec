@@ -31,6 +31,7 @@
 //! pts e istante di cattura: vedi `CAPTURE_PTS_OFFSET` in `source.rs` e
 //! [`CaptureSource::latency_ms`].
 
+mod cursor;
 mod dda;
 mod health;
 mod pacer;
