@@ -420,6 +420,7 @@ fn video_callback(
     let mut last_error = String::new();
     let mut next_index: Option<u64> = None;
     let mut encoding_since: Option<Instant> = None;
+    let mut last: Option<GpuFrame> = None;
     Box::new(move |frame: &GpuFrame| {
         // L'attesa torna a 1 s solo dopo 10 s di codifica riuscita, non a ogni apertura.
         if encoding_since.is_some_and(|t| t.elapsed() > Duration::from_secs(10)) {
@@ -470,23 +471,30 @@ fn video_callback(
             return;
         };
         let mut push = |p: cliprec_core::PacketRef<'_>| buffer.push_video(p);
-        // Il pacer salta l'indice sui tick persi: ripetendo la texture corrente per quei tick il file
-        // resta a frequenza costante e l'audio resta allineato. Oltre un quarto di secondo il buco resta.
-        // ponytail: al massimo 100 ms per tick, per non alimentare altri ritardi sotto carico GPU.
+        // Il pacer salta l'indice sui tick persi: ripetendo l'ultimo frame codificato per quei tick il
+        // file resta a frequenza costante e l'audio resta allineato (come i frame duplicati di OBS).
+        // ponytail: al massimo 100 ms per tick, per non alimentare altri ritardi sotto carico GPU;
+        // oltre, il buco resta nel file come salto di timestamp.
         let missing = next_index.map_or(0, |n| frame.index.saturating_sub(n)).min(u64::from(fps / 10));
         let mut result = Ok(());
-        for k in (1..=missing).rev() {
-            let filler = GpuFrame {
-                texture: frame.texture.clone(),
-                width: frame.width,
-                height: frame.height,
-                pts: frame.pts.add_hns(-(k as i64) * cliprec_core::HNS_PER_SEC / i64::from(fps)),
-                index: frame.index - k,
-                repeated: true,
-            };
-            result = result.and_then(|()| enc.encode(&filler, &mut push));
+        if let Some(prev) = last.as_ref() {
+            for k in (1..=missing).rev() {
+                let filler = GpuFrame {
+                    texture: prev.texture.clone(),
+                    width: prev.width,
+                    height: prev.height,
+                    pts: frame.pts.add_hns(-(k as i64) * cliprec_core::HNS_PER_SEC / i64::from(fps)),
+                    index: frame.index - k,
+                    repeated: true,
+                };
+                result = result.and_then(|()| enc.encode(&filler, &mut push));
+            }
         }
-        match result.and_then(|()| enc.encode(frame, &mut push)) {
+        let result = result.and_then(|()| enc.encode(frame, &mut push));
+        if result.is_ok() {
+            remember(&device, &mut last, frame);
+        }
+        match result {
             Ok(()) => next_index = Some(frame.index + 1),
             Err(e) => {
                 if matches!(e, EncodeError::DeviceLost) {
@@ -501,6 +509,40 @@ fn video_callback(
             }
         }
     })
+}
+
+/// Copia GPU del frame appena codificato in una texture propria: la texture del pacer vale solo
+/// durante la callback, e i tick persi vanno riempiti con il frame precedente. Se la copia non riesce
+/// i riempitivi saltano e resta un salto di timestamp.
+fn remember(device: &GpuDevice, last: &mut Option<GpuFrame>, frame: &GpuFrame) {
+    use windows::Win32::Graphics::Direct3D11::{D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT};
+    if last.as_ref().is_none_or(|l| l.width != frame.width || l.height != frame.height) {
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        // SAFETY: texture valida per tutta la callback; `desc` è una struttura locale.
+        unsafe { frame.texture.GetDesc(&mut desc) };
+        desc.Usage = D3D11_USAGE_DEFAULT;
+        desc.CPUAccessFlags = 0;
+        desc.MiscFlags = 0;
+        let mut texture = None;
+        // SAFETY: descrittore valido ricavato dalla texture sorgente; puntatore d'uscita locale.
+        if unsafe { device.device.CreateTexture2D(&desc, None, Some(&mut texture)) }.is_err() {
+            *last = None;
+            return;
+        }
+        *last = texture.map(|texture| GpuFrame {
+            texture,
+            width: frame.width,
+            height: frame.height,
+            pts: frame.pts,
+            index: frame.index,
+            repeated: true,
+        });
+    }
+    if let Some(l) = last.as_ref() {
+        // SAFETY: stesse dimensioni e formato; il contesto immediato è protetto dal multithread di
+        // GpuDevice e la copia è accodata dopo la conversione dell'encoder sulla stessa texture.
+        unsafe { device.context.CopyResource(&l.texture, &frame.texture) };
+    }
 }
 
 /// Prova i candidati in ordine saltando quelli già falliti; prenota il buffer per i nuovi parametri.
@@ -623,6 +665,11 @@ pub fn run(config: Config, commands: &Receiver<AppCommand>, events: Sender<Engin
             }
         }
     };
+    // Avanzi di un'uscita brusca durante un salvataggio: `.part` orfani e clip da 0 byte.
+    let removed = cliprec_mux::cleanup_stale(&config.clips.folder());
+    if removed > 0 {
+        tracing::info!(removed, "file incompleti rimossi dalla cartella delle clip");
+    }
     let mut session = start(&config, &buffer);
     loop {
         if let Ok(mut p) = persist().lock() {
@@ -930,6 +977,64 @@ mod tests {
             let v = check(p, &Expect { min_duration: Some(2.0), audio_tracks: Some(2), fps: Some(60.0), ..Expect::default() }).unwrap();
             assert!(v.is_empty(), "{}: {v:?}", p.display());
         }
+    }
+
+    /// Sorgente sintetica che blocca la callback per 72 ms quattro frame prima di ogni lampo: il pacer
+    /// perde i tre tick successivi e consegna proprio il frame del lampo.
+    struct StallBeforeFlash(cliprec_capture::SyntheticSource);
+
+    impl VideoSource for StallBeforeFlash {
+        fn start(&mut self, fps: u32, mut on_frame: cliprec_core::FrameCallback) -> Result<(), cliprec_core::SourceError> {
+            let period = cliprec_core::HNS_PER_SEC / i64::from(fps);
+            self.0.start(
+                fps,
+                Box::new(move |f: &GpuFrame| {
+                    on_frame(f);
+                    let next_second = (f.pts.0 / cliprec_core::HNS_PER_SEC + 1) * cliprec_core::HNS_PER_SEC;
+                    if f.pts.0 + 3 * period < next_second && next_second <= f.pts.0 + 4 * period {
+                        std::thread::sleep(Duration::from_millis(72));
+                    }
+                }),
+            )
+        }
+        fn stop(&mut self) {
+            self.0.stop();
+        }
+        fn stats(&self) -> cliprec_core::CaptureStats {
+            self.0.stats()
+        }
+        fn describe(&self) -> String {
+            self.0.describe()
+        }
+    }
+
+    /// Tick persi subito prima di un lampo: i riempitivi ripetono il frame precedente, non quello
+    /// nuovo, quindi il lampo non compare in anticipo e la sincronia resta entro ±20 ms.
+    #[test]
+    fn lost_ticks_before_flash_keep_av_sync() {
+        let mut config = Config::default();
+        config.clips.folder = Some(fault_dir("tick-persi"));
+        config.clips.video_seconds = 5;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let device = GpuDevice::create(None).unwrap();
+        let video = StallBeforeFlash(cliprec_capture::SyntheticSource::new(device.clone(), 1280, 720));
+        let overrides = SourceOverrides { video: Some((device, Box::new(video))), audio: Some(beeps()) };
+        let session = Session::start(&config, new_buffer(&config, &tx, 0), Shared::default(), overrides, tx).unwrap();
+        std::thread::sleep(Duration::from_secs(7));
+        let dropped = session.video.as_ref().map(|v| v.stats().frames_dropped).unwrap_or(0);
+        session.save(ClipKind::Video, 5).unwrap().join().unwrap();
+        let clip = rx
+            .try_iter()
+            .find_map(|e| match e {
+                EngineEvent::ClipSaved(c) => Some(c.path),
+                _ => None,
+            })
+            .expect("clip salvata");
+        assert!(dropped >= 9, "il test deve davvero perdere tick: {dropped}");
+        let sync = cliprec_tests::sync::measure_sync(&clip).unwrap();
+        println!("tick persi {dropped}; {sync:#?}");
+        let v = sync.violations(20.0);
+        assert!(v.is_empty(), "{v:?}");
     }
 
     /// Modalità audio nella catena completa: traccia unica (una sola traccia «Mix») e tracce separate
