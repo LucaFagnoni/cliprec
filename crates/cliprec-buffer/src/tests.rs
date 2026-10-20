@@ -480,6 +480,28 @@ fn snapshot_seconds_are_measured_from_last_frame() {
 /// Un buco interno (pacer bloccato 1 s, molti GOP fa) non tronca la clip: resta un salto di
 /// timestamp nel mezzo e la clip arriva fino all'ultimo frame.
 #[test]
+fn gap_after_last_keyframe_does_not_truncate_snapshot() {
+    // Tick del pacer persi (300 ms) dopo l'ultimo keyframe: la clip arriva comunque all'ultimo frame.
+    let b = buffer(10.0, 64 * MB);
+    for seq in (0..360).chain(375..400) {
+        push(&b, seq, 32, seq % 50 == 0);
+    }
+    let s = b.snapshot_video(5.0, QpcTime(i64::MAX)).unwrap();
+    assert_eq!(seq_of(s.packets.last().unwrap()), 399);
+    let st = b.stats();
+    assert_eq!(st.newest_end, Some(QpcTime(1_000_000_000 + 400 * FRAME_HNS)));
+    // Subito dopo il buco, con un solo frame oltre: è nelle ultime 3 posizioni, la clip si
+    // ferma prima del buco (potrebbe essere un B-frame mancante).
+    let b = buffer(10.0, 64 * MB);
+    for seq in (0..360).chain(375..376) {
+        push(&b, seq, 32, seq % 50 == 0);
+    }
+    assert_eq!(seq_of(b.snapshot_video(5.0, QpcTime(i64::MAX)).unwrap().packets.last().unwrap()), 359);
+    let empty = buffer(1.0, 64 * MB);
+    assert_eq!(empty.stats().newest_end, None);
+}
+
+#[test]
 fn internal_gap_does_not_truncate_snapshot() {
     let b = buffer(10.0, 64 * MB);
     for seq in (0..100).chain(150..400) {

@@ -31,6 +31,9 @@ use crate::audio::Track;
 const VIDEO_CHUNK: usize = 4 << 20;
 /// Video conservato oltre `video_seconds`, oltre al GOP in corso.
 const RETAIN_MARGIN_SECS: f64 = 0.5;
+/// Posizioni di pts finali (in ordine di presentazione) in cui un buco indica B-frame non ancora
+/// usciti dall'encoder: profondità dei B-frame (2) più uno.
+pub const TAIL_DEPTH: usize = 3;
 /// Frazione della stima dal tetto di bitrate preallocata subito.
 const PREALLOC_DIVISOR: usize = 4;
 
@@ -70,6 +73,9 @@ pub struct BufferStats {
     pub memory_limited: bool,
     pub video_packets: usize,
     pub keyframes: usize,
+    /// Fine (pts + durata) dell'ultimo frame video nel buffer; `None` se è vuoto. Se è molto
+    /// prima della pressione dell'hotkey, la clip salvata sarebbe vecchia (encoder fermo).
+    pub newest_end: Option<QpcTime>,
 }
 
 #[derive(Clone, Copy)]
@@ -169,6 +175,7 @@ impl ReplayBuffer {
         v.ring.clear();
         v.keyframes.clear();
         v.memory_limited = false;
+        v.newest_end = QpcTime(0);
         let estimate = BufferConfig::estimate_bytes(params.bit_rate, self.config.video_seconds, 0.0, 0);
         v.ring.reserve((estimate / PREALLOC_DIVISOR).min(self.config.max_bytes));
         v.params = Some(params);
@@ -207,8 +214,10 @@ impl ReplayBuffer {
     /// all'ultimo frame completo, così la clip non è mai più corta di `seconds` se il buffer li ha.
     ///
     /// Con i B-frame la coda in ordine di decodifica può contenere un P-frame i cui B-frame
-    /// precedenti non sono ancora usciti dall'encoder: la clip si tronca al primo pacchetto oltre
-    /// il primo buco di pts, e finisce su un frame decodificabile senza salti.
+    /// precedenti non sono ancora usciti dall'encoder: se tra le ultime [`TAIL_DEPTH`] posizioni
+    /// in ordine di presentazione c'è un buco di pts, la clip si ferma prima del buco e finisce su
+    /// un frame decodificabile senza salti. Un buco più vecchio (tick del pacer persi) resta nel
+    /// file come salto di timestamp.
     pub fn snapshot_video(&self, seconds: f64, end: QpcTime) -> Option<VideoSnapshot> {
         let mut v = lock(&self.video);
         let params = v.params.clone()?;
@@ -223,7 +232,8 @@ impl ReplayBuffer {
             .map(|(_, e)| e.meta.pts)
             .collect();
         shown.sort_unstable();
-        let cut = shown.windows(2).find(|w| w[1].hns_since(w[0]) > frame * 3 / 2).map_or(*shown.last()?, |w| w[0]);
+        let tail = &shown[shown.len().saturating_sub(TAIL_DEPTH)..];
+        let cut = tail.windows(2).find(|w| w[1].hns_since(w[0]) > frame * 3 / 2).map_or(*shown.last()?, |w| w[0]);
         // Ultimo pacchetto tenuto (ordine di decodifica) e fine dell'ultimo frame tenuto.
         let mut stop = None;
         let mut last_end = None;
@@ -310,6 +320,7 @@ impl ReplayBuffer {
             memory_limited: v.memory_limited && v.covered_secs() < self.config.video_seconds,
             video_packets: v.ring.len(),
             keyframes: v.keyframes.len(),
+            newest_end: (v.ring.len() > 0).then_some(v.newest_end),
         }
     }
 
