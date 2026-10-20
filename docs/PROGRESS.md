@@ -56,7 +56,8 @@ Le clip vanno in `%USERPROFILE%\Videos\ClipRec`; config in `%APPDATA%\ClipRec\co
 
 - Build FFmpeg ridotta (oggi la distribuzione pesa 130 MB contro i 40 della specifica; piano in
   `installer/FFMPEG-RIDOTTA.md`), firma del codice, installer compilato.
-- AMF (GPU AMD) mai provato; «riavvia come amministratore» per i giochi elevati solo segnalato.
+- AMF (GPU AMD) mai provato. «Riavvia come amministratore» (menu della tray, per i giochi elevati)
+  scritto ma mai eseguito: il dialogo UAC non si poteva aprire di notte.
 - Controller XInput (facoltativo): fatto (`hotkeys.video_pad`/`audio_pad`, es. «Back+A»), mai provato
   con un controller vero.
 
