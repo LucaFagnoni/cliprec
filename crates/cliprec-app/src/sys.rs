@@ -104,16 +104,17 @@ pub fn current_user_sid() -> anyhow::Result<String> {
     Ok(s?)
 }
 
-/// Gioco in primo piano avviato come amministratore mentre ClipRec no: Raw Input non arriverebbe.
+/// Programma in primo piano avviato come amministratore mentre ClipRec no: Raw Input non arriverebbe.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ElevatedForeground {
     pub pid: u32,
     pub exe: String,
+    /// A schermo intero oppure presente in `games`.
+    pub game: bool,
 }
 
-/// Processo in primo piano se è elevato (o non ispezionabile per accesso negato), a schermo
-/// intero oppure presente in `games`; `None` altrimenti.
-pub fn elevated_foreground_game(games: &[String]) -> Option<ElevatedForeground> {
+/// Processo in primo piano se è elevato (o non ispezionabile per accesso negato); `None` altrimenti.
+pub fn elevated_foreground(games: &[String]) -> Option<ElevatedForeground> {
     // SAFETY: nessun argomento; restituisce HWND nullo se non c'è finestra attiva.
     let hwnd = unsafe { GetForegroundWindow() };
     if hwnd.0.is_null() {
@@ -134,8 +135,8 @@ pub fn elevated_foreground_game(games: &[String]) -> Option<ElevatedForeground> 
     if !elevated || exe.eq_ignore_ascii_case("explorer.exe") {
         return None;
     }
-    let listed = games.iter().any(|g| g.eq_ignore_ascii_case(&exe));
-    (listed || is_fullscreen(hwnd)).then_some(ElevatedForeground { pid, exe })
+    let game = games.iter().any(|g| g.eq_ignore_ascii_case(&exe)) || is_fullscreen(hwnd);
+    Some(ElevatedForeground { pid, exe, game })
 }
 
 fn image_name(process: HANDLE) -> Option<String> {

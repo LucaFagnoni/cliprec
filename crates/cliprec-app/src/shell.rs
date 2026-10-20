@@ -20,7 +20,8 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, HWND_MESSAGE, KillTimer, MSG, PostMessageW, PostQuitMessage,
-    RegisterClassExW, SetTimer, TranslateMessage, WINDOW_EX_STYLE, WM_APP, WM_INPUT, WM_TIMER, WNDCLASSEXW, WS_OVERLAPPED,
+    RegisterClassExW, SetTimer, TranslateMessage, WINDOW_EX_STYLE, WM_APP, WM_HOTKEY, WM_INPUT, WM_TIMER, WNDCLASSEXW,
+    WS_OVERLAPPED,
 };
 use windows::core::w;
 
@@ -199,9 +200,16 @@ struct Ui {
     shown_recent: Vec<PathBuf>,
     shown_running: Option<bool>,
     last_elevation_pid: Option<u32>,
-    elevation_tick: u32,
     self_elevated: bool,
+    /// Hotkey registrate con `RegisterHotKey` mentre un programma elevato è in primo piano:
+    /// per video e audio, `true` se la registrazione è riuscita.
+    system_hotkeys: Option<[bool; 2]>,
+    /// Ultima hotkey scattata: Raw Input e `WM_HOTKEY` insieme non fanno due clip.
+    last_hotkey: Option<(AppCommand, Instant)>,
 }
+
+/// Id di `RegisterHotKey` per le hotkey video e audio.
+const SYSTEM_HOTKEY_IDS: [i32; 2] = [1, 2];
 
 thread_local! {
     static UI: RefCell<Option<Ui>> = const { RefCell::new(None) };
@@ -281,23 +289,64 @@ impl Ui {
         Ok(it)
     }
 
-    fn check_elevated_game(&mut self) {
+    /// Ogni secondo: con un programma elevato in primo piano (e ClipRec no) Raw Input tace, quindi le
+    /// hotkey della tastiera passano a `RegisterHotKey`; avvisa solo se qualcuna resta scoperta
+    /// (pulsanti del mouse, combinazione già presa da un altro programma).
+    fn check_elevated_foreground(&mut self) {
         if self.self_elevated {
             return;
         }
-        self.elevation_tick += 1;
-        if !self.elevation_tick.is_multiple_of(2) {
-            return; // ogni 2 s
-        }
         let games = self.app.config.lock().map(|c| c.video.games.clone()).unwrap_or_default();
-        match crate::sys::elevated_foreground_game(&games) {
-            Some(g) if self.last_elevation_pid != Some(g.pid) => {
+        let foreground = crate::sys::elevated_foreground(&games);
+        self.set_system_hotkeys(foreground.is_some());
+        match foreground {
+            Some(g) if g.game && self.last_elevation_pid != Some(g.pid) => {
                 self.last_elevation_pid = Some(g.pid);
-                self.app.process_event(&EngineEvent::Warning(fmt(i18n::current(), K::ElevatedGame, &[&g.exe])));
+                let chords = [self.hotkeys.video, self.hotkeys.audio];
+                let covered = self.system_hotkeys.is_some_and(|ok| chords.iter().zip(ok).all(|(c, ok)| c.is_none() || ok));
+                if covered {
+                    tracing::info!(exe = %g.exe, "programma elevato in primo piano: hotkey con RegisterHotKey");
+                } else {
+                    self.app.process_event(&EngineEvent::Warning(fmt(i18n::current(), K::ElevatedGame, &[&g.exe])));
+                }
             }
             Some(_) => {}
             None => self.last_elevation_pid = None,
         }
+    }
+
+    fn set_system_hotkeys(&mut self, on: bool) {
+        let hwnd = HWND(self.app.hwnd.load(Ordering::Relaxed) as *mut _);
+        if on == self.system_hotkeys.is_some() {
+            return;
+        }
+        if on {
+            let chords = [self.hotkeys.video, self.hotkeys.audio];
+            let ok = [0, 1].map(|i| chords[i].is_some_and(|c| rawinput::register_system_hotkey(hwnd, SYSTEM_HOTKEY_IDS[i], c)));
+            tracing::info!(?ok, "hotkey registrate con RegisterHotKey");
+            self.system_hotkeys = Some(ok);
+        } else {
+            for id in SYSTEM_HOTKEY_IDS {
+                rawinput::unregister_system_hotkey(hwnd, id);
+            }
+            self.system_hotkeys = None;
+        }
+    }
+
+    /// Manda il comando di una hotkey, ma non due volte in 500 ms (Raw Input e `WM_HOTKEY`).
+    fn fire(&mut self, cmd: AppCommand) {
+        let now = Instant::now();
+        if self.last_hotkey.is_some_and(|(c, t)| c == cmd && now.duration_since(t) < Duration::from_millis(500)) {
+            return;
+        }
+        self.last_hotkey = Some((cmd, now));
+        self.app.send(cmd);
+    }
+
+    fn on_system_hotkey(&mut self, id: i32) {
+        let cmd = if id == SYSTEM_HOTKEY_IDS[0] { AppCommand::SaveVideoClip } else { AppCommand::SaveAudioClip };
+        tracing::info!(?cmd, "hotkey (RegisterHotKey)");
+        self.fire(cmd);
     }
 
     fn reload_config(&mut self) {
@@ -311,6 +360,11 @@ impl Ui {
                 self.relabel(l);
                 self.hotkeys.video = parse_chord("video", &cfg.hotkeys.video, l);
                 self.hotkeys.audio = parse_chord("audio", &cfg.hotkeys.audio, l);
+                // Hotkey di sistema attive: si rifanno con le combinazioni nuove.
+                if self.system_hotkeys.is_some() {
+                    self.set_system_hotkeys(false);
+                    self.set_system_hotkeys(true);
+                }
                 // Il mouse si ascolta solo se serve: la registrazione segue la nuova configurazione.
                 let h = self.app.hwnd.load(Ordering::Relaxed);
                 if let Err(e) = rawinput::register(HWND(h as *mut _), hotkey::needs_mouse(self.hotkeys.video, self.hotkeys.audio)) {
@@ -353,7 +407,7 @@ impl Ui {
             self.hotkeys.set_mods(rawinput::async_mods());
         }
         if let Some(cmd) = self.hotkeys.feed(ev) {
-            self.app.send(cmd);
+            self.fire(cmd);
             tracing::info!(?cmd, elapsed_us = t0.elapsed().as_micros() as u64, "hotkey");
         }
     }
@@ -380,6 +434,16 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             // SAFETY: parametri passati tali e quali dal sistema.
             unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
         }
+        WM_HOTKEY => {
+            UI.with(|u| {
+                if let Ok(mut u) = u.try_borrow_mut()
+                    && let Some(ui) = u.as_mut()
+                {
+                    ui.on_system_hotkey(wparam.0 as i32);
+                }
+            });
+            LRESULT(0)
+        }
         WM_QUIT_REQUEST => {
             // SAFETY: siamo nel wndproc, sul thread del loop di messaggi.
             unsafe { PostQuitMessage(0) };
@@ -393,7 +457,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     match msg {
                         WM_RELOAD => ui.reload_config(),
                         WM_TIMER => {
-                            ui.check_elevated_game();
+                            ui.check_elevated_foreground();
                             ui.refresh();
                         }
                         _ => ui.refresh(),
@@ -557,8 +621,9 @@ fn build_ui(app: &Arc<App>, hwnd: HWND) -> anyhow::Result<Ui> {
         shown_recent: vec![PathBuf::from("\0")], // forza il primo disegno
         shown_running: None,
         last_elevation_pid: None,
-        elevation_tick: 0,
         self_elevated: crate::sys::self_elevated(),
+        system_hotkeys: None,
+        last_hotkey: None,
     })
 }
 

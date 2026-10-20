@@ -3,14 +3,15 @@
 
 use windows::Win32::Foundation::{HWND, LPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, VK_CONTROL, VK_LWIN, VK_MBUTTON, VK_MENU, VK_RWIN, VK_SHIFT, VK_XBUTTON1, VK_XBUTTON2,
+    GetAsyncKeyState, HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN, RegisterHotKey, UnregisterHotKey,
+    VK_CONTROL, VK_LWIN, VK_MBUTTON, VK_MENU, VK_RWIN, VK_SHIFT, VK_XBUTTON1, VK_XBUTTON2,
 };
 use windows::Win32::UI::Input::{
     GetRawInputData, HRAWINPUT, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER, RID_INPUT, RIDEV_INPUTSINK, RIDEV_REMOVE, RIM_TYPEKEYBOARD,
     RIM_TYPEMOUSE, RegisterRawInputDevices,
 };
 
-use crate::hotkey::{InputEvent, Mods, Trigger, mouse_events};
+use crate::hotkey::{Chord, InputEvent, Mods, Trigger, mouse_events};
 
 const RI_KEY_BREAK: u16 = 1;
 const RI_KEY_E0: u16 = 2;
@@ -63,6 +64,31 @@ pub fn decode(lparam: LPARAM) -> Vec<InputEvent> {
     } else {
         Vec::new()
     }
+}
+
+/// Registra `chord` con `RegisterHotKey` (arriva come `WM_HOTKEY` con `id`). A differenza di Raw
+/// Input funziona anche quando in primo piano c'è un programma elevato e ClipRec no, ma il tasto
+/// non arriva più al programma in primo piano: si usa solo in quel caso. `false` per i pulsanti
+/// del mouse o se un altro programma ha già la stessa combinazione.
+pub fn register_system_hotkey(hwnd: HWND, id: i32, chord: Chord) -> bool {
+    let Trigger::Key(vk) = chord.trigger else { return false };
+    // SAFETY: finestra del thread corrente; modificatori e tasto sono valori semplici.
+    unsafe { RegisterHotKey(Some(hwnd), id, system_mods(chord.mods), u32::from(vk)) }.is_ok()
+}
+
+pub fn unregister_system_hotkey(hwnd: HWND, id: i32) {
+    // SAFETY: finestra del thread corrente; un id non registrato dà solo un errore, ignorato.
+    let _ = unsafe { UnregisterHotKey(Some(hwnd), id) };
+}
+
+fn system_mods(m: Mods) -> HOT_KEY_MODIFIERS {
+    let mut out = MOD_NOREPEAT;
+    for (on, flag) in [(m.ctrl, MOD_CONTROL), (m.alt, MOD_ALT), (m.shift, MOD_SHIFT), (m.win, MOD_WIN)] {
+        if on {
+            out |= flag;
+        }
+    }
+    out
 }
 
 fn async_down(vk: u16) -> bool {
