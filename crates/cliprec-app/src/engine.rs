@@ -14,6 +14,8 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use cliprec_buffer::{BufferConfig, ReplayBuffer};
+
+use crate::i18n::{K, tr};
 use cliprec_core::config::{Config, TrackMode, default_max_bitrate_kbps};
 use cliprec_core::{
     AppCommand, AudioTrackSink, ClipKind, EncodeError, EngineEvent, EngineStatus, GpuDevice, GpuFrame, QpcTime,
@@ -70,10 +72,9 @@ pub fn new_buffer(config: &Config, events: &Sender<EngineEvent>, reclaim: usize)
     // specifica; la finestra impostazioni mostra già la stima per scegliere durata e qualità.
     let available = available_ram().saturating_add(reclaim);
     let max_bytes = if available > 0 && wanted > available / 2 {
-        let _ = events.send(EngineEvent::Warning(format!(
-            "RAM libera insufficiente: il buffer chiederebbe {} MB, ne uso {}. Riduci durata o qualità nelle impostazioni.",
-            wanted >> 20,
-            (available / 2) >> 20
+        let _ = events.send(EngineEvent::Warning(tr(
+            K::EngRamLow,
+            &[&(wanted >> 20).to_string(), &((available / 2) >> 20).to_string()],
         )));
         available / 2
     } else {
@@ -126,7 +127,7 @@ impl Session {
         let restart = Arc::new(AtomicBool::new(false));
         let alive = Arc::new(Mutex::new(true));
         let warn = |what: &str, e: &dyn std::fmt::Display| {
-            let _ = events.send(EngineEvent::Warning(format!("{what} non avviato: {e}")));
+            let _ = events.send(EngineEvent::Warning(tr(K::EngNotStarted, &[what, &e.to_string()])));
         };
 
         let sink = buffer.clone() as Arc<dyn AudioTrackSink>;
@@ -166,7 +167,7 @@ impl Session {
                 None => cliprec_capture::open_source(&config.video),
             };
             if let Err(e) = session.start_video(opened) {
-                warn("video", &format!("{e}; continuo solo con l'audio e riprovo tra poco"));
+                warn("video", &tr(K::EngVideoOnlyAudio, &[&e.to_string()]));
             }
         }
         if session.video.is_none() && session.audio.is_none() && !config.video.enabled {
@@ -220,7 +221,7 @@ impl Session {
         self.video_retry = (Instant::now() + wait, (wait * 2).min(Duration::from_secs(60)));
         match self.start_video(cliprec_capture::open_source(&self.config.video)) {
             Ok(()) => {
-                let _ = self.events.send(EngineEvent::Warning("video ripartito".into()));
+                let _ = self.events.send(EngineEvent::Warning(tr(K::EngVideoRestarted, &[])));
             }
             Err(e) => tracing::warn!("video non ripartito: {e}; nuovo tentativo tra {} s", wait.as_secs()),
         }
@@ -247,7 +248,7 @@ impl Session {
             saving: self.shared.saving.load(Ordering::SeqCst),
             recent_clips: self.shared.recent.lock().map(|r| r.iter().cloned().collect()).unwrap_or_default(),
             last_error: if stats.memory_limited {
-                Some(format!("RAM insufficiente: il buffer copre solo {:.0} s di video", stats.video_seconds))
+                Some(tr(K::EngRamLimited, &[&format!("{:.0}", stats.video_seconds)]))
             } else {
                 problem
             },
@@ -289,7 +290,7 @@ impl Session {
             let _ = events.send(EngineEvent::ClipFailed { kind, reason });
         };
         if let Err(e) = std::fs::create_dir_all(&folder) {
-            fail(&events, format!("cartella {}: {e}", folder.display()));
+            fail(&events, tr(K::EngFolder, &[&folder.display().to_string(), &e.to_string()]));
             return None;
         }
         let game = self.video.as_ref().map(|v| game_name(&v.describe()));
@@ -298,30 +299,28 @@ impl Session {
         let path = folder.join(name);
         let stats = self.buffer.stats();
         if stats.memory_limited {
-            let _ = events.send(EngineEvent::Warning(format!(
-                "clip più corta di {seconds} s: la RAM del buffer copre solo {:.0} s",
-                stats.video_seconds
+            let _ = events.send(EngineEvent::Warning(tr(
+                K::EngClipShortRam,
+                &[&seconds.to_string(), &format!("{:.0}", stats.video_seconds)],
             )));
         }
         if let Some((name, SourceState::Waiting(m) | SourceState::Error(m))) =
             self.video.as_ref().map(|v| (v.describe(), v.stats().state))
         {
-            let _ = events.send(EngineEvent::Warning(format!("clip salvata, ma il video era in attesa ({name}: {m})")));
+            let _ = events.send(EngineEvent::Warning(tr(K::EngClipVideoWaiting, &[&name, &m])));
         }
         let job: Box<dyn FnOnce() -> Result<cliprec_core::SavedClip, String> + Send> = match kind {
             ClipKind::Video => {
                 let Some(video) = self.buffer.snapshot_video(f64::from(seconds), end) else {
-                    fail(&events, "il buffer video è ancora vuoto".into());
+                    fail(&events, tr(K::EngVideoEmpty, &[]));
                     return None;
                 };
                 let start = video.start().unwrap_or(end);
                 let last = video.packets.iter().map(|p| p.pts.add_hns(p.duration)).max().unwrap_or(end);
                 let stale = end.hns_since(last);
                 if stale > 2 * cliprec_core::HNS_PER_SEC {
-                    let _ = events.send(EngineEvent::Warning(format!(
-                        "la clip video finisce {:.0} s prima della pressione: cattura o encoder fermi",
-                        stale as f64 / cliprec_core::HNS_PER_SEC as f64
-                    )));
+                    let secs = format!("{:.0}", stale as f64 / cliprec_core::HNS_PER_SEC as f64);
+                    let _ = events.send(EngineEvent::Warning(tr(K::EngClipStale, &[&secs])));
                 }
                 // Sotto lock solo i riferimenti ai blocchi FLAC; la decompressione è nel thread di salvataggio.
                 let audio = self.buffer.snapshot_audio_refs(start, end);
@@ -334,7 +333,7 @@ impl Session {
             ClipKind::Audio => {
                 let start = end.add_hns(-i64::from(seconds) * cliprec_core::HNS_PER_SEC);
                 let Some(audio) = self.buffer.snapshot_audio_refs(start, end) else {
-                    fail(&events, "il buffer audio è ancora vuoto".into());
+                    fail(&events, tr(K::EngAudioEmpty, &[]));
                     return None;
                 };
                 let format = self.config.clips.audio_format;
@@ -355,7 +354,7 @@ impl Session {
             }
             let _done = Done(shared.saving.clone());
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job))
-                .unwrap_or_else(|_| Err("errore interno durante il salvataggio".into()));
+                .unwrap_or_else(|_| Err(tr(K::EngSaveInternal, &[])));
             match result {
                 Ok(clip) => {
                     tracing::info!(
@@ -379,7 +378,7 @@ impl Session {
             Ok(h) => Some(h),
             Err(e) => {
                 self.shared.saving.fetch_sub(1, Ordering::SeqCst);
-                let _ = self.events.send(EngineEvent::ClipFailed { kind, reason: format!("thread di salvataggio: {e}") });
+                let _ = self.events.send(EngineEvent::ClipFailed { kind, reason: tr(K::EngSaveThread, &[&e.to_string()]) });
                 None
             }
         }
@@ -448,7 +447,7 @@ fn video_callback(
                     retry_at = Instant::now() + backoff;
                     backoff = (backoff * 2).min(Duration::from_secs(30));
                     if msg != last_error {
-                        let _ = events.send(EngineEvent::Error(format!("encoder video: {msg}")));
+                        let _ = events.send(EngineEvent::Error(tr(K::EngEncoderError, &[&msg])));
                         last_error = msg;
                     }
                 }
@@ -512,7 +511,7 @@ fn video_callback(
                     restart.store(true, Ordering::SeqCst);
                     retry_at = Instant::now() + Duration::from_secs(3600);
                 } else {
-                    let _ = events.send(EngineEvent::Warning(format!("encoder {name} fallito ({e}): passo al successivo")));
+                    let _ = events.send(EngineEvent::Warning(tr(K::EngEncoderFailed, &[&name, &e.to_string()])));
                     failed.push(name);
                 }
                 encoder = None;
@@ -576,11 +575,7 @@ fn open_encoder(
     }
     let mut name = encoder_name.lock().map_err(|_| "stato dell'encoder non disponibile".to_string())?;
     if !name.is_empty() && *name != e.params().encoder_name {
-        let _ = events.send(EngineEvent::Warning(format!(
-            "encoder cambiato da {} a {}: il buffer video riparte da zero",
-            name,
-            e.params().encoder_name
-        )));
+        let _ = events.send(EngineEvent::Warning(tr(K::EngEncoderChanged, &[&name, &e.params().encoder_name])));
     }
     buffer.set_video_params(e.params().clone());
     name.clone_from(&e.params().encoder_name);
@@ -672,7 +667,7 @@ pub fn run(config: Config, commands: &Receiver<AppCommand>, events: Sender<Engin
         match Session::start(config, buffer.clone(), shared.clone(), SourceOverrides::default(), events.clone()) {
             Ok(s) => Some(s),
             Err(e) => {
-                let _ = events.send(EngineEvent::Error(format!("avvio del buffer: {e:#}")));
+                let _ = events.send(EngineEvent::Error(tr(K::EngStartFailed, &[&format!("{e:#}")])));
                 None
             }
         }
@@ -701,7 +696,7 @@ pub fn run(config: Config, commands: &Receiver<AppCommand>, events: Sender<Engin
                     };
                     s.save(kind, seconds);
                 } else {
-                    let _ = events.send(EngineEvent::Warning("il buffer è fermo: avvialo dal menu della tray".into()));
+                    let _ = events.send(EngineEvent::Warning(tr(K::EngBufferStopped, &[])));
                 }
             }
             Ok(AppCommand::StartBuffer) => {
@@ -748,7 +743,7 @@ pub fn run(config: Config, commands: &Receiver<AppCommand>, events: Sender<Engin
             Err(RecvTimeoutError::Timeout) => {}
         }
         if session.as_ref().is_some_and(|s| s.restart.load(Ordering::SeqCst)) {
-            let _ = events.send(EngineEvent::Warning("device GPU perso: riavvio cattura ed encoder".into()));
+            let _ = events.send(EngineEvent::Warning(tr(K::EngDeviceLost, &[])));
             drop(session.take());
             session = start(&config, &buffer);
         }

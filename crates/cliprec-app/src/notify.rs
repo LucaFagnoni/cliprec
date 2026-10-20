@@ -50,7 +50,21 @@ pub fn error_kind(text: &str) -> String {
     let t = text.to_lowercase();
     // Parole intere: «ram» non deve riconoscere «frame» o «programma».
     let words: Vec<&str> = t.split(|c: char| !c.is_alphanumeric()).collect();
-    for k in ["fullscreen", "schermo intero", "microfono", "privacy", "ram", "memoria", "disco", "encoder", "amministratore"] {
+    for k in [
+        "fullscreen",
+        "schermo intero",
+        "microfono",
+        "microphone",
+        "privacy",
+        "ram",
+        "memoria",
+        "memory",
+        "disco",
+        "disk",
+        "encoder",
+        "amministratore",
+        "administrator",
+    ] {
         let hit = if k.contains(' ') { t.contains(k) } else { words.contains(&k) };
         if hit {
             return k.to_owned();

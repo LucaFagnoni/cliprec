@@ -1,5 +1,5 @@
 //! Testi della shell in italiano e inglese: una tabella `(chiave, it, en)`, segnaposto `{0}`, `{1}`…
-//! Gli avvisi che arrivano dal motore restano come sono.
+//! Anche gli avvisi del motore (`Eng*`); i messaggi interni dei crate restano in italiano.
 
 use std::sync::atomic::{AtomicU8, Ordering};
 
@@ -34,6 +34,25 @@ pub enum K {
     ElevatedGame,
     SettingsMissing,
     AlreadyRunning,
+    EngRamLow,
+    EngNotStarted,
+    EngVideoOnlyAudio,
+    EngVideoRestarted,
+    EngRamLimited,
+    EngFolder,
+    EngClipShortRam,
+    EngClipVideoWaiting,
+    EngVideoEmpty,
+    EngAudioEmpty,
+    EngClipStale,
+    EngSaveInternal,
+    EngSaveThread,
+    EngEncoderError,
+    EngEncoderFailed,
+    EngEncoderChanged,
+    EngStartFailed,
+    EngBufferStopped,
+    EngDeviceLost,
 }
 
 #[cfg(test)]
@@ -61,6 +80,25 @@ pub const ALL: &[K] = &[
     K::ElevatedGame,
     K::SettingsMissing,
     K::AlreadyRunning,
+    K::EngRamLow,
+    K::EngNotStarted,
+    K::EngVideoOnlyAudio,
+    K::EngVideoRestarted,
+    K::EngRamLimited,
+    K::EngFolder,
+    K::EngClipShortRam,
+    K::EngClipVideoWaiting,
+    K::EngVideoEmpty,
+    K::EngAudioEmpty,
+    K::EngClipStale,
+    K::EngSaveInternal,
+    K::EngSaveThread,
+    K::EngEncoderError,
+    K::EngEncoderFailed,
+    K::EngEncoderChanged,
+    K::EngStartFailed,
+    K::EngBufferStopped,
+    K::EngDeviceLost,
 ];
 
 const TABLE: &[(K, &str, &str)] = &[
@@ -91,11 +129,35 @@ const TABLE: &[(K, &str, &str)] = &[
     ),
     (K::SettingsMissing, "cliprec-settings.exe non trovato accanto a ClipRec", "cliprec-settings.exe not found next to ClipRec"),
     (K::AlreadyRunning, "ClipRec è già in esecuzione", "ClipRec is already running"),
+    (K::EngRamLow, "RAM libera insufficiente: il buffer chiederebbe {0} MB, ne uso {1}. Riduci durata o qualità nelle impostazioni.", "Not enough free RAM: the buffer would need {0} MB, using {1}. Lower duration or quality in the settings."),
+    (K::EngNotStarted, "{0} non avviato: {1}", "{0} not started: {1}"),
+    (K::EngVideoOnlyAudio, "{0}; continuo solo con l'audio e riprovo tra poco", "{0}; continuing with audio only, retrying shortly"),
+    (K::EngVideoRestarted, "video ripartito", "video restarted"),
+    (K::EngRamLimited, "RAM insufficiente: il buffer copre solo {0} s di video", "Not enough RAM: the buffer covers only {0} s of video"),
+    (K::EngFolder, "cartella {0}: {1}", "folder {0}: {1}"),
+    (K::EngClipShortRam, "clip più corta di {0} s: la RAM del buffer copre solo {1} s", "clip shorter than {0} s: the buffer RAM covers only {1} s"),
+    (K::EngClipVideoWaiting, "clip salvata, ma il video era in attesa ({0}: {1})", "clip saved, but video was waiting ({0}: {1})"),
+    (K::EngVideoEmpty, "il buffer video è ancora vuoto", "the video buffer is still empty"),
+    (K::EngAudioEmpty, "il buffer audio è ancora vuoto", "the audio buffer is still empty"),
+    (K::EngClipStale, "la clip video finisce {0} s prima della pressione: cattura o encoder fermi", "the video clip ends {0} s before the key press: capture or encoder stalled"),
+    (K::EngSaveInternal, "errore interno durante il salvataggio", "internal error while saving"),
+    (K::EngSaveThread, "thread di salvataggio: {0}", "saving thread: {0}"),
+    (K::EngEncoderError, "encoder video: {0}", "video encoder: {0}"),
+    (K::EngEncoderFailed, "encoder {0} fallito ({1}): passo al successivo", "encoder {0} failed ({1}): trying the next one"),
+    (K::EngEncoderChanged, "encoder cambiato da {0} a {1}: il buffer video riparte da zero", "encoder changed from {0} to {1}: the video buffer starts over"),
+    (K::EngStartFailed, "avvio del buffer: {0}", "starting the buffer: {0}"),
+    (K::EngBufferStopped, "il buffer è fermo: avvialo dal menu della tray", "the buffer is stopped: start it from the tray menu"),
+    (K::EngDeviceLost, "device GPU perso: riavvio cattura ed encoder", "GPU device lost: restarting capture and encoder"),
 ];
 
 /// Testo grezzo, con i segnaposto.
 pub fn raw(lang: Lang, key: K) -> &'static str {
     TABLE.iter().find(|(k, ..)| *k == key).map_or("", |&(_, it, en)| if lang == Lang::It { it } else { en })
+}
+
+/// Testo nella lingua corrente con `{0}`, `{1}`… sostituiti da `args`.
+pub fn tr(key: K, args: &[&str]) -> String {
+    fmt(current(), key, args)
 }
 
 /// Testo con `{0}`, `{1}`… sostituiti da `args`.
