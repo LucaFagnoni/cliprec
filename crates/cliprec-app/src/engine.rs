@@ -183,6 +183,7 @@ impl Session {
             let _ = events.send(EngineEvent::Warning(tr(K::EngNotStarted, &[what, &e.to_string()])));
         };
 
+        listen_process_events(config, &events);
         let sink = buffer.clone() as Arc<dyn AudioTrackSink>;
         let audio = match overrides.audio {
             Some(sources) => cliprec_audio::AudioEngine::with_sources(
@@ -306,6 +307,7 @@ impl Session {
         if self.config.audio.sources.is_empty() {
             return;
         }
+        listen_process_events(&self.config, &self.events);
         let sink = self.buffer.clone() as Arc<dyn AudioTrackSink>;
         match cliprec_audio::AudioEngine::start(&self.config.audio, sink) {
             Ok(a) => self.audio = Some(a),
@@ -445,7 +447,7 @@ impl Session {
             let changed = !self.states.iter().any(|(n, s)| n == name && s == st);
             if changed
                 && let SourceState::Waiting(m) | SourceState::Error(m) = st
-                && m != cliprec_audio::OPENING
+                && warns_about(m)
             {
                 let _ = self.events.send(EngineEvent::Warning(format!("{name}: {m}")));
             }
@@ -876,6 +878,22 @@ impl Persist {
 fn persist() -> &'static Mutex<Option<Persist>> {
     static P: OnceLock<Mutex<Option<Persist>>> = OnceLock::new();
     P.get_or_init(|| Mutex::new(None))
+}
+
+/// Stati d'attesa che meritano un avviso. No per l'apertura in corso e per un'app registrata che
+/// l'utente ha chiuso: è normale, lo stato resta visibile nella tray.
+fn warns_about(message: &str) -> bool {
+    message != cliprec_audio::OPENING && !message.ends_with(cliprec_audio::NOT_RUNNING)
+}
+
+/// Eventi di Windows per le app aperte e chiuse, se chiesti in config: senza permessi di
+/// amministratore si avvisa e resta la ricerca ogni mezzo secondo.
+fn listen_process_events(config: &Config, events: &Sender<EngineEvent>) {
+    if config.audio.process_events
+        && let Err(e) = cliprec_audio::procwatch::listen()
+    {
+        let _ = events.send(EngineEvent::Warning(e));
+    }
 }
 
 /// Problema da mostrare nello stato (icona d'errore): solo le sorgenti in errore. Una sorgente in
@@ -1901,6 +1919,15 @@ video_seconds = = 30").unwrap();
         assert_eq!(status_problem(&waiting), None);
         let error = vec![("Microfono".to_string(), SourceState::Error("accesso negato".into()))];
         assert!(status_problem(&error).is_some());
+    }
+
+    /// Un'app registrata chiusa dall'utente non fa partire un avviso a ogni chiusura; gli altri
+    /// stati d'attesa sì.
+    #[test]
+    fn closing_a_recorded_app_is_not_a_warning() {
+        assert!(!warns_about(&format!("Discord.exe {}", cliprec_audio::NOT_RUNNING)));
+        assert!(!warns_about(cliprec_audio::OPENING));
+        assert!(warns_about("dispositivo scollegato"));
     }
 
     /// m11: «Ferma buffer» libera la RAM del buffer.

@@ -35,6 +35,8 @@ const MAX_PACKET_FRAMES: usize = SAMPLE_RATE as usize;
 
 /// Stato `Waiting` tra `start` e la fine del primo tentativo di apertura.
 pub const OPENING: &str = "apertura in corso";
+/// Fine del messaggio di attesa di una sorgente App la cui app non è aperta.
+pub const NOT_RUNNING: &str = "non è in esecuzione";
 
 const MIC_PRIVACY: &str = "Windows nega l'accesso al microfono: apri Impostazioni → Privacy e sicurezza → Microfono \
      e attiva «Consenti alle app desktop di accedere al microfono»";
@@ -149,15 +151,22 @@ impl WasapiSource {
 }
 
 /// Ricerca periodica del processo radice dell'app, fuori dal thread audio: Toolhelp alloca e
-/// scorre tutti i processi. Pubblica il PID (0 = assente) e chiede la riapertura se cambia.
+/// scorre tutti i processi. Ogni mezzo secondo, o subito dopo un evento di Windows se
+/// [`crate::procwatch::listen`] è attivo. Pubblica il PID (0 = assente) e chiede la riapertura se cambia.
 fn watch_pid(exe: String, pid: Arc<AtomicU32>, flags: Arc<DeviceFlags>, stop: Arc<AtomicBool>) {
+    let mut seen = crate::procwatch::generation();
     while !stop.load(Ordering::Acquire) {
-        let until = Instant::now() + RETRY;
+        let until = Instant::now() + crate::procwatch::POLL;
         while Instant::now() < until {
             if stop.load(Ordering::Acquire) {
                 return;
             }
-            std::thread::sleep(Duration::from_millis(50));
+            let now = crate::procwatch::generation();
+            if now != seen {
+                seen = now;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
         }
         let found = find_root_pid(&exe).unwrap_or(0);
         if pid.swap(found, Ordering::AcqRel) != found {
@@ -424,7 +433,7 @@ impl Capture {
             AudioSourceKind::App { exe } => {
                 let pid = self.pid.load(Ordering::Acquire);
                 if pid == 0 {
-                    return Err(OpenError::Wait(format!("{exe} non è in esecuzione")));
+                    return Err(OpenError::Wait(format!("{exe} {NOT_RUNNING}")));
                 }
                 // ATTENZIONE: in wasapi 0.26 `include_tree = false` vuol dire modalità EXCLUDE.
                 let client = AudioClient::new_application_loopback_client(pid, true).map_err(classify)?;
@@ -825,6 +834,32 @@ mod tests {
     /// m7: «Sistema» sul dispositivo predefinito si apre in process loopback EXCLUDE sul nostro
     /// albero di processi (il «ding» di salvataggio non entra nella clip); con un dispositivo
     /// esplicito resta il loopback dell'endpoint. Nessun suono viene riprodotto.
+    /// Un'app aperta mentre il buffer registra si aggancia entro un secondo (prima: fino a 3 s).
+    #[test]
+    fn app_started_later_is_found_within_a_second() {
+        let (pid, flags, stop) = (Arc::new(AtomicU32::new(0)), Arc::new(DeviceFlags::default()), Arc::new(AtomicBool::new(false)));
+        let (p, f, s) = (pid.clone(), flags.clone(), stop.clone());
+        let watcher = std::thread::spawn(move || watch_pid("PING.EXE".into(), p, f, s));
+        std::thread::sleep(Duration::from_millis(100));
+        let mut child = std::process::Command::new(r"C:\Windows\System32\PING.EXE")
+            .args(["-n", "6", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let t0 = Instant::now();
+        while pid.load(Ordering::Acquire) != child.id() && t0.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let found = t0.elapsed();
+        let reopen = flags.reopen.load(Ordering::Acquire);
+        let _ = child.kill();
+        let _ = child.wait();
+        stop.store(true, Ordering::Release);
+        let _ = watcher.join();
+        assert!(found < Duration::from_secs(1), "app trovata dopo {found:?}");
+        assert!(reopen, "la sorgente deve riaprirsi sul nuovo processo");
+    }
+
     #[test]
     fn default_output_excludes_own_process() {
         let mode_after_open = |kind: AudioSourceKind| {

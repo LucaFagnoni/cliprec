@@ -352,6 +352,7 @@ mod tests {
                 AudioSourceConfig::new("Sistema", AudioSourceKind::Output { device: None }),
                 AudioSourceConfig { volume: 0.8, ..AudioSourceConfig::new("Explorer", AudioSourceKind::App { exe: "explorer.exe".into() }) },
             ],
+            ..AudioConfig::default()
         };
         let sink = Arc::new(TestSink::default());
         let mut engine = AudioEngine::start(&cfg, sink.clone()).unwrap();
@@ -386,6 +387,7 @@ mod tests {
                 src("Explorer", AudioSourceKind::App { exe: "explorer.exe".into() }),
                 src("Assente", AudioSourceKind::App { exe: "nessuna-app-cliprec.exe".into() }),
             ],
+            ..AudioConfig::default()
         };
         let sink = Arc::new(TestSink::default());
         let t0 = std::time::Instant::now();

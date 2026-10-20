@@ -6,11 +6,12 @@ mod beep;
 pub mod dsp;
 mod engine;
 mod mixer;
+pub mod procwatch;
 mod wasapi_source;
 
 pub use engine::{AudioEngine, MAX_DELAY_MS, MAX_MIX_LATENCY_HNS, MIX_LATENCY_HNS, MIX_TRACK_NAME};
 pub use mixer::{MIX_BLOCK_FRAMES, MixInput, Mixer};
-pub use wasapi_source::{CaptureMode, OPENING, WasapiSource, find_root_pid, list_devices};
+pub use wasapi_source::{CaptureMode, NOT_RUNNING, OPENING, WasapiSource, find_root_pid, list_devices};
 
 /// Testo di un panic catturato con `catch_unwind`.
 pub(crate) fn panic_message(p: &(dyn std::any::Any + Send)) -> String {

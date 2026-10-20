@@ -129,6 +129,9 @@ pub struct AudioConfig {
     pub add_mix_track: bool,
     /// Fino a 8 sorgenti, nell'ordine delle tracce.
     pub sources: Vec<AudioSourceConfig>,
+    /// Eventi di Windows per agganciare subito le app aperte o chiuse (serve ClipRec da
+    /// amministratore). Spento: ricerca ogni mezzo secondo.
+    pub process_events: bool,
 }
 
 impl Default for AudioConfig {
@@ -136,6 +139,7 @@ impl Default for AudioConfig {
         Self {
             mode: TrackMode::Separate,
             add_mix_track: false,
+            process_events: false,
             sources: vec![
                 AudioSourceConfig::new("Sistema", AudioSourceKind::Output { device: None }),
                 AudioSourceConfig::new("Microfono", AudioSourceKind::Input { device: None }),

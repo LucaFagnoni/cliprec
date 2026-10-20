@@ -76,6 +76,7 @@ strings! {
     set_mode_separate: "Una traccia per sorgente", "One track per source";
     set_mode_merged: "Traccia unica (mix)", "Single track (mix)";
     set_add_mix: "Aggiungi in testa una traccia «Mix»", "Add a leading \"Mix\" track";
+    set_process_events: "Aggancia subito le app aperte o chiuse (eventi di Windows: serve ClipRec avviato come amministratore; senza, controllo ogni mezzo secondo)", "Hook apps as soon as they open or close (Windows events: needs ClipRec running as administrator; otherwise checked every half second)";
     set_add_source: "Aggiungi sorgente", "Add source";
     set_sources_hint: "Ogni riga è una traccia della clip, in quest'ordine (fino a 8). App = l'audio di un solo programma; Microfono = un dispositivo d'ingresso; Uscita = tutto ciò che senti da altoparlanti o cuffie; Tutto tranne un'app = l'audio del PC senza quel programma (es. il gioco senza Discord). Il ritardo (da -1000 a 1000 ms) allinea una sorgente in ritardo.", "Each row is a clip track, in this order (up to 8). App = the audio of one program; Microphone = an input device; Output = everything you hear from speakers or headphones; Everything except an app = the PC audio without that program (e.g. the game without Discord). The delay (-1000 to 1000 ms) lines up a late source.";
     set_kind_app: "App (un programma)", "App (one program)";

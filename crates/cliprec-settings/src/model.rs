@@ -83,6 +83,7 @@ pub fn to_form(c: &Config) -> (Form, Vec<SourceRow>) {
         games: c.video.games.join(", ").into(),
         audio_mode: i32::from(c.audio.mode == TrackMode::Merged),
         add_mix: c.audio.add_mix_track,
+        process_events: c.audio.process_events,
         hotkey_video: c.hotkeys.video.clone().into(),
         hotkey_audio: c.hotkeys.audio.clone().into(),
         pad_video: c.hotkeys.video_pad.clone().into(),
@@ -187,6 +188,7 @@ pub fn build_lenient(form: &Form, rows: &[SourceRow], base: &Config) -> (Config,
     c.audio.mode = if form.audio_mode == 1 { TrackMode::Merged } else { TrackMode::Separate };
     // L'opzione vale solo in modalità separata: in traccia unica la si azzera.
     c.audio.add_mix_track = form.add_mix && c.audio.mode == TrackMode::Separate;
+    c.audio.process_events = form.process_events;
     if rows.len() > MAX_AUDIO_SOURCES {
         problems.push(Problem::TooManySources);
     }
@@ -398,6 +400,7 @@ mod tests {
         c.video.max_bitrate_kbps = Some(20_000);
         c.video.games = vec!["a.exe".into(), "b.exe".into()];
         c.audio.add_mix_track = true;
+        c.audio.process_events = true;
         c.audio.sources = vec![
             AudioSourceConfig { volume: 0.5, ..AudioSourceConfig::new("Discord", AudioSourceKind::App { exe: "Discord.exe".into() }) },
             AudioSourceConfig::new("Mic", AudioSourceKind::Input { device: Some("{id}".into()) }),

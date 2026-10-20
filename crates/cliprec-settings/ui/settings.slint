@@ -28,6 +28,7 @@ export global T {
     in property <string> mode-separate;
     in property <string> mode-merged;
     in property <string> add-mix;
+    in property <string> process-events;
     in property <string> add-source;
     in property <string> sources-hint;
     in property <string> kind-app;
@@ -104,6 +105,7 @@ export struct Form {
     games: string,
     audio-mode: int,
     add-mix: bool,
+    process-events: bool,
     hotkey-video: string,
     hotkey-audio: string,
     pad-video: string,
@@ -311,6 +313,7 @@ export component SettingsWindow inherits Window {
                             enabled: root.f.audio-mode == 0;
                         }
                     }
+                    CheckBox { text: T.process-events; checked <=> root.f.process-events; }
                     Text { text: T.sources-hint; color: #808080; wrap: word-wrap; }
                     HorizontalLayout {
                         spacing: 6px;
