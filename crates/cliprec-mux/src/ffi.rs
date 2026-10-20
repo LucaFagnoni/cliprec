@@ -98,6 +98,10 @@ impl Drop for Encoder {
     }
 }
 
+// SAFETY: un AVCodecContext si può usare da un altro thread purché mai in contemporanea; ogni
+// `Encoder` ha un solo proprietario e passa di thread solo per intero.
+unsafe impl Send for Encoder {}
+
 struct Frame(*mut AVFrame);
 
 impl Drop for Frame {
@@ -116,6 +120,9 @@ impl Packet {
         if p.is_null() { Err(MuxError::OutOfMemory) } else { Ok(Self(p)) }
     }
 }
+
+// SAFETY: come per `Encoder`: un solo proprietario, nessun accesso concorrente.
+unsafe impl Send for Packet {}
 
 impl Drop for Packet {
     fn drop(&mut self) {
@@ -189,11 +196,24 @@ pub(crate) fn write(
     };
     check("avformat_write_header", header)?;
 
-    // Pacchetti audio codificati in anticipo (pochi MB), poi fusi col video in ordine di tempo.
-    let mut audio: Vec<std::collections::VecDeque<Pending>> = Vec::with_capacity(tracks.len());
-    for (t, (enc, st)) in tracks.iter().zip(&encoders) {
-        audio.push(encode_track(enc, *st, codec, t.samples)?.into());
-    }
+    // Pacchetti audio codificati in anticipo (pochi MB), una traccia per thread, poi fusi col
+    // video in ordine di tempo. La base dei tempi si legge dopo l'header, che può cambiarla.
+    let jobs: Vec<(Encoder, AVRational, c_int)> = encoders
+        .into_iter()
+        // SAFETY: stream del contesto ancora vivo.
+        .map(|(enc, st)| unsafe { (enc, (*st).time_base, (*st).index) })
+        .collect();
+    let mut audio = std::thread::scope(|scope| {
+        let handles: Vec<_> = jobs
+            .into_iter()
+            .zip(tracks)
+            .map(|((enc, tb, index), t)| scope.spawn(move || encode_track(enc, tb, index, codec, t.samples)))
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().unwrap_or(Err(MuxError::EncoderPanicked)).map(std::collections::VecDeque::from))
+            .collect::<Result<Vec<_>, _>>()
+    })?;
 
     let mut video_iter = match (&video, video_stream) {
         (Some(v), Some(st)) => Some((v, st, v.snapshot.packets.iter().peekable())),
@@ -360,13 +380,19 @@ fn add_audio_stream(out: &Output, enc: &Encoder, name: &str, default: bool) -> R
     }
 }
 
-/// Codifica tutta la traccia; restituisce i pacchetti nella base dei tempi dello stream.
-fn encode_track(enc: &Encoder, st: *mut AVStream, codec: AudioCodec, samples: &[f32]) -> Result<Vec<Pending>, MuxError> {
+/// Codifica tutta la traccia; restituisce i pacchetti nella base dei tempi `st_tb` dello stream `index`.
+fn encode_track(
+    enc: Encoder,
+    st_tb: AVRational,
+    index: c_int,
+    codec: AudioCodec,
+    samples: &[f32],
+) -> Result<Vec<Pending>, MuxError> {
     let ctx = enc.0;
-    // SAFETY: encoder aperto; stream del contesto ancora vivo.
-    let (frame_size, st_tb, index) = unsafe {
-        let fs = usize::try_from((*ctx).frame_size).unwrap_or(0);
-        (if fs == 0 { 1024 } else { fs }, (*st).time_base, (*st).index)
+    // SAFETY: encoder aperto.
+    let frame_size = match usize::try_from(unsafe { (*ctx).frame_size }) {
+        Ok(0) | Err(_) => 1024,
+        Ok(n) => n,
     };
     let frame = Frame(
         // SAFETY: allocazione senza precondizioni; il nullo è gestito sotto.

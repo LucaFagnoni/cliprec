@@ -35,6 +35,8 @@ pub enum MuxError {
     InvalidName(String),
     #[error("niente da scrivere: {0}")]
     Empty(&'static str),
+    #[error("thread di codifica audio terminato in modo anomalo")]
+    EncoderPanicked,
     #[error("memoria esaurita in FFmpeg")]
     OutOfMemory,
     #[error("{op} {path}: {source}")]
