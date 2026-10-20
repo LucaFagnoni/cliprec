@@ -51,6 +51,12 @@ pub trait VideoSource: Send {
     fn stats(&self) -> CaptureStats;
     /// Descrizione leggibile, es. «Monitor 1 (2560×1440)» o «osu!.exe».
     fn describe(&self) -> String;
+    /// Dimensione nativa del bersaglio in pixel fisici: la risoluzione del monitor su cui sta (o
+    /// starà) la sorgente. Definisce l'uscita «nativa» dell'encoder, che quindi non dipende dal primo
+    /// frame (un segnaposto o una finestra minimizzata). `None` se ancora ignota.
+    fn native_size(&self) -> Option<(u32, u32)> {
+        None
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]

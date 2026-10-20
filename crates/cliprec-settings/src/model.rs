@@ -83,6 +83,9 @@ pub fn to_form(c: &Config) -> (Form, Vec<SourceRow>) {
             AudioClipFormat::FlacPerTrack => 0,
             AudioClipFormat::WavPerTrack => 1,
             AudioClipFormat::Mka => 2,
+            AudioClipFormat::PolyWav => 3,
+            AudioClipFormat::Opus => 4,
+            AudioClipFormat::Aac => 5,
         },
         container: i32::from(c.clips.container == VideoContainer::Mkv),
         max_mb: c.memory.max_mb.map(|v| v.to_string()).unwrap_or_default().into(),
@@ -194,7 +197,7 @@ pub fn build_lenient(form: &Form, rows: &[SourceRow], base: &Config) -> (Config,
                     AudioSourceKind::App { exe: t }
                 }
             };
-            AudioSourceConfig { name, kind, volume: r.volume.clamp(0.0, 2.0) }
+            AudioSourceConfig { volume: r.volume.clamp(0.0, 2.0), ..AudioSourceConfig::new(name, kind) }
         })
         .collect();
 
@@ -239,6 +242,9 @@ pub fn build_lenient(form: &Form, rows: &[SourceRow], base: &Config) -> (Config,
     c.clips.audio_format = match form.audio_format {
         1 => AudioClipFormat::WavPerTrack,
         2 => AudioClipFormat::Mka,
+        3 => AudioClipFormat::PolyWav,
+        4 => AudioClipFormat::Opus,
+        5 => AudioClipFormat::Aac,
         _ => AudioClipFormat::FlacPerTrack,
     };
     c.clips.container = if form.container == 1 { VideoContainer::Mkv } else { VideoContainer::Mp4 };
@@ -342,8 +348,8 @@ mod tests {
         c.video.games = vec!["a.exe".into(), "b.exe".into()];
         c.audio.add_mix_track = true;
         c.audio.sources = vec![
-            AudioSourceConfig { name: "Discord".into(), kind: AudioSourceKind::App { exe: "Discord.exe".into() }, volume: 0.5 },
-            AudioSourceConfig { name: "Mic".into(), kind: AudioSourceKind::Input { device: Some("{id}".into()) }, volume: 1.0 },
+            AudioSourceConfig { volume: 0.5, ..AudioSourceConfig::new("Discord", AudioSourceKind::App { exe: "Discord.exe".into() }) },
+            AudioSourceConfig::new("Mic", AudioSourceKind::Input { device: Some("{id}".into()) }),
         ];
         c.clips.folder = Some("D:\\Clips".into());
         c.clips.container = VideoContainer::Mkv;

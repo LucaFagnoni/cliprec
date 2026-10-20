@@ -126,11 +126,10 @@ fn first_run_config(path: &std::path::Path) -> Config {
 fn first_run_defaults(discord_running: bool) -> Config {
     let mut config = Config::default();
     if discord_running {
-        config.audio.sources.push(cliprec_core::config::AudioSourceConfig {
-            name: "Discord".into(),
-            kind: cliprec_core::config::AudioSourceKind::App { exe: "Discord.exe".into() },
-            volume: 1.0,
-        });
+        config.audio.sources.push(cliprec_core::config::AudioSourceConfig::new(
+            "Discord",
+            cliprec_core::config::AudioSourceKind::App { exe: "Discord.exe".into() },
+        ));
     }
     config
 }

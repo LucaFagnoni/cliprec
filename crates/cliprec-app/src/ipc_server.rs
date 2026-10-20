@@ -48,6 +48,8 @@ pub fn handle_request(ctx: &Context, req: IpcRequest) -> IpcResponse {
             r
         }
         IpcRequest::TestClip => sent(AppCommand::SaveTestClip),
+        IpcRequest::SaveVideoClip => sent(AppCommand::SaveVideoClip),
+        IpcRequest::SaveAudioClip => sent(AppCommand::SaveAudioClip),
         IpcRequest::Quit => {
             let r = sent(AppCommand::Quit);
             (ctx.on_quit)();

@@ -252,6 +252,7 @@ impl Session {
             } else {
                 problem
             },
+            ..Default::default()
         }
     }
 

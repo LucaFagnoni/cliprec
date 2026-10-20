@@ -302,6 +302,10 @@ pub fn write_audio_clip(path: &Path, audio: &AudioSnapshot, format: AudioClipFor
         AudioClipFormat::FlacPerTrack => ("flac", AudioCodec::Flac, ".flac"),
         AudioClipFormat::WavPerTrack => ("wav", AudioCodec::PcmS24, ".wav"),
         AudioClipFormat::Mka => ("matroska", AudioCodec::Flac, ".mka"),
+        // Formati nuovi del contratto: li implementa replay-buffer (m27).
+        AudioClipFormat::PolyWav | AudioClipFormat::Opus | AudioClipFormat::Aac => {
+            return Err(MuxError::EncoderMissing(format!("{format:?} non ancora supportato")));
+        }
     };
     let tracks: Vec<Track<'_>> = audio
         .tracks

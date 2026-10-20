@@ -31,6 +31,7 @@ pub enum EngineEvent {
 
 /// Stato dal vivo mostrato in tray, nel pannello di stato e inviato via IPC.
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct EngineStatus {
     pub buffer_running: bool,
     pub video_enabled: bool,
@@ -42,11 +43,17 @@ pub struct EngineStatus {
     pub ram_locked: bool,
     pub encoder: String,
     pub source: String,
+    /// Frame al secondo effettivi in uscita (consegnati meno persi), non quelli configurati.
     pub fps: f64,
     pub frames_dropped: u64,
     pub saving: u32,
     pub recent_clips: Vec<PathBuf>,
+    /// Solo errori veri; le sorgenti in attesa (app chiusa, dispositivo assente) non sono errori.
     pub last_error: Option<String>,
+    /// Codec che si aprono davvero su questo PC (rilevati all'avvio con `probe`).
+    pub available_codecs: Vec<crate::video::VideoCodec>,
+    /// Esito dell'ultima clip di prova («Prova»): audio non silenzioso, video non nero.
+    pub last_test: Option<String>,
 }
 
 /// Stato di una sorgente audio o video.

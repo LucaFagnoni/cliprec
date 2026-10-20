@@ -300,8 +300,8 @@ mod tests {
             mode: TrackMode::Separate,
             add_mix_track: true,
             sources: vec![
-                AudioSourceConfig { name: "Sistema".into(), kind: AudioSourceKind::Output { device: None }, volume: 1.0 },
-                AudioSourceConfig { name: "Explorer".into(), kind: AudioSourceKind::App { exe: "explorer.exe".into() }, volume: 0.8 },
+                AudioSourceConfig::new("Sistema", AudioSourceKind::Output { device: None }),
+                AudioSourceConfig { volume: 0.8, ..AudioSourceConfig::new("Explorer", AudioSourceKind::App { exe: "explorer.exe".into() }) },
             ],
         };
         let sink = Arc::new(TestSink::default());
@@ -328,7 +328,7 @@ mod tests {
     fn start_with_three_sources_returns_quickly() {
         use crate::wasapi_source::OPENING;
         use cliprec_core::config::{AudioSourceConfig, AudioSourceKind};
-        let src = |name: &str, kind| AudioSourceConfig { name: name.into(), kind, volume: 1.0 };
+        let src = |name: &str, kind| AudioSourceConfig::new(name, kind);
         let cfg = AudioConfig {
             mode: TrackMode::Merged,
             add_mix_track: false,

@@ -137,8 +137,8 @@ impl Default for AudioConfig {
             mode: TrackMode::Separate,
             add_mix_track: false,
             sources: vec![
-                AudioSourceConfig { name: "Sistema".into(), kind: AudioSourceKind::Output { device: None }, volume: 1.0 },
-                AudioSourceConfig { name: "Microfono".into(), kind: AudioSourceKind::Input { device: None }, volume: 1.0 },
+                AudioSourceConfig::new("Sistema", AudioSourceKind::Output { device: None }),
+                AudioSourceConfig::new("Microfono", AudioSourceKind::Input { device: None }),
             ],
         }
     }
@@ -165,6 +165,17 @@ pub struct AudioSourceConfig {
     /// Guadagno lineare, 1.0 = invariato.
     #[serde(default = "one")]
     pub volume: f32,
+    /// Ritardo applicato alla sorgente in millisecondi (positivo = l'audio esce più tardi), per
+    /// compensare la latenza di un dispositivo, come il «Sync Offset» di OBS. Da -1000 a 1000.
+    #[serde(default)]
+    pub delay_ms: i32,
+}
+
+impl AudioSourceConfig {
+    /// Sorgente con volume 1 e nessun ritardo.
+    pub fn new(name: impl Into<String>, kind: AudioSourceKind) -> Self {
+        Self { name: name.into(), kind, volume: 1.0, delay_ms: 0 }
+    }
 }
 
 fn one() -> f32 {
@@ -238,6 +249,12 @@ pub enum AudioClipFormat {
     WavPerTrack,
     /// Un unico MKA multitraccia.
     Mka,
+    /// Un unico WAV polifonico (2 canali per traccia, nomi in iXML): REAPER lo divide, Audition legge i nomi.
+    PolyWav,
+    /// Opus per la condivisione: un file per traccia (in traccia unica: un solo file).
+    Opus,
+    /// AAC-LC in M4A per la condivisione: un file per traccia (in traccia unica: un solo file).
+    Aac,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

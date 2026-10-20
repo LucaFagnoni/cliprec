@@ -21,6 +21,10 @@ pub enum IpcRequest {
     TestClip,
     /// Chiude ClipRec (usato dai test e dagli script).
     Quit,
+    /// Salva una clip video come la hotkey (automazione: Stream Deck, macro, script).
+    SaveVideoClip,
+    /// Salva una clip audio come la hotkey.
+    SaveAudioClip,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
