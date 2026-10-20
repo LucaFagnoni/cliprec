@@ -2,7 +2,7 @@
 //! process loopback di un'applicazione. Un thread per sorgente, registrato in MMCSS «Pro Audio»,
 //! a eventi con attesa massima di 10 ms; i vuoti diventano silenzio tramite [`Continuity`].
 
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use std::sync::mpsc::{SyncSender, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -101,6 +101,11 @@ pub struct WasapiSource {
     stop: Arc<AtomicBool>,
     state: Arc<Mutex<SourceState>>,
     thread: Option<JoinHandle<()>>,
+    /// Thread normale (non MMCSS) che cerca il PID dell'app ogni 3 s.
+    watcher: Option<JoinHandle<()>>,
+    /// Per i test: l'apertura fallisce con `AccessDenied` finché è vero.
+    #[cfg(test)]
+    fail_open: Arc<AtomicBool>,
 }
 
 impl WasapiSource {
@@ -111,19 +116,56 @@ impl WasapiSource {
             stop: Arc::new(AtomicBool::new(false)),
             state: Arc::new(Mutex::new(SourceState::Stopped)),
             thread: None,
+            watcher: None,
+            #[cfg(test)]
+            fail_open: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
+
+/// Ricerca periodica del processo radice dell'app, fuori dal thread audio: Toolhelp alloca e
+/// scorre tutti i processi. Pubblica il PID (0 = assente) e chiede la riapertura se cambia.
+fn watch_pid(exe: String, pid: Arc<AtomicU32>, flags: Arc<DeviceFlags>, stop: Arc<AtomicBool>) {
+    while !stop.load(Ordering::Acquire) {
+        let until = Instant::now() + RETRY;
+        while Instant::now() < until {
+            if stop.load(Ordering::Acquire) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let found = find_root_pid(&exe).unwrap_or(0);
+        if pid.swap(found, Ordering::AcqRel) != found {
+            flags.signal(true);
         }
     }
 }
 
 impl AudioSource for WasapiSource {
-    /// Apre il dispositivo sul thread di cattura e aspetta il primo esito: un errore definitivo
-    /// (es. microfono negato dalla privacy) torna qui; un dispositivo o un'app assenti no, la
-    /// sorgente parte in `Waiting` e consegna silenzio.
+    /// Avvia il thread di cattura e aspetta il primo tentativo di apertura (al massimo 10 s), così
+    /// `state()` è già significativo al ritorno. Nessun errore di apertura ferma la sorgente:
+    /// dispositivo o app assenti danno `Waiting`, privacy del microfono, modalità esclusiva o altri
+    /// errori danno `Error(messaggio)`; in entrambi i casi si consegna silenzio e si ritenta ogni
+    /// 3 s (o subito a una notifica), quindi la traccia riprende da sola quando la causa sparisce.
+    /// Torna `Err` solo se il thread non si crea.
     fn start(&mut self, on_chunk: ChunkCallback) -> Result<(), SourceError> {
         if self.thread.is_some() {
             return Ok(());
         }
         self.stop.store(false, Ordering::Release);
+        let flags = Arc::new(DeviceFlags::default());
+        let pid = Arc::new(AtomicU32::new(0));
+        if let AudioSourceKind::App { exe } = &self.kind {
+            // Prima ricerca qui, sul thread chiamante; poi un thread normale ogni 3 s.
+            pid.store(find_root_pid(exe).unwrap_or(0), Ordering::Release);
+            let (exe, pid, flags, stop) = (exe.clone(), pid.clone(), flags.clone(), self.stop.clone());
+            self.watcher = Some(
+                std::thread::Builder::new()
+                    .name(format!("pid {}", self.name))
+                    .spawn(move || watch_pid(exe, pid, flags, stop))
+                    .map_err(|e| SourceError::Failed(format!("thread di ricerca dell'app: {e}")))?,
+            );
+        }
         let (tx, rx) = sync_channel(1);
         let ctx = Capture {
             kind: self.kind.clone(),
@@ -131,27 +173,27 @@ impl AudioSource for WasapiSource {
             state: self.state.clone(),
             on_chunk,
             continuity: Continuity::new(),
+            flags,
+            pid,
+            #[cfg(test)]
+            fail_open: self.fail_open.clone(),
         };
-        let thread = std::thread::Builder::new()
-            .name(format!("audio {}", self.name))
-            .spawn(move || ctx.run(tx))
-            .map_err(|e| SourceError::Failed(format!("thread di cattura: {e}")))?;
-        match rx.recv_timeout(Duration::from_secs(10)) {
-            Ok(Err(e)) => {
-                let _ = thread.join();
-                Err(e)
+        let thread = match std::thread::Builder::new().name(format!("audio {}", self.name)).spawn(move || ctx.run(tx)) {
+            Ok(t) => t,
+            Err(e) => {
+                self.stop();
+                return Err(SourceError::Failed(format!("thread di cattura: {e}")));
             }
-            // Pronto, oppure ancora in apertura: il thread prosegue e riferisce tramite `state`.
-            _ => {
-                self.thread = Some(thread);
-                Ok(())
-            }
-        }
+        };
+        // Pronto, oppure ancora in apertura: il thread prosegue e riferisce tramite `state`.
+        let _ = rx.recv_timeout(Duration::from_secs(10));
+        self.thread = Some(thread);
+        Ok(())
     }
 
     fn stop(&mut self) {
         self.stop.store(true, Ordering::Release);
-        if let Some(t) = self.thread.take() {
+        for t in [self.thread.take(), self.watcher.take()].into_iter().flatten() {
             let _ = t.join();
         }
     }
@@ -218,6 +260,11 @@ struct Capture {
     state: Arc<Mutex<SourceState>>,
     on_chunk: ChunkCallback,
     continuity: Continuity,
+    flags: Arc<DeviceFlags>,
+    /// PID radice dell'app, aggiornato da `watch_pid` (0 = non in esecuzione).
+    pid: Arc<AtomicU32>,
+    #[cfg(test)]
+    fail_open: Arc<AtomicBool>,
 }
 
 impl Capture {
@@ -230,7 +277,7 @@ impl Capture {
         }
     }
 
-    fn run(mut self, ready: SyncSender<Result<(), SourceError>>) {
+    fn run(mut self, ready: SyncSender<()>) {
         let com = wasapi::initialize_mta();
         let mmcss = Mmcss::register();
         self.capture_loop(ready);
@@ -241,9 +288,9 @@ impl Capture {
         self.set_state(SourceState::Stopped);
     }
 
-    fn capture_loop(&mut self, ready: SyncSender<Result<(), SourceError>>) {
+    fn capture_loop(&mut self, ready: SyncSender<()>) {
         let mut ready = Some(ready);
-        let flags = Arc::new(DeviceFlags::default());
+        let flags = self.flags.clone();
         // Notifiche dei dispositivi (IMMNotificationClient): solo segnali atomici nei callback.
         let enumerator = DeviceEnumerator::new().ok();
         let _registration = enumerator.as_ref().and_then(|e| self.register_device_events(e, flags.clone()));
@@ -251,43 +298,34 @@ impl Capture {
         self.continuity.anchor(QpcTime::now());
 
         while !self.stop.load(Ordering::Acquire) {
-            match self.open(enumerator.as_ref()) {
+            let outcome = self.open(enumerator.as_ref());
+            // Lo stato si aggiorna prima di sbloccare `start`.
+            match &outcome {
+                Ok(_) => self.set_state(SourceState::Running),
+                Err(e) => self.set_failure(e),
+            }
+            if let Some(tx) = ready.take() {
+                let _ = tx.send(());
+            }
+            match outcome {
                 Ok(session) => {
-                    if let Some(tx) = ready.take() {
-                        let _ = tx.send(Ok(()));
-                    }
-                    self.set_state(SourceState::Running);
-                    match self.stream(&session, &mut buffers, &flags) {
-                        Ok(()) => {}
-                        Err(OpenError::Wait(msg)) => self.set_state(SourceState::Waiting(msg)),
-                        Err(OpenError::Fatal(e)) => self.set_state(SourceState::Error(e.to_string())),
-                    }
+                    let result = self.stream(&session, &mut buffers, &flags);
                     let _ = session.client.stop_stream();
-                    if !matches!(self.current_state(), SourceState::Running) {
+                    if let Err(e) = result {
+                        self.set_failure(&e);
                         self.wait_silently(&flags);
                     }
                 }
-                Err(OpenError::Wait(msg)) => {
-                    if let Some(tx) = ready.take() {
-                        let _ = tx.send(Ok(()));
-                    }
-                    self.set_state(SourceState::Waiting(msg));
-                    self.wait_silently(&flags);
-                }
-                Err(OpenError::Fatal(e)) => {
-                    if let Some(tx) = ready.take() {
-                        let _ = tx.send(Err(e));
-                        return;
-                    }
-                    self.set_state(SourceState::Error(e.to_string()));
-                    self.wait_silently(&flags);
-                }
+                Err(_) => self.wait_silently(&flags),
             }
         }
     }
 
-    fn current_state(&self) -> SourceState {
-        self.state.lock().map(|g| g.clone()).unwrap_or_default()
+    fn set_failure(&self, e: &OpenError) {
+        self.set_state(match e {
+            OpenError::Wait(msg) => SourceState::Waiting(msg.clone()),
+            OpenError::Fatal(e) => SourceState::Error(e.to_string()),
+        });
     }
 
     /// Consegna silenzio fino al prossimo tentativo (3 s o una notifica di dispositivo).
@@ -325,12 +363,17 @@ impl Capture {
     }
 
     fn open(&self, enumerator: Option<&DeviceEnumerator>) -> Result<Session, OpenError> {
+        #[cfg(test)]
+        if self.fail_open.load(Ordering::Acquire) {
+            return Err(OpenError::Fatal(SourceError::AccessDenied(MIC_PRIVACY.into())));
+        }
         let classify = |e: WasapiError| classify(e, &self.kind);
         let (mut client, channels, direction, pid) = match &self.kind {
             AudioSourceKind::App { exe } => {
-                let Some(pid) = find_root_pid(exe) else {
+                let pid = self.pid.load(Ordering::Acquire);
+                if pid == 0 {
                     return Err(OpenError::Wait(format!("{exe} non è in esecuzione")));
-                };
+                }
                 // ATTENZIONE: in wasapi 0.26 `include_tree = false` vuol dire modalità EXCLUDE.
                 let client = AudioClient::new_application_loopback_client(pid, true).map_err(classify)?;
                 (client, CHANNELS, Direction::Capture, Some(pid))
@@ -379,9 +422,10 @@ impl Capture {
     fn stream(&mut self, s: &Session, b: &mut Buffers, flags: &DeviceFlags) -> Result<(), OpenError> {
         let classify = |e: WasapiError| classify(e, &self.kind);
         let block = 4 * s.channels;
-        let mut last_check = Instant::now();
         while !self.stop.load(Ordering::Acquire) {
-            if flags.reopen.swap(false, Ordering::AcqRel) {
+            // Riapertura chiesta da una notifica di dispositivo o da `watch_pid` (app riavviata,
+            // chiusa o radice cambiata: con PID 0 la riapertura finisce in `Waiting`).
+            if flags.reopen.swap(false, Ordering::AcqRel) || s.pid.is_some_and(|p| p != self.pid.load(Ordering::Acquire)) {
                 return Ok(());
             }
             match s.disconnect.load(Ordering::Acquire) {
@@ -420,17 +464,6 @@ impl Capture {
                 self.continuity.packet(qpc, stereo, &mut *self.on_chunk);
             }
             self.continuity.idle(QpcTime::now(), &mut *self.on_chunk);
-
-            if let (Some(pid), AudioSourceKind::App { exe }) = (s.pid, &self.kind)
-                && last_check.elapsed() >= RETRY
-            {
-                last_check = Instant::now();
-                match find_root_pid(exe) {
-                    Some(p) if p == pid => {}
-                    Some(_) => return Ok(()), // riavviata o radice cambiata: si riaggancia
-                    None => return Err(OpenError::Wait(format!("{exe} non è in esecuzione"))),
-                }
-            }
         }
         Ok(())
     }
@@ -650,6 +683,41 @@ mod tests {
         assert!(matches!(classify(gone, &AudioSourceKind::Output { device: None }), OpenError::Wait(_)));
         let busy = WasapiError::Windows(windows::core::Error::from_hresult(AUDCLNT_E_DEVICE_IN_USE));
         assert!(matches!(classify(busy, &AudioSourceKind::Output { device: None }), OpenError::Fatal(SourceError::Unsupported(_))));
+    }
+
+    /// Errore all'avvio (privacy simulata, sul loopback d'uscita: niente microfono): la sorgente
+    /// parte in `Error` con il percorso dell'impostazione, consegna silenzio, e torna `Running` da
+    /// sola al tentativo successivo quando la causa sparisce.
+    #[test]
+    fn startup_error_retries_until_running() {
+        let chunks: Chunks = Arc::default();
+        let sink = chunks.clone();
+        let mut src = WasapiSource::new("test", AudioSourceKind::Output { device: None });
+        src.fail_open.store(true, Ordering::Release);
+        let t0 = Instant::now();
+        src.start(Box::new(move |c| {
+            let peak = c.samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+            sink.lock().unwrap().push((c.qpc, c.samples.len() / 2, peak));
+        }))
+        .unwrap();
+        match src.state() {
+            SourceState::Error(m) => assert!(m.contains("Privacy e sicurezza → Microfono"), "{m}"),
+            s => panic!("atteso Error, stato {s:?}"),
+        }
+        std::thread::sleep(Duration::from_millis(500));
+        src.fail_open.store(false, Ordering::Release);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while src.state() != SourceState::Running && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let recovered = t0.elapsed().as_secs_f64();
+        assert_eq!(src.state(), SourceState::Running);
+        std::thread::sleep(Duration::from_millis(500));
+        src.stop();
+        let wall = t0.elapsed().as_secs_f64();
+        println!("Running dopo {recovered:.2} s");
+        assert!(recovered >= 2.9, "il nuovo tentativo arriva dopo 3 s, non prima: {recovered}");
+        assert_continuous(&chunks.lock().unwrap(), wall);
     }
 
     /// Cattura reale dal microfono: solo a mano (`cargo test -- --ignored`), mai di notte.
