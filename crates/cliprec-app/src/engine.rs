@@ -187,6 +187,7 @@ impl Session {
             Some(sources) => cliprec_audio::AudioEngine::with_sources(
                 sources,
                 &[],
+                &[],
                 config.audio.mode,
                 config.audio.add_mix_track && config.audio.mode == TrackMode::Separate,
                 sink,
@@ -367,6 +368,11 @@ impl Session {
         }
     }
 
+    /// Ritardo attuale del mixer (adattivo: segue la sorgente più lenta), per chiudere lo snapshot audio.
+    fn mix_latency(&self) -> i64 {
+        self.audio.as_ref().map_or(cliprec_audio::MIX_LATENCY_HNS, cliprec_audio::AudioEngine::mix_latency_hns)
+    }
+
     /// Aggiorna le misure dal vivo: fps effettivi = frame consegnati dal pacer al secondo, su
     /// finestre di almeno un secondo (m23). Chiamata dal loop ogni 500 ms.
     fn measure(&mut self) {
@@ -387,7 +393,7 @@ impl Session {
     pub fn save_test(&self) -> Option<SaveHandle> {
         let kind = if self.video.is_some() { ClipKind::Video } else { ClipKind::Audio };
         let end = QpcTime::now();
-        let audio_end = audio_snapshot_end(end, &self.config);
+        let audio_end = audio_snapshot_end(end, &self.config, self.mix_latency());
         let audio = self.buffer.snapshot_audio_refs(audio_end.add_hns(-5 * cliprec_core::HNS_PER_SEC), audio_end);
         let video_ok = self.video.as_ref().map(|v| {
             let st = v.stats();
@@ -450,7 +456,7 @@ impl Session {
     pub fn save(&self, kind: ClipKind, seconds: u32) -> Option<SaveHandle> {
         let pressed = Instant::now();
         let end = QpcTime::now();
-        let audio_end = audio_snapshot_end(end, &self.config);
+        let audio_end = audio_snapshot_end(end, &self.config, self.mix_latency());
         let events = self.events.clone();
         let fail = move |events: &Sender<EngineEvent>, kind: ClipKind, reason: String| {
             let _ = events.send(EngineEvent::ClipFailed { kind, reason });
@@ -867,10 +873,10 @@ fn status_problem(states: &[(String, SourceState)]) -> Option<String> {
 /// Fine dello snapshot audio di una clip presa adesso: le sorgenti consegnano a blocchi di 10 ms e il
 /// mixer (traccia unica o «Mix») scrive con `MIX_LATENCY` di ritardo, quindi ci si ferma prima di
 /// quanto non è ancora scritto, con due blocchi di margine (m3).
-fn audio_snapshot_end(now: QpcTime, config: &Config) -> QpcTime {
+fn audio_snapshot_end(now: QpcTime, config: &Config, mix_latency_hns: i64) -> QpcTime {
     let margin = 2 * cliprec_core::time::frames_to_hns(cliprec_audio::MIX_BLOCK_FRAMES as i64);
     let mixed = config.audio.mode == TrackMode::Merged || config.audio.add_mix_track;
-    let latency = if mixed { cliprec_audio::MIX_LATENCY_HNS } else { 0 };
+    let latency = if mixed { mix_latency_hns } else { 0 };
     now.add_hns(-(latency + margin))
 }
 
@@ -1678,7 +1684,7 @@ mod tests {
         let overrides = SourceOverrides { video: None, audio: Some(sources) };
         let session = Session::start(&config, buffer.clone(), Shared::default(), overrides, tx).unwrap();
         std::thread::sleep(Duration::from_millis(2500));
-        let end = audio_snapshot_end(QpcTime::now(), &config);
+        let end = audio_snapshot_end(QpcTime::now(), &config, session.mix_latency());
         let snap = buffer.snapshot_audio(end.add_hns(-cliprec_core::HNS_PER_SEC), end).unwrap();
         drop(session);
         let t = &snap.tracks[0].samples;
