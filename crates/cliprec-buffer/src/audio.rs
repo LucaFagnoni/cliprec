@@ -206,53 +206,140 @@ impl Track {
 }
 
 impl TrackCopy {
-    /// Decomprime e posiziona i campioni su `frames` frame a partire da `start`; silenzio dove
-    /// mancano dati. Il primo blocco di ogni tratto contiguo si posiziona dal suo istante, i
-    /// successivi si accodano al campione (niente buchi né sovrapposizioni da arrotondamenti).
-    pub fn render(self, start: QpcTime, frames: usize) -> AudioTrackPcm {
-        let mut out = Placer { out: vec![0.0f32; frames * CHANNELS], start, next: None };
-        let mut buf = Vec::new();
-        for (at, n, data) in &self.blocks {
-            match claxon::frame::FrameReader::new(Cursor::new(&**data)).read_next_or_eof(std::mem::take(&mut buf)) {
-                Ok(Some(block)) if block.duration() as usize == *n && block.channels() as usize == CHANNELS => {
-                    out.place(*at, *n, |i, ch| block.sample(ch as u32, i as u32));
-                    buf = block.into_buffer();
-                }
-                _ => {
-                    tracing::error!(track = %self.name, "blocco FLAC illeggibile: sostituito da silenzio");
-                    out.next = None;
-                }
-            }
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Lettore in streaming di `frames` frame a partire da `start`: decomprime un blocco alla
+    /// volta, silenzio dove mancano dati.
+    pub fn reader(&self, start: QpcTime, frames: usize) -> TrackReader<'_> {
+        // Posizioni calcolate dai soli metadati: il primo blocco di ogni tratto contiguo si
+        // posiziona dal suo istante, i successivi si accodano al campione (niente buchi né
+        // sovrapposizioni da arrotondamenti).
+        let mut places = Vec::with_capacity(self.blocks.len() + 1);
+        let mut next: Option<(QpcTime, i64)> = None;
+        let pending = (self.pending_start, self.pending.len() / CHANNELS, Source::Pending);
+        let blocks = self.blocks.iter().enumerate().map(|(i, (at, n, _))| (*at, *n, Source::Block(i)));
+        for (at, n, source) in blocks.chain(std::iter::once(pending)) {
+            let offset = match next {
+                Some((t, off)) if at.hns_since(t).abs() <= DISCONTINUITY_HNS => off,
+                _ => hns_to_frames(at.hns_since(start)),
+            };
+            places.push(Place { offset, frames: n, source });
+            next = Some((at.add_hns(frames_to_hns(n as i64)), offset + n as i64));
         }
-        let pending = &self.pending;
-        out.place(self.pending_start, pending.len() / CHANNELS, |i, ch| pending[i * CHANNELS + ch]);
-        AudioTrackPcm { name: self.name, samples: out.out }
+        TrackReader { copy: self, places, idx: 0, pos: 0, total: frames, decoded: None, spare: Vec::new() }
     }
 }
 
-struct Placer {
-    out: Vec<f32>,
-    start: QpcTime,
-    /// Istante e posizione (in frame) attesi per il prossimo blocco contiguo.
-    next: Option<(QpcTime, i64)>,
+#[derive(Clone, Copy, PartialEq)]
+enum Source {
+    Block(usize),
+    Pending,
 }
 
-impl Placer {
-    fn place(&mut self, at: QpcTime, n: usize, sample: impl Fn(usize, usize) -> i32) {
-        let offset = match self.next {
-            Some((t, off)) if at.hns_since(t).abs() <= DISCONTINUITY_HNS => off,
-            _ => hns_to_frames(at.hns_since(self.start)),
-        };
-        let frames = self.out.len() / CHANNELS;
-        for i in 0..n {
-            let Ok(dst) = usize::try_from(offset + i as i64) else { continue };
-            if dst >= frames {
+struct Place {
+    /// Primo frame del blocco nell'uscita (può essere negativo).
+    offset: i64,
+    frames: usize,
+    source: Source,
+}
+
+/// Legge una traccia di uno snapshot audio a pezzi, decomprimendo un blocco FLAC alla volta.
+pub struct TrackReader<'a> {
+    copy: &'a TrackCopy,
+    places: Vec<Place>,
+    idx: usize,
+    pos: usize,
+    total: usize,
+    /// Ultimo blocco decompresso (indice in `places`), `None` se illeggibile.
+    decoded: Option<(usize, Option<claxon::frame::Block>)>,
+    spare: Vec<i32>,
+}
+
+impl TrackReader<'_> {
+    /// Frame ancora da leggere.
+    pub fn remaining(&self) -> usize {
+        self.total - self.pos
+    }
+
+    /// Riempie `out` (f32 stereo interleaved) con i frame successivi; restituisce quanti frame
+    /// ha scritto (0 alla fine).
+    pub fn read(&mut self, out: &mut [f32]) -> usize {
+        let want = (out.len() / CHANNELS).min(self.remaining());
+        let mut w = 0;
+        while w < want {
+            let p = (self.pos + w) as i64;
+            while self.places.get(self.idx).is_some_and(|pl| pl.offset + pl.frames as i64 <= p) {
+                self.idx += 1;
+            }
+            let Some(pl) = self.places.get(self.idx) else {
+                out[w * CHANNELS..want * CHANNELS].fill(0.0);
                 break;
+            };
+            if pl.offset > p {
+                let gap = ((pl.offset - p) as usize).min(want - w);
+                out[w * CHANNELS..(w + gap) * CHANNELS].fill(0.0);
+                w += gap;
+                continue;
             }
-            for ch in 0..CHANNELS {
-                self.out[dst * CHANNELS + ch] = sample(i, ch) as f32 / SCALE;
+            let from = (p - pl.offset) as usize;
+            let k = (pl.frames - from).min(want - w);
+            let dst = &mut out[w * CHANNELS..(w + k) * CHANNELS];
+            match pl.source {
+                Source::Pending => {
+                    for (d, &x) in dst.iter_mut().zip(&self.copy.pending[from * CHANNELS..]) {
+                        *d = x as f32 / SCALE;
+                    }
+                }
+                Source::Block(b) => {
+                    let block = self.decode(b);
+                    match block {
+                        Some(block) => {
+                            for (i, frame) in dst.chunks_exact_mut(CHANNELS).enumerate() {
+                                for (ch, d) in frame.iter_mut().enumerate() {
+                                    *d = block.sample(ch as u32, (from + i) as u32) as f32 / SCALE;
+                                }
+                            }
+                        }
+                        None => dst.fill(0.0),
+                    }
+                }
             }
+            w += k;
         }
-        self.next = Some((at.add_hns(frames_to_hns(n as i64)), offset + n as i64));
+        self.pos += want;
+        want
     }
+
+    /// Blocco `b` decompresso (tenuto finché non serve il successivo).
+    fn decode(&mut self, b: usize) -> Option<&claxon::frame::Block> {
+        if self.decoded.as_ref().is_none_or(|(i, _)| *i != b) {
+            if let Some((_, Some(old))) = self.decoded.take() {
+                self.spare = old.into_buffer();
+            }
+            let (_, n, data) = &self.copy.blocks[b];
+            let block = match claxon::frame::FrameReader::new(Cursor::new(&**data)).read_next_or_eof(std::mem::take(&mut self.spare)) {
+                Ok(Some(block)) if block.duration() as usize == *n && block.channels() as usize == CHANNELS => Some(block),
+                _ => {
+                    tracing::error!(track = %self.copy.name, "blocco FLAC illeggibile: sostituito da silenzio");
+                    None
+                }
+            };
+            self.decoded = Some((b, block));
+        }
+        self.decoded.as_ref().and_then(|(_, block)| block.as_ref())
+    }
+
+    /// Legge tutto in memoria.
+    pub fn read_all(mut self) -> Vec<f32> {
+        let mut out = vec![0.0f32; self.remaining() * CHANNELS];
+        self.read(&mut out);
+        out
+    }
+}
+
+/// Traccia intera decompressa (per `AudioRefs::render`).
+pub(crate) fn render(copy: &TrackCopy, start: QpcTime, frames: usize) -> AudioTrackPcm {
+    AudioTrackPcm { name: copy.name.clone(), samples: copy.reader(start, frames).read_all() }
 }

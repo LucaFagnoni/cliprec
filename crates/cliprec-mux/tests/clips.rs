@@ -272,7 +272,8 @@ fn video_clip_mp4_and_mkv() {
 
     let base = out_dir().join("video_clip");
     clean(&base);
-    let saved = write_video_clip(&base, &video, Some(&audio), &VideoClipOptions::default()).unwrap();
+    let refs = b.snapshot_audio_refs(video.start().unwrap(), end).unwrap();
+    let saved = write_video_clip(&base, &video, Some(&refs), &VideoClipOptions::default()).unwrap();
     assert_eq!(saved.kind, ClipKind::Video);
     assert_eq!(saved.path.extension().unwrap(), "mp4");
     assert!((saved.duration_secs - 3.0).abs() < 1e-6);
@@ -297,7 +298,7 @@ fn video_clip_mp4_and_mkv() {
     // Senza audio: solo video.
     let base = out_dir().join("video_only");
     clean(&base);
-    let saved = write_video_clip(&base, &video, None, &VideoClipOptions::default()).unwrap();
+    let saved = write_video_clip(&base, &video, None::<&cliprec_buffer::AudioRefs>, &VideoClipOptions::default()).unwrap();
     assert_eq!(ffprobe(&saved.path, &[])["streams"].as_array().unwrap().len(), 1);
 }
 
@@ -386,7 +387,9 @@ fn audio_clips_flac_wav_mka() {
     ] {
         let base = out_dir().join(format!("audio_{ext}"));
         clean(&base);
-        let saved = write_audio_clip(&base, &audio, format).unwrap();
+        // Dai riferimenti ai blocchi FLAC, in streaming (come il motore); il confronto è con lo snapshot.
+        let refs = b.snapshot_audio_refs(end.add_hns(-4 * HNS_PER_SEC), end).unwrap();
+        let saved = write_audio_clip(&base, &refs, format).unwrap();
         assert_eq!(saved.kind, ClipKind::Audio);
         assert!(saved.path.is_dir());
         let files = [format!("01 - Gioco.{ext}"), format!("02 - Discord.{ext}")];

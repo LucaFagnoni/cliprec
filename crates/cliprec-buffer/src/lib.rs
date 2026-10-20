@@ -27,6 +27,7 @@ use flacenc::error::{Verified, Verify};
 
 use crate::arena::ChunkRing;
 use crate::audio::{Keep, Track};
+pub use crate::audio::TrackReader;
 
 const VIDEO_CHUNK: usize = 4 << 20;
 /// Video conservato oltre `video_seconds`, oltre al GOP in corso.
@@ -124,11 +125,35 @@ pub struct AudioRefs {
 }
 
 impl AudioRefs {
+    /// Istante QPC del primo campione di ogni traccia.
+    pub fn start(&self) -> QpcTime {
+        self.start
+    }
+
+    /// Lunghezza di ogni traccia, in frame stereo a 48 kHz.
+    pub fn frames(&self) -> usize {
+        self.frames
+    }
+
+    pub fn track_count(&self) -> usize {
+        self.tracks.len()
+    }
+
+    pub fn track_name(&self, track: usize) -> Option<&str> {
+        self.tracks.get(track).map(|t| t.name())
+    }
+
+    /// Lettore in streaming della traccia `track`: decomprime un blocco FLAC alla volta, così il
+    /// salvataggio non tiene mai in memoria il PCM intero (M5).
+    pub fn reader(&self, track: usize) -> Option<TrackReader<'_>> {
+        self.tracks.get(track).map(|t| t.reader(self.start, self.frames))
+    }
+
     /// Decomprime e taglia tutte le tracce allo stesso campione e alla stessa lunghezza, con
-    /// silenzio dove mancano dati.
+    /// silenzio dove mancano dati. Tiene tutto il PCM in memoria: per salvare meglio `reader`.
     pub fn render(self) -> AudioSnapshot {
         let (start, frames) = (self.start, self.frames);
-        AudioSnapshot { start, tracks: self.tracks.into_iter().map(|c| c.render(start, frames)).collect() }
+        AudioSnapshot { start, tracks: self.tracks.iter().map(|c| audio::render(c, start, frames)).collect() }
     }
 }
 
