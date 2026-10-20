@@ -5,9 +5,12 @@
 //! - `gen-test-clip <out.mp4> [--av-offset-ms X]`: clip di riferimento.
 //! - `bench-report <csv...>`: fps medi e 1% low da CSV PresentMon, confronto di due run.
 //! - `testwindow [--seconds N]`: finestra 640x360 con timecode QPC e lampo a ogni secondo.
+//! - `dist`: build release e cartella `target/dist/ClipRec`. `notices`: rigenera THIRD_PARTY_NOTICES.md.
 //! - `ffmpeg`: scarica in `third_party/ffmpeg` la build FFmpeg 9 LGPL condivisa di BtbN
 //!   (header, librerie di importazione, DLL). Usa `curl.exe` e `tar.exe` di Windows.
 
+mod dist;
+mod notices;
 mod testwindow;
 
 use std::path::{Path, PathBuf};
@@ -25,6 +28,8 @@ fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("ffmpeg") => ffmpeg(&root()?),
+        Some("dist") => dist::run_dist(&root()?),
+        Some("notices") => notices::run(&root()?),
         Some("probe") => finish("probe", probe_cmd(&args[1..])?),
         Some("sync") => finish("sync", sync_cmd(&args[1..])?),
         Some("gen-test-clip") => gen_cmd(&args[1..]),
@@ -35,7 +40,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         _ => {
-            eprintln!("uso: cargo xtask ffmpeg | probe | sync | gen-test-clip | bench-report (vedi la testata di xtask/src/main.rs)");
+            eprintln!("uso: cargo xtask ffmpeg | dist | notices | probe | sync | gen-test-clip | bench-report (vedi la testata di xtask/src/main.rs)");
             std::process::exit(2);
         }
     }
@@ -107,7 +112,7 @@ fn root() -> Result<PathBuf> {
     dir.parent().map(Path::to_path_buf).context("xtask senza cartella padre")
 }
 
-fn run(cmd: &mut Command) -> Result<()> {
+pub(crate) fn run(cmd: &mut Command) -> Result<()> {
     let status = cmd.status().with_context(|| format!("avvio di {cmd:?}"))?;
     if !status.success() {
         bail!("{cmd:?} è terminato con {status}");
