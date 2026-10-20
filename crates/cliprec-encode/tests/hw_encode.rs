@@ -14,7 +14,8 @@ use cliprec_core::gpu::luid_to_i64;
 use cliprec_core::{GpuDevice, GpuFrame, HNS_PER_SEC, QpcTime, VideoEncoder};
 use cliprec_encode::EncoderSettings;
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
+    D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE2D_DESC,
+    D3D11_USAGE_DEFAULT,
     ID3D11RenderTargetView, ID3D11Texture2D,
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
@@ -39,8 +40,8 @@ fn device(vendor_id: u32) -> Option<GpuDevice> {
     Some(dev)
 }
 
-/// Texture BGRA con render target, come quelle che produce la cattura.
-fn texture(gpu: &GpuDevice, w: u32, h: u32) -> (ID3D11Texture2D, ID3D11RenderTargetView) {
+/// Texture BGRA con render target, come quelle che produce la cattura; con `seed` piena di rumore.
+fn texture(gpu: &GpuDevice, w: u32, h: u32, seed: Option<u32>) -> (ID3D11Texture2D, ID3D11RenderTargetView) {
     let desc = D3D11_TEXTURE2D_DESC {
         Width: w,
         Height: h,
@@ -52,9 +53,21 @@ fn texture(gpu: &GpuDevice, w: u32, h: u32) -> (ID3D11Texture2D, ID3D11RenderTar
         BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
         ..Default::default()
     };
+    let pixels: Vec<u32> = match seed {
+        Some(mut x) => (0..w * h)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 17;
+                x ^= x << 5;
+                x | 0xff00_0000
+            })
+            .collect(),
+        None => Vec::new(),
+    };
+    let init = D3D11_SUBRESOURCE_DATA { pSysMem: pixels.as_ptr().cast(), SysMemPitch: w * 4, SysMemSlicePitch: 0 };
     let mut tex = None;
-    // SAFETY: descrittore e puntatore d'uscita locali.
-    unsafe { gpu.device.CreateTexture2D(&desc, None, Some(&mut tex)) }.unwrap();
+    // SAFETY: descrittore, dati iniziali (w×h pixel da 4 byte) e puntatore d'uscita locali.
+    unsafe { gpu.device.CreateTexture2D(&desc, seed.map(|_| &init as *const _), Some(&mut tex)) }.unwrap();
     let tex = tex.unwrap();
     let mut rtv = None;
     // SAFETY: texture valida con BIND_RENDER_TARGET; puntatore d'uscita locale.
@@ -71,8 +84,15 @@ struct Pkt {
 }
 
 /// Codifica `FRAMES` frame; le dimensioni della sorgente cambiano a metà se `sizes` ne ha due.
-fn run(gpu: &GpuDevice, enc: &mut dyn VideoEncoder, sizes: &[(u32, u32)]) -> (Vec<Pkt>, f64) {
-    let targets: Vec<_> = sizes.iter().map(|&(w, h)| [texture(gpu, w, h), texture(gpu, w, h)]).collect();
+/// Con `noise` ruota 4 texture di rumore (caso peggiore per il bitrate), altrimenti colori pieni.
+fn run(gpu: &GpuDevice, enc: &mut dyn VideoEncoder, sizes: &[(u32, u32)], noise: bool) -> (Vec<Pkt>, f64) {
+    let targets: Vec<Vec<_>> = sizes
+        .iter()
+        .map(|&(w, h)| match noise {
+            true => (1..=4).map(|s| texture(gpu, w, h, Some(s * 7919))).collect(),
+            false => (0..2).map(|_| texture(gpu, w, h, None)).collect(),
+        })
+        .collect();
     let start = QpcTime(1_000_000_000);
     let mut out = Vec::new();
     let mut sink = |p: cliprec_core::PacketRef<'_>| {
@@ -82,10 +102,12 @@ fn run(gpu: &GpuDevice, enc: &mut dyn VideoEncoder, sizes: &[(u32, u32)]) -> (Ve
     for i in 0..FRAMES {
         let part = (i as usize * sizes.len()) / FRAMES as usize;
         let (w, h) = sizes[part];
-        let (tex, rtv) = &targets[part][i as usize % 2];
+        let (tex, rtv) = &targets[part][i as usize % targets[part].len()];
         let t = i as f32 / FRAMES as f32;
-        // SAFETY: vista valida sul device del contesto, protetto per l'uso da più thread.
-        unsafe { gpu.context.ClearRenderTargetView(rtv, &[t, 1.0 - t, (i % 60) as f32 / 60.0, 1.0]) };
+        if !noise {
+            // SAFETY: vista valida sul device del contesto, protetto per l'uso da più thread.
+            unsafe { gpu.context.ClearRenderTargetView(rtv, &[t, 1.0 - t, (i % 60) as f32 / 60.0, 1.0]) };
+        }
         let frame = GpuFrame {
             texture: tex.clone(),
             width: w,
@@ -147,10 +169,19 @@ fn write_stream(name: &str, extradata: &[u8], pkts: &[Pkt]) -> PathBuf {
     path
 }
 
-fn encode_and_probe(vendor_id: u32, encoder: &str, sizes: &[(u32, u32)], out: (u32, u32), file: &str, probe_codec: &str) {
+/// Codifica, verifica i pacchetti e il file con ffprobe; restituisce (bit/s medi, tetto in bit/s).
+fn encode_and_probe(
+    vendor_id: u32,
+    encoder: &str,
+    sizes: &[(u32, u32)],
+    out: (u32, u32),
+    file: &str,
+    probe_codec: &str,
+    noise: bool,
+) -> Option<(f64, u64)> {
     let Some(gpu) = device(vendor_id) else {
         eprintln!("SALTATO {encoder}: nessun adattatore {vendor_id:#x}");
-        return;
+        return None;
     };
     let settings = EncoderSettings {
         codec: CodecChoice::Auto,
@@ -164,23 +195,27 @@ fn encode_and_probe(vendor_id: u32, encoder: &str, sizes: &[(u32, u32)], out: (u
     let params = enc.params().clone();
     assert!(!params.extradata.is_empty(), "extradata vuoto");
     assert_eq!((params.width, params.height), out);
-    let (pkts, fps) = run(&gpu, enc.as_mut(), sizes);
+    let (pkts, fps) = run(&gpu, enc.as_mut(), sizes, noise);
     check_packets(&pkts);
     let bytes: usize = pkts.iter().map(|p| p.data.len()).sum();
+    let bps = bytes as f64 * 8.0 / (FRAMES as f64 / f64::from(FPS));
     let key_bytes = pkts.iter().filter(|p| p.keyframe).map(|p| p.data.len()).max().unwrap_or(0);
     let path = write_stream(file, &params.extradata, &pkts);
     let probe = ffprobe(&path);
     eprintln!(
-        "{encoder} su {}: {fps:.0} fps di encode, {} pacchetti, {:.1} KB/pacchetto medi, keyframe max {:.1} KB, {:.2} Mbit/s, extradata {} B (inizio {:02x?}); ffprobe: {probe}",
+        "{encoder}{} su {}: {fps:.0} fps di encode, {} pacchetti, {:.1} KB/pacchetto medi, keyframe max {:.1} KB, {:.2} Mbit/s (tetto {:.2}), extradata {} B (inizio {:02x?}); ffprobe: {probe}",
+        if noise { " (rumore)" } else { "" },
         gpu.adapter_name,
         pkts.len(),
         bytes as f64 / pkts.len() as f64 / 1024.0,
         key_bytes as f64 / 1024.0,
-        bytes as f64 * 8.0 / (FRAMES as f64 / f64::from(FPS)) / 1e6,
+        bps / 1e6,
+        params.bit_rate as f64 / 1e6,
         params.extradata.len(),
         &params.extradata[..params.extradata.len().min(6)],
     );
     assert_eq!(probe, format!("{probe_codec},{},{},{FRAMES}", out.0, out.1));
+    Some((bps, params.bit_rate))
 }
 
 const NVIDIA: u32 = 0x10de;
@@ -188,23 +223,52 @@ const INTEL: u32 = 0x8086;
 
 #[test]
 fn hevc_nvenc_1080p_native() {
-    encode_and_probe(NVIDIA, "hevc_nvenc", &[(1920, 1080)], (1920, 1080), "hevc_nvenc.hevc", "hevc");
+    encode_and_probe(NVIDIA, "hevc_nvenc", &[(1920, 1080)], (1920, 1080), "hevc_nvenc.hevc", "hevc", false);
 }
 
 #[test]
 fn h264_nvenc_scaled_with_source_resize() {
     // 1080p e poi 4:3: scala in 1280×720, la seconda metà con bande laterali.
-    encode_and_probe(NVIDIA, "h264_nvenc", &[(1920, 1080), (1600, 1200)], (1280, 720), "h264_nvenc.h264", "h264");
+    encode_and_probe(NVIDIA, "h264_nvenc", &[(1920, 1080), (1600, 1200)], (1280, 720), "h264_nvenc.h264", "h264", false);
+}
+
+#[test]
+fn hevc_nvenc_noise_respects_bitrate_cap() {
+    let Some((bps, cap)) =
+        encode_and_probe(NVIDIA, "hevc_nvenc", &[(1920, 1080)], (1920, 1080), "hevc_nvenc_noise.hevc", "hevc", true)
+    else {
+        return;
+    };
+    // VBV di 1 s pari al tetto: su 3 s la media resta sotto il tetto più il buffer iniziale.
+    assert!(bps <= cap as f64 * 1.35, "{bps} bit/s oltre il tetto {cap}");
 }
 
 #[test]
 fn hevc_qsv_on_intel() {
-    encode_and_probe(INTEL, "hevc_qsv", &[(1920, 1080)], (1920, 1080), "hevc_qsv.hevc", "hevc");
+    encode_and_probe(INTEL, "hevc_qsv", &[(1920, 1080)], (1920, 1080), "hevc_qsv.hevc", "hevc", false);
 }
 
 #[test]
 fn h264_qsv_on_intel() {
-    encode_and_probe(INTEL, "h264_qsv", &[(2560, 1440)], (1920, 1080), "h264_qsv.h264", "h264");
+    encode_and_probe(INTEL, "h264_qsv", &[(2560, 1440)], (1920, 1080), "h264_qsv.h264", "h264", false);
+}
+
+#[test]
+fn gpu_priority_high_then_normal() {
+    let Some(gpu) = device(NVIDIA).or_else(|| device(INTEL)) else { return };
+    cliprec_encode::set_gpu_priority(&gpu, true).unwrap();
+    cliprec_encode::set_gpu_priority(&gpu, false).unwrap();
+}
+
+#[test]
+fn open_errors_are_classified() {
+    let Some(gpu) = device(NVIDIA) else { return };
+    let settings = EncoderSettings::from_config(&Default::default(), 1920, 1080);
+    // RTX 30: niente AV1 in encode.
+    assert!(matches!(cliprec_encode::open(&gpu, &settings, "av1_nvenc").err(), Some(cliprec_core::EncodeError::Unsupported(_))));
+    assert!(matches!(cliprec_encode::open(&gpu, &settings, "vp9_nvenc").err(), Some(cliprec_core::EncodeError::Unsupported(_))));
+    // QSV su un device NVIDIA: il device QSV derivato non si crea.
+    assert!(matches!(cliprec_encode::open(&gpu, &settings, "hevc_qsv").err(), Some(cliprec_core::EncodeError::Unsupported(_))));
 }
 
 #[test]

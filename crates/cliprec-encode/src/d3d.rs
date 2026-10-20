@@ -24,6 +24,11 @@ use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709, DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709, DXGI_FORMAT_NV12,
     DXGI_RATIONAL, DXGI_SAMPLE_DESC,
 };
+use windows::Wdk::Graphics::Direct3D::{
+    D3DKMT_SCHEDULINGPRIORITYCLASS_HIGH, D3DKMT_SCHEDULINGPRIORITYCLASS_NORMAL, D3DKMTSetProcessSchedulingPriorityClass,
+};
+use windows::Win32::Graphics::Dxgi::IDXGIDevice;
+use windows::Win32::System::Threading::GetCurrentProcess;
 use windows::core::Interface;
 
 /// Viste d'ingresso tenute in cache: il pool di cattura ruota poche texture.
@@ -41,6 +46,20 @@ pub(crate) fn letterbox(src_w: u32, src_h: u32, out_w: u32, out_h: u32) -> RECT 
     let x = ((out_w as i32 - w) / 2) & !1;
     let y = ((out_h as i32 - h) / 2) & !1;
     RECT { left: x, top: y, right: x + w, bottom: y + h }
+}
+
+/// Priorità GPU del processo: classe HIGH (mai REALTIME, che può bloccare NVENC) o NORMAL, più la
+/// priorità dei thread GPU del device (7 con HIGH, 0 con NORMAL; non fatale se rifiutata).
+pub(crate) fn set_gpu_priority(gpu: &GpuDevice, high: bool) -> windows::core::Result<()> {
+    let class = if high { D3DKMT_SCHEDULINGPRIORITYCLASS_HIGH } else { D3DKMT_SCHEDULINGPRIORITYCLASS_NORMAL };
+    // SAFETY: GetCurrentProcess restituisce la pseudo-handle del processo corrente, sempre valida.
+    unsafe { D3DKMTSetProcessSchedulingPriorityClass(GetCurrentProcess(), class) }.ok()?;
+    let dxgi: IDXGIDevice = gpu.device.cast()?;
+    // SAFETY: chiamata COM su un'interfaccia valida.
+    if let Err(e) = unsafe { dxgi.SetGPUThreadPriority(if high { 7 } else { 0 }) } {
+        tracing::warn!(error = %e, "SetGPUThreadPriority rifiutata");
+    }
+    Ok(())
 }
 
 /// Video processor costruito per una dimensione d'ingresso, con le sue viste.

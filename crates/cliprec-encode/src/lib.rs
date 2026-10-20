@@ -136,6 +136,13 @@ pub fn open_best(device: &GpuDevice, settings: &EncoderSettings) -> Result<Box<d
     Err(last)
 }
 
+/// Imposta la priorità GPU del processo (`D3DKMTSetProcessSchedulingPriorityClass`): HIGH con
+/// `high = true` (`general.gpu_priority = "high"`), altrimenti NORMAL; mai REALTIME. Vale per tutto
+/// il processo e per il device di sessione: va chiamata una volta dopo aver creato `device`.
+pub fn set_gpu_priority(device: &GpuDevice, high: bool) -> Result<(), EncodeError> {
+    d3d::set_gpu_priority(device, high).map_err(|e| EncodeError::Failed(format!("priorità GPU: {e}")))
+}
+
 /// Combinazioni codec/encoder che si aprono davvero su `device` (1280×720 a 60 fps, CQ 23).
 pub fn probe(device: &GpuDevice) -> Vec<(VideoCodec, String)> {
     let settings = EncoderSettings { codec: CodecChoice::Auto, fps: 60, width: 1280, height: 720, quality: 23, max_bitrate_kbps: None };
