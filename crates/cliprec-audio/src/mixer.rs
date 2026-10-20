@@ -216,9 +216,16 @@ mod tests {
         }
     }
 
-    /// Due sorgenti a 48000 e 48010 Hz (≈200 ppm) mixate per un'ora simulata.
-    #[test]
-    fn drift_stays_within_20ms_after_one_hour() {
+    struct SimResult {
+        max_err: [f64; 2],
+        last_err: [f64; 2],
+        found: [usize; 2],
+        rate_b: f64,
+    }
+
+    /// Sorgente A a 48000 Hz su L, B a 48010 Hz (≈200 ppm) su R, impulsi a ogni secondo
+    /// vero; `stall` = intervallo (s) in cui B non consegna nulla e poi consegna tutto insieme.
+    fn simulate(secs: f64, stall: Option<(f64, f64)>) -> SimResult {
         let (mut mixer, mut inputs) = Mixer::new(&[1.0, 1.0]).unwrap();
         let mut sources = [
             SimSource { rate: 48_000.0, t0: 1.0003, next_frame: 0, channel: 0, jitter_seed: 1, impulses: vec![], buf: vec![0.0; 960] },
@@ -227,14 +234,14 @@ mod tests {
         let grid0 = 2 * HNS_PER_SEC;
         let latency = 0.1;
         let mut k: i64 = 0;
-        let mut max_err = [0.0f64; 2];
-        let mut last_err = [0.0f64; 2];
-        let mut found = [0usize; 2];
-        let hour = 3600.0 + 3.0;
+        let mut r = SimResult { max_err: [0.0; 2], last_err: [0.0; 2], found: [0; 2], rate_b: 0.0 };
         let mut now = 1.0;
-        while now < hour {
+        while now < secs {
             now += 0.01;
-            for (s, input) in sources.iter_mut().zip(inputs.iter_mut()) {
+            for (i, (s, input)) in sources.iter_mut().zip(inputs.iter_mut()).enumerate() {
+                if i == 1 && stall.is_some_and(|(a, b)| now >= a && now < b) {
+                    continue;
+                }
                 s.pump(now, input);
             }
             loop {
@@ -253,10 +260,10 @@ mod tests {
                             if let Some(&truth) = truth {
                                 let err = (t - truth) * 1000.0;
                                 if t > 4.0 {
-                                    max_err[ch] = max_err[ch].max(err.abs());
+                                    r.max_err[ch] = r.max_err[ch].max(err.abs());
                                 }
-                                last_err[ch] = err;
-                                found[ch] += 1;
+                                r.last_err[ch] = err;
+                                r.found[ch] += 1;
                             }
                         }
                     }
@@ -264,13 +271,31 @@ mod tests {
                 k += 1;
             }
         }
+        r.rate_b = mixer.lane_rate(1);
+        r
+    }
+
+    /// Due sorgenti a 48000 e 48010 Hz (≈200 ppm) mixate per un'ora simulata.
+    #[test]
+    fn drift_stays_within_20ms_after_one_hour() {
+        let r = simulate(3603.0, None);
         println!(
             "deriva: max |errore| A {:.3} ms, B {:.3} ms; finale A {:.3} ms, B {:.3} ms; stima B {:.3} Hz; impulsi {:?}",
-            max_err[0], max_err[1], last_err[0], last_err[1], mixer.lane_rate(1), found
+            r.max_err[0], r.max_err[1], r.last_err[0], r.last_err[1], r.rate_b, r.found
         );
-        assert!(found[0] >= 3590 && found[1] >= 3590, "impulsi trovati {found:?}");
-        assert!(max_err[0] <= 20.0 && max_err[1] <= 20.0, "errore massimo {max_err:?} ms");
-        assert!((mixer.lane_rate(1) - 48_010.0).abs() < 1.0);
+        assert!(r.found[0] >= 3590 && r.found[1] >= 3590, "impulsi trovati {:?}", r.found);
+        assert!(r.max_err[0] <= 20.0 && r.max_err[1] <= 20.0, "errore massimo {:?} ms", r.max_err);
+        assert!((r.rate_b - 48_010.0).abs() < 1.0);
+    }
+
+    /// B si blocca per 500 ms (più della latenza del mixer) e poi consegna l'arretrato: la corsia
+    /// tace per il buco e poi riprende allineata.
+    #[test]
+    fn stalled_source_realigns() {
+        let r = simulate(20.0, Some((8.0, 8.5)));
+        println!("blocco: max |errore| A {:.3} ms, B {:.3} ms; impulsi {:?}", r.max_err[0], r.max_err[1], r.found);
+        assert!(r.found[1] >= 15, "{:?}", r.found);
+        assert!(r.max_err[0] <= 1.0 && r.max_err[1] <= 1.0, "{:?}", r.max_err);
     }
 
     #[test]
