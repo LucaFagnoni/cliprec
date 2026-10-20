@@ -46,5 +46,5 @@ Le voci [DEFAULT] e [PROPOSTA] di SPEC.md valgono come decise; qui ci sono quell
     blocca al massimo tre volte, per non creare cicli senza fine di notte.
 11. **Nome della named pipe** `\\.\pipe\cliprec-<utente>`, messaggi JSON una riga per messaggio.
 12. **Spegnimento del PC: non programmato.** AVVIO.md, regola 6, vieta di spegnere o riavviare il PC;
-    lo spegnimento automatico è una scelta di Luca e alle 03:58 risultavano attive quattro sessioni
+    lo spegnimento automatico è una scelta di Luca e alle 03:37 risultavano al lavoro quattro sessioni
     di pokewilds.
