@@ -58,8 +58,8 @@ fn main() -> anyhow::Result<()> {
 
     let result = shell::run(shell::ShellIo { commands: cmd_tx, events: event_rx, status, config });
 
-    // Il motore si ferma con `Quit`; gli diamo qualche secondo per chiudere i file aperti.
-    let deadline = Instant::now() + Duration::from_secs(5);
+    // Il motore si ferma con `Quit` e aspetta fino a 10 s i salvataggi in corso: qui si aspetta di più.
+    let deadline = Instant::now() + Duration::from_secs(15);
     while !engine.is_finished() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));
     }

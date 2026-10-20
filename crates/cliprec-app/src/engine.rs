@@ -48,7 +48,8 @@ impl Shared {
 }
 
 /// Buffer dimensionato dalla configurazione; con poca RAM libera il tetto scende e un avviso lo dice.
-pub fn new_buffer(config: &Config, events: &Sender<EngineEvent>) -> Arc<ReplayBuffer> {
+/// `reclaim`: byte del buffer che questo sostituisce, ancora vivo durante la misura della RAM libera.
+pub fn new_buffer(config: &Config, events: &Sender<EngineEvent>, reclaim: usize) -> Arc<ReplayBuffer> {
     let audio_seconds = f64::from(config.clips.audio_seconds.max(config.clips.video_seconds));
     let video_seconds = f64::from(config.clips.video_seconds);
     // Senza tetto esplicito: stima generosa col bitrate massimo predefinito più alto (H.264 4K).
@@ -65,7 +66,7 @@ pub fn new_buffer(config: &Config, events: &Sender<EngineEvent>) -> Arc<ReplayBu
     };
     // ponytail: avviso e tetto ridotto a metà della RAM libera invece della proposta interattiva della
     // specifica; la finestra impostazioni mostra già la stima per scegliere durata e qualità.
-    let available = available_ram();
+    let available = available_ram().saturating_add(reclaim);
     let max_bytes = if available > 0 && wanted > available / 2 {
         let _ = events.send(EngineEvent::Warning(format!(
             "RAM libera insufficiente: il buffer chiederebbe {} MB, ne uso {}. Riduci durata o qualità nelle impostazioni.",
@@ -99,6 +100,11 @@ pub struct Session {
     encoder_name: Arc<Mutex<String>>,
     /// Il device GPU è perso: il loop ricrea la sessione (il buffer resta).
     restart: Arc<AtomicBool>,
+    /// `false` dopo lo stop: un thread di apertura dell'encoder ancora in corso non deve più toccare
+    /// il buffer (lo prenderà la sessione nuova con i suoi parametri).
+    alive: Arc<Mutex<bool>>,
+    /// Prossimo tentativo di riavviare il video assente o in errore, e attesa attuale.
+    video_retry: (Instant, Duration),
     events: Sender<EngineEvent>,
     /// Ultimo stato visto per sorgente, per avvisare solo quando cambia.
     states: Vec<(String, SourceState)>,
@@ -116,6 +122,7 @@ impl Session {
     ) -> anyhow::Result<Self> {
         let encoder_name = Arc::new(Mutex::new(String::new()));
         let restart = Arc::new(AtomicBool::new(false));
+        let alive = Arc::new(Mutex::new(true));
         let warn = |what: &str, e: &dyn std::fmt::Display| {
             let _ = events.send(EngineEvent::Warning(format!("{what} non avviato: {e}")));
         };
@@ -138,38 +145,78 @@ impl Session {
             None
         });
 
-        let video = if config.video.enabled {
+        let mut session = Self {
+            config: config.clone(),
+            buffer,
+            shared,
+            video: None,
+            audio,
+            encoder_name,
+            restart,
+            alive,
+            video_retry: (Instant::now(), Duration::from_secs(5)),
+            events: events.clone(),
+            states: Vec::new(),
+        };
+        if config.video.enabled {
             let opened = match overrides.video {
                 Some(v) => Ok(v),
                 None => cliprec_capture::open_source(&config.video),
             };
-            match opened {
-                Ok((device, mut source)) => {
-                    if let Err(e) = cliprec_encode::set_gpu_priority(&device, config.general.gpu_priority != "normal") {
-                        tracing::warn!("priorità GPU: {e}");
-                    }
-                    let on_frame =
-                        video_callback(config, device, buffer.clone(), encoder_name.clone(), events.clone(), restart.clone());
-                    match source.start(config.video.fps, on_frame) {
-                        Ok(()) => Some(source),
-                        Err(e) => {
-                            warn("video", &format!("{e}; continuo solo con l'audio"));
-                            None
-                        }
-                    }
-                }
-                Err(e) => {
-                    warn("video", &format!("{e}; continuo solo con l'audio"));
-                    None
-                }
+            if let Err(e) = session.start_video(opened) {
+                warn("video", &format!("{e}; continuo solo con l'audio e riprovo tra poco"));
             }
-        } else {
-            None
-        };
-        if video.is_none() && audio.is_none() {
+        }
+        if session.video.is_none() && session.audio.is_none() && !config.video.enabled {
             anyhow::bail!("nessuna sorgente audio o video attiva");
         }
-        Ok(Self { config: config.clone(), buffer, shared, video, audio, encoder_name, restart, events, states: Vec::new() })
+        Ok(session)
+    }
+
+    /// Avvia cattura ed encoder video sul device della sorgente.
+    fn start_video(&mut self, opened: Result<(GpuDevice, Box<dyn VideoSource>), cliprec_core::SourceError>) -> anyhow::Result<()> {
+        let (device, mut source) = opened?;
+        if let Err(e) = cliprec_encode::set_gpu_priority(&device, self.config.general.gpu_priority != "normal") {
+            tracing::warn!("priorità GPU: {e}");
+        }
+        let on_frame = video_callback(
+            &self.config,
+            device,
+            self.buffer.clone(),
+            self.encoder_name.clone(),
+            self.events.clone(),
+            self.restart.clone(),
+            self.alive.clone(),
+        );
+        source.start(self.config.video.fps, on_frame)?;
+        self.video = Some(source);
+        Ok(())
+    }
+
+    /// Video assente o in errore con il video abilitato: riprova con un'attesa crescente (5 s → 60 s).
+    fn retry_video(&mut self) {
+        if !self.config.video.enabled || Instant::now() < self.video_retry.0 {
+            return;
+        }
+        let dead = match &self.video {
+            None => true,
+            Some(v) => matches!(v.stats().state, SourceState::Error(_)),
+        };
+        if !dead {
+            self.video_retry.1 = Duration::from_secs(5);
+            return;
+        }
+        if let Some(mut v) = self.video.take() {
+            v.stop();
+        }
+        let wait = self.video_retry.1;
+        self.video_retry = (Instant::now() + wait, (wait * 2).min(Duration::from_secs(60)));
+        match self.start_video(cliprec_capture::open_source(&self.config.video)) {
+            Ok(()) => {
+                let _ = self.events.send(EngineEvent::Warning("video ripartito".into()));
+            }
+            Err(e) => tracing::warn!("video non ripartito: {e}; nuovo tentativo tra {} s", wait.as_secs()),
+        }
     }
 
     pub fn status(&self) -> EngineStatus {
@@ -258,6 +305,14 @@ impl Session {
                     return None;
                 };
                 let start = video.start().unwrap_or(end);
+                let last = video.packets.iter().map(|p| p.pts.add_hns(p.duration)).max().unwrap_or(end);
+                let stale = end.hns_since(last);
+                if stale > 2 * cliprec_core::HNS_PER_SEC {
+                    let _ = events.send(EngineEvent::Warning(format!(
+                        "la clip video finisce {:.0} s prima della pressione: cattura o encoder fermi",
+                        stale as f64 / cliprec_core::HNS_PER_SEC as f64
+                    )));
+                }
                 // Sotto lock solo i riferimenti ai blocchi FLAC; la decompressione è nel thread di salvataggio.
                 let audio = self.buffer.snapshot_audio_refs(start, end);
                 let opts = cliprec_mux::VideoClipOptions { container: self.config.clips.container, ..Default::default() };
@@ -281,7 +336,17 @@ impl Session {
         shared.saving.fetch_add(1, Ordering::SeqCst);
         let spawned = std::thread::Builder::new().name("clip-save".into()).spawn(move || {
             lower_thread_priority();
-            match job() {
+            /// Decrementa il contatore anche se il salvataggio va in panic.
+            struct Done(Arc<AtomicU32>);
+            impl Drop for Done {
+                fn drop(&mut self) {
+                    self.0.fetch_sub(1, Ordering::SeqCst);
+                }
+            }
+            let _done = Done(shared.saving.clone());
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job))
+                .unwrap_or_else(|_| Err("errore interno durante il salvataggio".into()));
+            match result {
                 Ok(clip) => {
                     tracing::info!(
                         snapshot_ms,
@@ -299,7 +364,6 @@ impl Session {
                 }
                 Err(e) => fail(&events, e),
             }
-            shared.saving.fetch_sub(1, Ordering::SeqCst);
         });
         match spawned {
             Ok(h) => Some(h),
@@ -314,6 +378,9 @@ impl Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
+        if let Ok(mut a) = self.alive.lock() {
+            *a = false;
+        }
         if let Some(v) = self.video.as_mut() {
             v.stop();
         }
@@ -337,6 +404,7 @@ fn video_callback(
     encoder_name: Arc<Mutex<String>>,
     events: Sender<EngineEvent>,
     restart: Arc<AtomicBool>,
+    alive: Arc<Mutex<bool>>,
 ) -> Box<dyn FnMut(&GpuFrame) + Send> {
     let video_cfg = config.video.clone();
     let fps = config.video.fps.max(1);
@@ -348,13 +416,19 @@ fn video_callback(
     let mut backoff = Duration::from_secs(1);
     let mut last_error = String::new();
     let mut next_index: Option<u64> = None;
+    let mut encoding_since: Option<Instant> = None;
     Box::new(move |frame: &GpuFrame| {
+        // L'attesa torna a 1 s solo dopo 10 s di codifica riuscita, non a ogni apertura.
+        if encoding_since.is_some_and(|t| t.elapsed() > Duration::from_secs(10)) {
+            backoff = Duration::from_secs(1);
+            failed.clear();
+        }
         if encoder.is_none() {
             match opened_rx.try_recv() {
                 Ok(Ok(e)) => {
                     opening = false;
-                    backoff = Duration::from_secs(1);
                     next_index = None;
+                    encoding_since = Some(Instant::now());
                     encoder = Some(e);
                 }
                 Ok(Err(msg)) => {
@@ -374,10 +448,17 @@ fn video_callback(
             if !opening && Instant::now() >= retry_at {
                 opening = true;
                 let settings = cliprec_encode::EncoderSettings::from_config(&video_cfg, frame.width, frame.height);
-                let (device, buffer, encoder_name, tx, skip) =
-                    (device.clone(), buffer.clone(), encoder_name.clone(), opened_tx.clone(), failed.clone());
+                let (device, buffer, encoder_name, tx, skip, alive, events) = (
+                    device.clone(),
+                    buffer.clone(),
+                    encoder_name.clone(),
+                    opened_tx.clone(),
+                    failed.clone(),
+                    alive.clone(),
+                    events.clone(),
+                );
                 let spawned = std::thread::Builder::new().name("encoder-open".into()).spawn(move || {
-                    let _ = tx.send(open_encoder(&device, &settings, &skip, &buffer, &encoder_name));
+                    let _ = tx.send(open_encoder(&device, &settings, &skip, &buffer, &encoder_name, &alive, &events));
                 });
                 if spawned.is_err() {
                     opening = false;
@@ -388,7 +469,8 @@ fn video_callback(
         let mut push = |p: cliprec_core::PacketRef<'_>| buffer.push_video(p);
         // Il pacer salta l'indice sui tick persi: ripetendo la texture corrente per quei tick il file
         // resta a frequenza costante e l'audio resta allineato. Oltre un quarto di secondo il buco resta.
-        let missing = next_index.map_or(0, |n| frame.index.saturating_sub(n)).min(u64::from(fps / 4));
+        // ponytail: al massimo 100 ms per tick, per non alimentare altri ritardi sotto carico GPU.
+        let missing = next_index.map_or(0, |n| frame.index.saturating_sub(n)).min(u64::from(fps / 10));
         let mut result = Ok(());
         for k in (1..=missing).rev() {
             let filler = GpuFrame {
@@ -412,6 +494,7 @@ fn video_callback(
                 failed.push(name);
                 encoder = None;
                 next_index = None;
+                encoding_since = None;
             }
         }
     })
@@ -424,12 +507,28 @@ fn open_encoder(
     skip: &[String],
     buffer: &ReplayBuffer,
     encoder_name: &Mutex<String>,
+    alive: &Mutex<bool>,
+    events: &Sender<EngineEvent>,
 ) -> Opened {
     let e = cliprec_encode::open_after(device, settings, skip).map_err(|e| e.to_string())?;
-    buffer.set_video_params(e.params().clone());
-    if let Ok(mut n) = encoder_name.lock() {
-        n.clone_from(&e.params().encoder_name);
+    // Sotto il lock di `alive`: se la sessione si è fermata nel frattempo, i parametri del buffer li
+    // imposterà la sessione nuova, e questo encoder viene scartato.
+    let alive = alive.lock().map_err(|_| "sessione chiusa".to_string())?;
+    if !*alive {
+        return Err("sessione chiusa durante l'apertura dell'encoder".into());
     }
+    let mut name = encoder_name.lock().map_err(|_| "stato dell'encoder non disponibile".to_string())?;
+    if !name.is_empty() && *name != e.params().encoder_name {
+        let _ = events.send(EngineEvent::Warning(format!(
+            "encoder cambiato da {} a {}: il buffer video riparte da zero",
+            name,
+            e.params().encoder_name
+        )));
+    }
+    buffer.set_video_params(e.params().clone());
+    name.clone_from(&e.params().encoder_name);
+    drop(name);
+    drop(alive);
     tracing::info!(encoder = %e.params().encoder_name, "encoder video pronto");
     Ok(e)
 }
@@ -478,6 +577,7 @@ fn sanitize(name: &str) -> String {
 
 /// Configurazione e buffer correnti, conservati fuori da [`run`] così un riavvio dopo un panic del
 /// motore riparte dalla configurazione ricaricata e con il buffer intatto.
+#[derive(Clone)]
 struct Persist {
     config: Config,
     buffer: Arc<ReplayBuffer>,
@@ -503,11 +603,11 @@ fn needs_restart(old: &Config, new: &Config) -> bool {
 /// `commands` è preso per riferimento così il supervisore lo può riavviare dopo un panic.
 pub fn run(config: Config, commands: &Receiver<AppCommand>, events: Sender<EngineEvent>, status: Arc<Mutex<EngineStatus>>) {
     let config_path = crate::shell::config_path();
-    let restored = persist().lock().ok().and_then(|mut p| p.take());
+    let restored = persist().lock().ok().and_then(|p| p.clone());
     let (mut config, mut buffer, shared) = match restored {
         Some(p) => (p.config, p.buffer, p.shared),
         None => {
-            let b = new_buffer(&config, &events);
+            let b = new_buffer(&config, &events, 0);
             (config, b, Shared::default())
         }
     };
@@ -556,11 +656,14 @@ pub fn run(config: Config, commands: &Receiver<AppCommand>, events: Sender<Engin
                         || config.memory != new.memory
                         || config.video.enabled != new.video.enabled;
                     config = new;
+                    let was_running = session.is_some();
                     if resize {
                         drop(session.take());
-                        buffer = new_buffer(&config, &events);
-                        session = start(&config, &buffer);
-                    } else if restart && session.is_some() {
+                        buffer = new_buffer(&config, &events, buffer.stats().bytes);
+                        if was_running {
+                            session = start(&config, &buffer);
+                        }
+                    } else if restart && was_running {
                         // Chiude la sessione vecchia (cattura, encoder, dispositivi) prima di aprire la nuova.
                         drop(session.take());
                         session = start(&config, &buffer);
@@ -589,6 +692,7 @@ pub fn run(config: Config, commands: &Receiver<AppCommand>, events: Sender<Engin
         }
         if let Some(s) = session.as_mut() {
             s.poll_states();
+            s.retry_video();
         }
         if let Ok(mut st) = status.lock() {
             *st = session.as_ref().map(Session::status).unwrap_or_else(|| EngineStatus {
@@ -618,7 +722,7 @@ pub fn run_test_clip(mut config: Config, seconds: u32, synthetic: bool, out: Pat
         ]);
     }
     let (tx, rx) = std::sync::mpsc::channel();
-    let buffer = new_buffer(&config, &tx);
+    let buffer = new_buffer(&config, &tx, 0);
     let session = Session::start(&config, buffer, Shared::default(), overrides, tx)?;
     std::thread::sleep(Duration::from_secs(u64::from(seconds)));
     let handles: Vec<_> = [ClipKind::Video, ClipKind::Audio]
@@ -658,7 +762,7 @@ pub fn run_soak(mut config: Config, minutes: u32, out: PathBuf) -> anyhow::Resul
         ]),
     };
     let (tx, rx) = std::sync::mpsc::channel();
-    let buffer = new_buffer(&config, &tx);
+    let buffer = new_buffer(&config, &tx, 0);
     let session = Session::start(&config, buffer, Shared::default(), overrides, tx)?;
     let mut csv = std::fs::File::create(out.join("sessione-lunga.csv"))?;
     writeln!(csv, "minuto,memoria_privata_mb,buffer_mb,video_s,audio_s,frame_consegnati,frame_ripetuti,frame_persi,clip")?;
@@ -766,7 +870,7 @@ mod tests {
             video: Some((GpuDevice::create(None).unwrap(), Box::new(FailingSource))),
             audio: Some(beeps()),
         };
-        let session = Session::start(&config, new_buffer(&config, &tx), Shared::default(), overrides, tx).unwrap();
+        let session = Session::start(&config, new_buffer(&config, &tx, 0), Shared::default(), overrides, tx).unwrap();
         assert!(session.video.is_none());
         std::thread::sleep(Duration::from_secs(3));
         session.save(ClipKind::Audio, 2).unwrap().join().unwrap();
@@ -786,7 +890,7 @@ mod tests {
         config.video.enabled = false;
         let (tx, rx) = std::sync::mpsc::channel();
         let overrides = SourceOverrides { video: None, audio: Some(beeps()) };
-        let session = Session::start(&config, new_buffer(&config, &tx), Shared::default(), overrides, tx).unwrap();
+        let session = Session::start(&config, new_buffer(&config, &tx, 0), Shared::default(), overrides, tx).unwrap();
         std::thread::sleep(Duration::from_millis(1500));
         assert!(session.save(ClipKind::Audio, 1).is_none());
         let events: Vec<_> = rx.try_iter().collect();
@@ -804,7 +908,7 @@ mod tests {
         let device = GpuDevice::create(None).unwrap();
         let video = cliprec_capture::SyntheticSource::new(device.clone(), 1280, 720);
         let overrides = SourceOverrides { video: Some((device, Box::new(video))), audio: Some(beeps()) };
-        let session = Session::start(&config, new_buffer(&config, &tx), Shared::default(), overrides, tx).unwrap();
+        let session = Session::start(&config, new_buffer(&config, &tx, 0), Shared::default(), overrides, tx).unwrap();
         std::thread::sleep(Duration::from_secs(4));
         let a = session.save(ClipKind::Video, 2).unwrap();
         let b = session.save(ClipKind::Video, 2).unwrap();
@@ -843,7 +947,7 @@ mod tests {
             let device = GpuDevice::create(None).unwrap();
             let video = cliprec_capture::SyntheticSource::new(device.clone(), 1280, 720);
             let overrides = SourceOverrides { video: Some((device, Box::new(video))), audio: Some(beeps()) };
-            let session = Session::start(&config, new_buffer(&config, &tx), Shared::default(), overrides, tx).unwrap();
+            let session = Session::start(&config, new_buffer(&config, &tx, 0), Shared::default(), overrides, tx).unwrap();
             std::thread::sleep(Duration::from_secs(5));
             session.save(ClipKind::Video, 3).unwrap().join().unwrap();
             let clip = rx

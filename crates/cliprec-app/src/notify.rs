@@ -31,6 +31,9 @@ impl Dedup {
 
     /// `true` se l'avviso di questo tipo può essere mostrato adesso.
     pub fn allow(&mut self, kind: &str, now: Instant) -> bool {
+        // Le voci scadute non servono più: la tabella resta piccola anche in 8 ore.
+        let min = self.min_interval;
+        self.last.retain(|_, t| now.duration_since(*t) < min);
         match self.last.get(kind) {
             Some(t) if now.duration_since(*t) < self.min_interval => false,
             _ => {
@@ -44,8 +47,11 @@ impl Dedup {
 /// Tipo di un evento d'errore, per la deduplica: la prima parola chiave nota, altrimenti il testo.
 pub fn error_kind(text: &str) -> String {
     let t = text.to_lowercase();
+    // Parole intere: «ram» non deve riconoscere «frame» o «programma».
+    let words: Vec<&str> = t.split(|c: char| !c.is_alphanumeric()).collect();
     for k in ["fullscreen", "schermo intero", "microfono", "privacy", "ram", "memoria", "disco", "encoder", "amministratore"] {
-        if t.contains(k) {
+        let hit = if k.contains(' ') { t.contains(k) } else { words.contains(&k) };
+        if hit {
             return k.to_owned();
         }
     }
@@ -147,6 +153,20 @@ fn play_save_sound() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kinds_match_whole_words_and_table_stays_small() {
+        assert_eq!(error_kind("RAM insufficiente: il buffer copre 30 s"), "ram");
+        assert_ne!(error_kind("la callback dei frame è andata in panic"), "ram");
+        assert_ne!(error_kind("programma chiuso"), "ram");
+        assert_eq!(error_kind("Video a schermo intero esclusivo"), "schermo intero");
+        let mut d = Dedup::new(Duration::from_secs(60));
+        let t0 = Instant::now();
+        for i in 0..1000 {
+            d.allow(&format!("avviso {i}"), t0 + Duration::from_secs(i));
+        }
+        assert!(d.last.len() <= 61);
+    }
 
     #[test]
     fn dedup_limits_per_kind() {
