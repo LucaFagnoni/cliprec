@@ -20,6 +20,7 @@ use ffmpeg_the_third::ffi::{
     avio_open,
 };
 use windows::Win32::Storage::FileSystem::{GetDiskFreeSpaceExW, MOVE_FILE_FLAGS, MoveFileExW};
+use windows::Win32::System::Threading::{GetCurrentThread, GetThreadPriority, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL};
 use windows::core::HSTRING;
 
 use crate::MuxError;
@@ -38,17 +39,18 @@ pub(crate) enum AudioCodec {
     Flac,
     /// PCM 24 bit little-endian (WAV).
     PcmS24,
+    /// Opus (libopus), float interleaved.
+    Opus { bit_rate: i64 },
 }
 
 pub(crate) struct Track<'a> {
     pub name: &'a str,
-    /// f32 stereo interleaved a 48 kHz.
-    pub samples: &'a [f32],
-    /// Il frame `i` del file è il frame `i + skip` di `samples` (silenzio fuori dai dati).
-    pub skip: i64,
-    /// Lunghezza della traccia nel file, in frame.
-    pub frames: usize,
+    /// PCM della traccia già allineato all'inizio del file e lungo quanto il file.
+    pub source: crate::Aligned<'a>,
 }
+
+/// Pacchetti codificati in anticipo per traccia: abbastanza per l'interleaving, pochi kB.
+const AUDIO_QUEUE: usize = 32;
 
 /// Video da copiare senza ricodifica; `start` diventa il tempo zero del file.
 pub(crate) struct VideoIn<'a> {
@@ -150,7 +152,7 @@ pub(crate) fn write(
     path: &Path,
     format: &str,
     video: Option<VideoIn<'_>>,
-    tracks: &[Track<'_>],
+    tracks: Vec<Track<'_>>,
     codec: AudioCodec,
     faststart: bool,
 ) -> Result<(), MuxError> {
@@ -169,7 +171,7 @@ pub(crate) fn write(
         None => None,
     };
     // File di una sola traccia senza video (FLAC/WAV per traccia): il nome anche come titolo del file.
-    if let ([t], None) = (tracks, &video) {
+    if let ([t], None) = (tracks.as_slice(), &video) {
         let name = cstring(t.name)?;
         // SAFETY: contesto valido; av_dict_set copia la stringa.
         unsafe { av_dict_set(&mut (*out.0).metadata, c"title".as_ptr(), name.as_ptr(), 0) };
@@ -200,64 +202,81 @@ pub(crate) fn write(
     };
     check("avformat_write_header", header)?;
 
-    // Pacchetti audio codificati in anticipo (pochi MB), una traccia per thread, poi fusi col
-    // video in ordine di tempo. La base dei tempi si legge dopo l'header, che può cambiarla.
+    // Ogni traccia si codifica a pezzi su un thread proprio, leggendo il PCM in streaming e
+    // consegnando i pacchetti su una coda corta; qui si fondono col video in ordine di tempo.
+    // La base dei tempi si legge dopo l'header, che può cambiarla.
     let jobs: Vec<(Encoder, AVRational, c_int)> = encoders
         .into_iter()
         // SAFETY: stream del contesto ancora vivo.
         .map(|(enc, st)| unsafe { (enc, (*st).time_base, (*st).index) })
         .collect();
-    let mut audio = std::thread::scope(|scope| {
-        let handles: Vec<_> = jobs
-            .into_iter()
-            .zip(tracks)
-            .map(|((enc, tb, index), t)| scope.spawn(move || encode_track(enc, tb, index, codec, t)))
-            .collect();
-        handles
-            .into_iter()
-            .map(|h| h.join().unwrap_or(Err(MuxError::EncoderPanicked)).map(std::collections::VecDeque::from))
-            .collect::<Result<Vec<_>, _>>()
-    })?;
-
-    let mut video_iter = match (&video, video_stream) {
-        (Some(v), Some(st)) => Some((v, st, v.snapshot.packets.iter().peekable())),
-        _ => None,
-    };
-    loop {
-        // Prossimo pacchetto video, convertito solo quando tocca a lui.
-        let next_video = match &mut video_iter {
-            Some((v, st, it)) => match it.peek() {
-                Some(p) => {
+    let mut receivers = Vec::with_capacity(jobs.len());
+    let mut senders = Vec::with_capacity(jobs.len());
+    for _ in 0..jobs.len() {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Result<Pending, MuxError>>(AUDIO_QUEUE);
+        senders.push(tx);
+        receivers.push(rx);
+    }
+    std::thread::scope(|scope| {
+        for (((enc, tb, index), t), tx) in jobs.into_iter().zip(tracks).zip(senders) {
+            scope.spawn(move || {
+                lower_priority();
+                let run = std::panic::AssertUnwindSafe(|| encode_track(enc, tb, index, codec, t, &tx));
+                let result = std::panic::catch_unwind(run).unwrap_or(Err(MuxError::EncoderPanicked));
+                if let Err(e) = result {
+                    let _ = tx.send(Err(e));
+                }
+            });
+        }
+        // `receivers` vive solo qui: su errore si chiudono le code e i thread escono subito.
+        let receivers = receivers;
+        let mut heads: Vec<Option<Pending>> = receivers.iter().map(|_| None).collect();
+        let mut open = vec![true; receivers.len()];
+        let mut video_iter = match (&video, video_stream) {
+            (Some(v), Some(st)) => Some((v, st, v.snapshot.packets.iter().peekable())),
+            _ => None,
+        };
+        loop {
+            for (i, rx) in receivers.iter().enumerate() {
+                if heads[i].is_none() && open[i] {
+                    match rx.recv() {
+                        Ok(Ok(p)) => heads[i] = Some(p),
+                        Ok(Err(e)) => return Err(e),
+                        Err(_) => open[i] = false,
+                    }
+                }
+            }
+            // Prossimo pacchetto video, convertito solo quando tocca a lui.
+            let next_video = match &mut video_iter {
+                Some((v, st, it)) => it.peek().map(|p| {
                     // SAFETY: stream valido del contesto.
                     let tb = unsafe { (**st).time_base };
-                    let dts = av_rescale_q_safe(p.dts.hns_since(v.start), HNS, tb);
-                    Some(secs(dts, tb))
-                }
+                    secs(av_rescale_q_safe(p.dts.hns_since(v.start), HNS, tb), tb)
+                }),
                 None => None,
-            },
-            None => None,
-        };
-        let next_audio = audio
-            .iter()
-            .enumerate()
-            .filter_map(|(i, q)| q.front().map(|p| (i, p.secs)))
-            .min_by(|a, b| a.1.total_cmp(&b.1));
-        let packet = match (next_video, next_audio) {
-            (None, None) => break,
-            (Some(vs), a) if a.is_none_or(|(_, s)| vs <= s) => {
-                let Some((v, st, it)) = &mut video_iter else { break };
-                let Some(p) = it.next() else { break };
-                video_packet(p, v.start, *st)?
-            }
-            (_, Some((i, _))) => match audio[i].pop_front() {
-                Some(p) => p.packet,
-                None => break,
-            },
-            (Some(_), None) => break,
-        };
-        // SAFETY: contesto con header scritto; il pacchetto è valido e ne cediamo il contenuto.
-        check("av_interleaved_write_frame", unsafe { av_interleaved_write_frame(out.0, packet.0) })?;
-    }
+            };
+            let next_audio = heads
+                .iter()
+                .enumerate()
+                .filter_map(|(i, h)| h.as_ref().map(|p| (i, p.secs)))
+                .min_by(|a, b| a.1.total_cmp(&b.1));
+            let packet = match (next_video, next_audio) {
+                (Some(vs), a) if a.is_none_or(|(_, s)| vs <= s) => {
+                    let Some((v, st, it)) = &mut video_iter else { break };
+                    let Some(p) = it.next() else { break };
+                    video_packet(p, v.start, *st)?
+                }
+                (_, Some((i, _))) => match heads[i].take() {
+                    Some(p) => p.packet,
+                    None => break,
+                },
+                _ => break,
+            };
+            // SAFETY: contesto con header scritto; il pacchetto è valido e ne cediamo il contenuto.
+            check("av_interleaved_write_frame", unsafe { av_interleaved_write_frame(out.0, packet.0) })?;
+        }
+        Ok(())
+    })?;
     // SAFETY: contesto con header scritto.
     check("av_write_trailer", unsafe { av_write_trailer(out.0) })?;
     // SAFETY: chiusura esplicita per far emergere gli errori di scrittura finale.
@@ -339,6 +358,7 @@ fn open_audio_encoder(codec: AudioCodec, global_header: bool) -> Result<Encoder,
         AudioCodec::Aac { bit_rate } => (c"aac", AVSampleFormat::FLTP, bit_rate),
         AudioCodec::Flac => (c"flac", AVSampleFormat::S32, 0),
         AudioCodec::PcmS24 => (c"pcm_s24le", AVSampleFormat::S32, 0),
+        AudioCodec::Opus { bit_rate } => (c"libopus", AVSampleFormat::FLT, bit_rate),
     };
     // SAFETY: nome letterale; il contesto va subito nel proprietario RAII.
     unsafe {
@@ -390,8 +410,9 @@ fn encode_track(
     st_tb: AVRational,
     index: c_int,
     codec: AudioCodec,
-    track: &Track<'_>,
-) -> Result<Vec<Pending>, MuxError> {
+    mut track: Track<'_>,
+    tx: &std::sync::mpsc::SyncSender<Result<Pending, MuxError>>,
+) -> Result<(), MuxError> {
     let ctx = enc.0;
     // SAFETY: encoder aperto.
     let frame_size = match usize::try_from(unsafe { (*ctx).frame_size }) {
@@ -413,14 +434,14 @@ fn encode_track(
         check("av_channel_layout_copy", av_channel_layout_copy(&mut (*frame.0).ch_layout, &(*ctx).ch_layout))?;
         check("av_frame_get_buffer", av_frame_get_buffer(frame.0, 0))?;
     }
-    let mut packets = Vec::new();
-    let drain = |packets: &mut Vec<Pending>| -> Result<(), MuxError> {
+    // `false` se il lettore ha chiuso la coda (errore altrove): si smette di codificare.
+    let drain = || -> Result<bool, MuxError> {
         loop {
             let pkt = Packet::new()?;
             // SAFETY: encoder aperto e pacchetto valido.
             let r = unsafe { avcodec_receive_packet(ctx, pkt.0) };
             if r == AVERROR(EAGAIN) || r == AVERROR_EOF {
-                return Ok(());
+                return Ok(true);
             }
             check("avcodec_receive_packet", r)?;
             // SAFETY: pacchetto appena riempito dall'encoder.
@@ -429,12 +450,19 @@ fn encode_track(
                 (*pkt.0).stream_index = index;
                 (*pkt.0).dts
             };
-            packets.push(Pending { packet: pkt, secs: secs(dts, st_tb) });
+            if tx.send(Ok(Pending { packet: pkt, secs: secs(dts, st_tb) })).is_err() {
+                return Ok(false);
+            }
         }
     };
-    for pos in (0..track.frames).step_by(frame_size) {
-        let count = frame_size.min(track.frames - pos);
-        let input = (pos..pos + count).map(|i| crate::frame_at(track.samples, track.skip, i));
+    let mut buf = vec![0.0f32; frame_size * CHANNELS];
+    let mut pos = 0usize;
+    loop {
+        let count = track.source.read(&mut buf);
+        if count == 0 {
+            break;
+        }
+        let input = buf[..count * CHANNELS].chunks_exact(CHANNELS);
         // SAFETY: frame con buffer di `frame_size` campioni per canale (count ≤ frame_size);
         // make_writable garantisce che l'encoder non ne tenga più un riferimento.
         unsafe {
@@ -445,26 +473,46 @@ fn encode_track(
                 AudioCodec::Aac { .. } => {
                     let l = std::slice::from_raw_parts_mut((*frame.0).data[0].cast::<f32>(), count);
                     let r = std::slice::from_raw_parts_mut((*frame.0).data[1].cast::<f32>(), count);
-                    for ((l, r), [a, b]) in l.iter_mut().zip(r.iter_mut()).zip(input) {
-                        *l = a;
-                        *r = b;
+                    for ((l, r), s) in l.iter_mut().zip(r.iter_mut()).zip(input) {
+                        *l = s[0];
+                        *r = s[1];
                     }
+                }
+                AudioCodec::Opus { .. } => {
+                    let d = std::slice::from_raw_parts_mut((*frame.0).data[0].cast::<f32>(), count * CHANNELS);
+                    d.copy_from_slice(&buf[..count * CHANNELS]);
                 }
                 AudioCodec::Flac | AudioCodec::PcmS24 => {
                     let d = std::slice::from_raw_parts_mut((*frame.0).data[0].cast::<i32>(), count * CHANNELS);
-                    for (dst, x) in d.iter_mut().zip(input.flatten()) {
+                    for (dst, &x) in d.iter_mut().zip(input.flatten()) {
                         *dst = ((x.clamp(-1.0, 1.0) * S24_MAX).round() as i32) << 8;
                     }
                 }
             }
             check("avcodec_send_frame", avcodec_send_frame(ctx, frame.0))?;
         }
-        drain(&mut packets)?;
+        if !drain()? {
+            return Ok(());
+        }
+        pos += count;
     }
     // SAFETY: frame nullo = fine dello stream.
     check("avcodec_send_frame", unsafe { avcodec_send_frame(ctx, ptr::null()) })?;
-    drain(&mut packets)?;
-    Ok(packets)
+    drain()?;
+    Ok(())
+}
+
+/// Priorità dell'ultimo thread di codifica audio, per i test (m8).
+pub(crate) static ENCODER_PRIORITY: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(i32::MIN);
+
+/// Abbassa la priorità del thread di codifica (m8): sotto il normale, per non contendere la CPU
+/// al gioco. La modalità «background» abbasserebbe anche l'I/O, che qui non serve.
+fn lower_priority() {
+    // SAFETY: pseudo-handle del thread corrente, sempre valido; se fallisce si resta a normale.
+    let _ = unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL) };
+    // SAFETY: pseudo-handle del thread corrente, sempre valido.
+    let p = unsafe { GetThreadPriority(GetCurrentThread()) };
+    ENCODER_PRIORITY.store(p, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Byte liberi per l'utente sul volume di `dir`, o `None` se non si riesce a saperlo.

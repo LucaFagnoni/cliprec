@@ -511,3 +511,31 @@ fn internal_gap_does_not_truncate_snapshot() {
     assert_eq!(seq_of(s.packets.last().unwrap()), 399);
     assert_eq!(seq_of(&s.packets[0]), 50);
 }
+
+/// M4: con N = M l'audio conservato deve coprire tutto il video conservato (N + margine + GOP),
+/// altrimenti la clip video parte muta.
+#[test]
+fn audio_covers_the_whole_video_clip() {
+    let b = ReplayBuffer::new(BufferConfig { video_seconds: 5.0, audio_seconds: 5.0, max_bytes: 64 * MB, lock_pages: false });
+    b.set_video_params(params());
+    b.set_tracks(&["A".into()]);
+    // Audio a pezzi da 10 ms, video a 50 fps con un keyframe al secondo, stesso orologio.
+    // 20,9 s: la fine non cade su un keyframe, quindi la clip parte fino a un GOP prima di end - N.
+    for step in 0..2090i64 {
+        let f = step * 480;
+        let s: Vec<f32> = (f..f + 480).flat_map(|g| [signal(0, g, 0), signal(0, g, 1)]).collect();
+        b.push(0, at(f), &s);
+        if step % 2 == 0 {
+            let frame = step / 2;
+            let pts = at(frame * 960);
+            let data = packet_bytes(frame as u64, 100);
+            b.push_video(PacketRef { data: &data, pts, dts: pts, duration: FRAME_HNS, keyframe: frame % 50 == 0 });
+        }
+    }
+    let end = at(2090 * 480);
+    let video = b.snapshot_video(5.0, end).unwrap();
+    let start = video.start().unwrap();
+    let audio = b.snapshot_audio(start, end).unwrap();
+    let missing_ms = audio.start.hns_since(start) as f64 / 10_000.0;
+    assert!(missing_ms <= 0.0, "{missing_ms} ms senza audio a inizio clip");
+}

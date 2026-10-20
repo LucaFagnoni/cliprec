@@ -5,20 +5,24 @@
 //! - Video: i byte dei pacchetti vanno in un'arena di blocchi da 4 MiB preallocati e riciclati
 //!   ([`arena`]); il buffer tiene `video_seconds` più un GOP (sempre almeno due keyframe) e scarta
 //!   i GOP più vecchi, interi, quando supera la durata o il tetto di memoria.
-//! - Audio: ogni traccia è compressa in blocchi FLAC indipendenti (4096 frame, 24 bit), ognuno con
-//!   l'istante QPC del primo campione; si tengono `max(video_seconds, audio_seconds)`.
+//! - Audio: `push` copia il PCM in una coda preallocata per traccia (nessuna allocazione sul
+//!   thread di cattura); un thread di compressione lo riduce in blocchi FLAC indipendenti (4096
+//!   frame, 24 bit), ognuno con l'istante QPC del primo campione. Si tengono
+//!   `max(video_seconds, audio_seconds)` secondi e comunque tutto il video conservato.
 //! - Gli snapshot prendono i lock solo per clonare riferimenti `Arc` ai blocchi (video e audio);
 //!   la decompressione avviene fuori dai lock. Il buffer non tocca mai il disco.
 
 mod arena;
 mod audio;
+mod intake;
 mod lock;
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Mutex, MutexGuard, RwLock};
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::thread::JoinHandle;
 
-use cliprec_core::time::{frames_to_hns, hns_to_frames};
+use cliprec_core::time::hns_to_frames;
 use cliprec_core::{
     AudioSnapshot, AudioTrackSink, EncodedPacket, HNS_PER_SEC, PacketRef, QpcTime, VideoSnapshot, VideoStreamParams,
 };
@@ -27,10 +31,14 @@ use flacenc::error::{Verified, Verify};
 
 use crate::arena::ChunkRing;
 use crate::audio::Track;
+use crate::intake::Intake;
+pub use crate::audio::TrackReader;
 
 const VIDEO_CHUNK: usize = 4 << 20;
 /// Video conservato oltre `video_seconds`, oltre al GOP in corso.
 const RETAIN_MARGIN_SECS: f64 = 0.5;
+/// GOP più lungo che l'audio segue: oltre, l'audio conservato non insegue il video.
+const MAX_GOP_SECS: f64 = 10.0;
 /// Posizioni di pts finali (in ordine di presentazione) in cui un buco indica B-frame non ancora
 /// usciti dall'encoder: profondità dei B-frame (2) più uno.
 pub const TAIL_DEPTH: usize = 3;
@@ -122,11 +130,35 @@ pub struct AudioRefs {
 }
 
 impl AudioRefs {
+    /// Istante QPC del primo campione di ogni traccia.
+    pub fn start(&self) -> QpcTime {
+        self.start
+    }
+
+    /// Lunghezza di ogni traccia, in frame stereo a 48 kHz.
+    pub fn frames(&self) -> usize {
+        self.frames
+    }
+
+    pub fn track_count(&self) -> usize {
+        self.tracks.len()
+    }
+
+    pub fn track_name(&self, track: usize) -> Option<&str> {
+        self.tracks.get(track).map(|t| t.name())
+    }
+
+    /// Lettore in streaming della traccia `track`: decomprime un blocco FLAC alla volta, così il
+    /// salvataggio non tiene mai in memoria il PCM intero (M5).
+    pub fn reader(&self, track: usize) -> Option<TrackReader<'_>> {
+        self.tracks.get(track).map(|t| t.reader(self.start, self.frames))
+    }
+
     /// Decomprime e taglia tutte le tracce allo stesso campione e alla stessa lunghezza, con
-    /// silenzio dove mancano dati.
+    /// silenzio dove mancano dati. Tiene tutto il PCM in memoria: per salvare meglio `reader`.
     pub fn render(self) -> AudioSnapshot {
         let (start, frames) = (self.start, self.frames);
-        AudioSnapshot { start, tracks: self.tracks.into_iter().map(|c| c.render(start, frames)).collect() }
+        AudioSnapshot { start, tracks: self.tracks.iter().map(|c| audio::render(c, start, frames)).collect() }
     }
 }
 
@@ -134,9 +166,17 @@ impl AudioRefs {
 pub struct ReplayBuffer {
     config: BufferConfig,
     video: Mutex<Video>,
-    tracks: RwLock<Vec<Mutex<Track>>>,
-    audio_bytes: AtomicUsize,
-    flac: Option<Verified<Encoder>>,
+    audio: Arc<Intake>,
+    compressor: Option<JoinHandle<()>>,
+}
+
+impl Drop for ReplayBuffer {
+    fn drop(&mut self) {
+        self.audio.shutdown();
+        if let Some(h) = self.compressor.take() {
+            let _ = h.join();
+        }
+    }
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -145,10 +185,18 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 
 impl ReplayBuffer {
     pub fn new(config: BufferConfig) -> Self {
-        let flac = Encoder::default().into_verified().ok();
+        let flac: Option<Verified<Encoder>> = Encoder::default().into_verified().ok();
         if flac.is_none() {
             tracing::error!("configurazione FLAC non valida: audio disattivato");
         }
+        // Audio da conservare (M4): max(N, M) secondi e tutto il video conservato (N + margine +
+        // un GOP), con un limite se il video si ferma o ha GOP enormi.
+        let audio = Arc::new(Intake::new(
+            flac,
+            secs_to_hns(config.audio_seconds.max(config.video_seconds)),
+            secs_to_hns(config.video_seconds + RETAIN_MARGIN_SECS + MAX_GOP_SECS),
+        ));
+        let compressor = audio.spawn();
         let video = Video {
             params: None,
             ring: ChunkRing::new(VIDEO_CHUNK, config.lock_pages, config.max_bytes),
@@ -156,7 +204,7 @@ impl ReplayBuffer {
             newest_end: QpcTime(0),
             memory_limited: false,
         };
-        Self { config, video: Mutex::new(video), tracks: RwLock::new(Vec::new()), audio_bytes: AtomicUsize::new(0), flac }
+        Self { config, video: Mutex::new(video), audio, compressor }
     }
 
     pub fn config(&self) -> &BufferConfig {
@@ -176,6 +224,7 @@ impl ReplayBuffer {
         v.keyframes.clear();
         v.memory_limited = false;
         v.newest_end = QpcTime(0);
+        self.audio.video_from.store(i64::MAX, Ordering::Relaxed);
         let estimate = BufferConfig::estimate_bytes(params.bit_rate, self.config.video_seconds, 0.0, 0);
         v.ring.reserve((estimate / PREALLOC_DIVISOR).min(self.config.max_bytes));
         v.params = Some(params);
@@ -188,7 +237,7 @@ impl ReplayBuffer {
             return;
         }
         // Tetto di memoria: scarta GOP interi, ma tiene sempre il GOP corrente.
-        let cap = self.config.max_bytes.saturating_sub(self.audio_bytes.load(Ordering::Relaxed));
+        let cap = self.config.max_bytes.saturating_sub(self.audio.bytes.load(Ordering::Relaxed));
         while v.ring.in_use_bytes() + v.ring.extra_needed(p.data.len()) > cap && v.keyframes.len() > 1 {
             v.evict_gop();
             v.memory_limited = true;
@@ -207,6 +256,8 @@ impl ReplayBuffer {
             v.evict_gop();
             v.memory_limited = false;
         }
+        let from = v.keyframes.front().and_then(|&k| v.pts(k)).map_or(i64::MAX, |t| t.0);
+        self.audio.video_from.store(from, Ordering::Relaxed);
     }
 
     /// Pacchetti degli ultimi `seconds` prima di `end`, misurati dalla fine dell'ultimo frame
@@ -285,7 +336,10 @@ impl ReplayBuffer {
     /// [`AudioRefs::render`] sul thread di salvataggio. Se nessuna traccia ha dati così vecchi,
     /// `start` avanza al primo campione disponibile. `None` senza tracce o dati.
     pub fn snapshot_audio_refs(&self, start: QpcTime, end: QpcTime) -> Option<AudioRefs> {
-        let tracks = self.tracks.read().unwrap_or_else(|e| e.into_inner());
+        // Prima si comprime quel che è ancora in coda: lo snapshot non ha buchi in fondo.
+        self.audio.drain_all();
+        let slots = self.audio.slots.read().unwrap_or_else(|e| e.into_inner());
+        let tracks: Vec<&Mutex<Track>> = slots.iter().map(|s| &s.track).collect();
         let earliest = tracks.iter().filter_map(|t| lock(t).first()).min()?;
         let start = start.max(earliest);
         if end <= start {
@@ -297,13 +351,14 @@ impl ReplayBuffer {
     }
 
     pub fn stats(&self) -> BufferStats {
+        self.audio.drain_all();
         let v = lock(&self.video);
-        let tracks = self.tracks.read().unwrap_or_else(|e| e.into_inner());
+        let slots = self.audio.slots.read().unwrap_or_else(|e| e.into_inner());
         let mut audio_locked = true;
         let mut audio_bytes = 0;
         let mut audio_seconds: Option<f64> = None;
-        for t in tracks.iter() {
-            let t = lock(t);
+        for slot in slots.iter() {
+            let t = lock(&slot.track);
             audio_locked &= t.ring.locked();
             audio_bytes += t.ring.allocated_bytes();
             let secs = match (t.first(), t.end()) {
@@ -334,9 +389,6 @@ impl ReplayBuffer {
             .collect()
     }
 
-    fn audio_keep_hns(&self) -> i64 {
-        secs_to_hns(self.config.video_seconds.max(self.config.audio_seconds)) + frames_to_hns(audio::BLOCK_FRAMES as i64)
-    }
 }
 
 fn secs_to_hns(secs: f64) -> i64 {
@@ -346,34 +398,27 @@ fn secs_to_hns(secs: f64) -> i64 {
 impl AudioTrackSink for ReplayBuffer {
     /// Sostituisce le tracce (e ne scarta i dati) se i nomi cambiano.
     fn set_tracks(&self, names: &[String]) {
-        let mut tracks = self.tracks.write().unwrap_or_else(|e| e.into_inner());
-        if tracks.len() == names.len() && tracks.iter().zip(names).all(|(t, n)| lock(t).name == *n) {
+        {
+            let slots = self.audio.slots.read().unwrap_or_else(|e| e.into_inner());
+            if slots.len() == names.len() && slots.iter().zip(names).all(|(s, n)| lock(&s.track).name == *n) {
+                return;
+            }
+        }
+        let tracks: Vec<Track> = names
+            .iter()
+            .filter_map(|n| Track::new(n.clone(), self.config.lock_pages, self.config.max_bytes))
+            .collect();
+        if tracks.len() != names.len() || !self.audio.flac_ok() {
+            tracing::error!("encoder FLAC non inizializzabile: tracce audio disattivate");
+            self.audio.set_tracks(Vec::new());
             return;
         }
-        *tracks = names
-            .iter()
-            .filter_map(|n| Track::new(n.clone(), self.config.lock_pages, self.config.max_bytes).map(Mutex::new))
-            .collect();
-        if tracks.len() != names.len() {
-            tracing::error!("encoder FLAC non inizializzabile: tracce audio disattivate");
-            tracks.clear();
-        }
-        self.audio_bytes.store(0, Ordering::Relaxed);
+        self.audio.set_tracks(tracks);
     }
 
+    /// Thread di cattura: copia in una coda preallocata, nessuna allocazione (M7).
     fn push(&self, track: usize, start: QpcTime, samples: &[f32]) {
-        let Some(flac) = &self.flac else { return };
-        let tracks = self.tracks.read().unwrap_or_else(|e| e.into_inner());
-        let Some(t) = tracks.get(track) else { return };
-        let mut t = lock(t);
-        let before = t.ring.allocated_bytes();
-        t.push(flac, start, samples, self.audio_keep_hns());
-        let after = t.ring.allocated_bytes();
-        if after >= before {
-            self.audio_bytes.fetch_add(after - before, Ordering::Relaxed);
-        } else {
-            self.audio_bytes.fetch_sub(before - after, Ordering::Relaxed);
-        }
+        self.audio.push(track, start, samples);
     }
 }
 

@@ -12,6 +12,7 @@ thiserror.workspace = true
 tracing.workspace = true
 flacenc.workspace = true
 claxon.workspace = true
+rtrb.workspace = true
 windows = { workspace = true, features = ["Win32_Foundation", "Win32_System_Memory", "Win32_System_Threading"] }
 
 [dev-dependencies]

@@ -13,6 +13,7 @@
 //!   ovunque, anche dove il WAV float non è supportato.
 
 mod ffi;
+mod polywav;
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -22,6 +23,9 @@ use std::time::{Duration, SystemTime};
 use cliprec_core::config::{AudioClipFormat, VideoContainer};
 use cliprec_core::time::hns_to_frames;
 use cliprec_core::{AudioSnapshot, CHANNELS, ClipKind, HNS_PER_SEC, SAMPLE_RATE, SavedClip, VideoSnapshot};
+
+use cliprec_buffer::{AudioRefs, TrackReader};
+use cliprec_core::QpcTime;
 
 use crate::ffi::{AudioCodec, Track, VideoIn};
 
@@ -43,6 +47,8 @@ pub enum MuxError {
     OutOfMemory,
     #[error("clip scritta ma non rinominata (resta in {part}): {source}")]
     RenameFailed { part: PathBuf, source: std::io::Error },
+    #[error("clip troppo grande per il formato: {0}")]
+    TooLarge(&'static str),
     #[error("{op} {path}: {source}")]
     Io { op: &'static str, path: PathBuf, source: std::io::Error },
 }
@@ -230,10 +236,10 @@ fn size_of(path: &Path) -> u64 {
 ///
 /// L'audio viene allineato al primo frame video (tagliato o preceduto da silenzio) e portato
 /// alla stessa durata del video.
-pub fn write_video_clip(
+pub fn write_video_clip<A: ClipAudio + ?Sized>(
     path: &Path,
     video: &VideoSnapshot,
-    audio: Option<&AudioSnapshot>,
+    audio: Option<&A>,
     opts: &VideoClipOptions,
 ) -> Result<SavedClip, MuxError> {
     let start = video.start().ok_or(MuxError::Empty("nessun pacchetto video"))?;
@@ -245,8 +251,10 @@ pub fn write_video_clip(
     // offset, senza copiare il PCM.
     let tracks: Vec<Track<'_>> = audio
         .map(|a| {
-            let skip = hns_to_frames(start.hns_since(a.start));
-            a.tracks.iter().map(|t| Track { name: &t.name, samples: &t.samples, skip, frames }).collect()
+            let skip = hns_to_frames(start.hns_since(a.start()));
+            (0..a.track_count())
+                .map(|i| Track { name: a.track_name(i), source: Aligned::new(a.reader(i), skip, frames) })
+                .collect()
         })
         .unwrap_or_default();
 
@@ -260,7 +268,7 @@ pub fn write_video_clip(
 
     let codec = AudioCodec::Aac { bit_rate: i64::from(opts.audio_bit_rate) };
     let path = write_reserved(path, suffix, false, |part| {
-        ffi::write(part, format, Some(VideoIn { snapshot: video, start }), &tracks, codec, faststart)
+        ffi::write(part, format, Some(VideoIn { snapshot: video, start }), tracks, codec, faststart)
     })?;
     Ok(SavedClip {
         kind: ClipKind::Video,
@@ -270,13 +278,125 @@ pub fn write_video_clip(
     })
 }
 
-/// Frame stereo `i` dell'uscita, cioè il frame `i + skip` di `samples`; silenzio fuori dai dati.
-pub(crate) fn frame_at(samples: &[f32], skip: i64, i: usize) -> [f32; CHANNELS] {
-    usize::try_from(i as i64 + skip)
-        .ok()
-        .and_then(|src| samples.get(src * CHANNELS..(src + 1) * CHANNELS))
-        .and_then(|s| s.try_into().ok())
-        .unwrap_or([0.0; CHANNELS])
+/// Lettore di PCM f32 stereo interleaved a 48 kHz.
+pub trait PcmReader {
+    /// Riempie `out` con i frame successivi e restituisce quanti ne ha scritti (0 alla fine).
+    fn read(&mut self, out: &mut [f32]) -> usize;
+}
+
+/// Audio di una clip, letto a pezzi: [`AudioRefs`] del buffer (decompresso in streaming, il
+/// modo previsto per salvare) o un [`AudioSnapshot`] già in memoria.
+pub trait ClipAudio: Sync {
+    /// Istante QPC del primo campione di ogni traccia.
+    fn start(&self) -> QpcTime;
+    /// Lunghezza di ogni traccia in frame.
+    fn frames(&self) -> usize;
+    fn track_count(&self) -> usize;
+    fn track_name(&self, track: usize) -> &str;
+    fn reader(&self, track: usize) -> Box<dyn PcmReader + Send + '_>;
+}
+
+impl PcmReader for TrackReader<'_> {
+    fn read(&mut self, out: &mut [f32]) -> usize {
+        TrackReader::read(self, out)
+    }
+}
+
+impl ClipAudio for AudioRefs {
+    fn start(&self) -> QpcTime {
+        AudioRefs::start(self)
+    }
+    fn frames(&self) -> usize {
+        AudioRefs::frames(self)
+    }
+    fn track_count(&self) -> usize {
+        AudioRefs::track_count(self)
+    }
+    fn track_name(&self, track: usize) -> &str {
+        AudioRefs::track_name(self, track).unwrap_or_default()
+    }
+    fn reader(&self, track: usize) -> Box<dyn PcmReader + Send + '_> {
+        match AudioRefs::reader(self, track) {
+            Some(r) => Box::new(r),
+            None => Box::new(SliceReader { samples: &[] }),
+        }
+    }
+}
+
+struct SliceReader<'a> {
+    samples: &'a [f32],
+}
+
+impl PcmReader for SliceReader<'_> {
+    fn read(&mut self, out: &mut [f32]) -> usize {
+        let n = out.len().min(self.samples.len()) / CHANNELS * CHANNELS;
+        let (head, rest) = self.samples.split_at(n);
+        out[..n].copy_from_slice(head);
+        self.samples = rest;
+        n / CHANNELS
+    }
+}
+
+impl ClipAudio for AudioSnapshot {
+    fn start(&self) -> QpcTime {
+        self.start
+    }
+    fn frames(&self) -> usize {
+        self.tracks.first().map_or(0, |t| t.samples.len() / CHANNELS)
+    }
+    fn track_count(&self) -> usize {
+        self.tracks.len()
+    }
+    fn track_name(&self, track: usize) -> &str {
+        self.tracks.get(track).map_or("", |t| t.name.as_str())
+    }
+    fn reader(&self, track: usize) -> Box<dyn PcmReader + Send + '_> {
+        Box::new(SliceReader { samples: self.tracks.get(track).map_or(&[][..], |t| t.samples.as_slice()) })
+    }
+}
+
+/// PCM allineato all'inizio del file: salta `skip` frame della sorgente (se positivo) o
+/// antepone silenzio (se negativo), poi dà esattamente `left` frame, con silenzio oltre i dati.
+pub(crate) struct Aligned<'a> {
+    inner: Box<dyn PcmReader + Send + 'a>,
+    skip: i64,
+    left: usize,
+}
+
+impl<'a> Aligned<'a> {
+    pub(crate) fn new(inner: Box<dyn PcmReader + Send + 'a>, skip: i64, frames: usize) -> Self {
+        Self { inner, skip, left: frames }
+    }
+
+    pub(crate) fn read(&mut self, out: &mut [f32]) -> usize {
+        let want = (out.len() / CHANNELS).min(self.left);
+        let out = &mut out[..want * CHANNELS];
+        while self.skip > 0 && want > 0 {
+            let n = usize::try_from(self.skip).unwrap_or(usize::MAX).min(want);
+            let got = self.inner.read(&mut out[..n * CHANNELS]);
+            if got == 0 {
+                self.skip = 0;
+            }
+            self.skip -= got as i64;
+        }
+        let mut w = 0;
+        if self.skip < 0 {
+            let pad = usize::try_from(-self.skip).unwrap_or(usize::MAX).min(want);
+            out[..pad * CHANNELS].fill(0.0);
+            self.skip += pad as i64;
+            w = pad;
+        }
+        while w < want {
+            let got = self.inner.read(&mut out[w * CHANNELS..]);
+            if got == 0 {
+                out[w * CHANNELS..].fill(0.0);
+                break;
+            }
+            w += got;
+        }
+        self.left -= want;
+        want
+    }
 }
 
 /// Nome di file sicuro per Windows a partire dal nome di una traccia.
@@ -290,37 +410,43 @@ fn file_name(name: &str) -> String {
 /// - `FlacPerTrack`/`WavPerTrack`: cartella `path` con `01 - Nome.flac`... (stesso istante
 ///   d'inizio); con una sola traccia direttamente `path.flac`/`path.wav`;
 /// - `Mka`: `path.mka` multitraccia FLAC con i nomi.
-pub fn write_audio_clip(path: &Path, audio: &AudioSnapshot, format: AudioClipFormat) -> Result<SavedClip, MuxError> {
-    let first = audio.tracks.first().ok_or(MuxError::Empty("nessuna traccia audio"))?;
-    let frames = first.samples.len() / CHANNELS;
+pub fn write_audio_clip<A: ClipAudio + ?Sized>(
+    path: &Path,
+    audio: &A,
+    format: AudioClipFormat,
+) -> Result<SavedClip, MuxError> {
+    let count = audio.track_count();
+    if count == 0 {
+        return Err(MuxError::Empty("nessuna traccia audio"));
+    }
+    let frames = audio.frames();
     let duration_secs = frames as f64 / f64::from(SAMPLE_RATE);
     // Al massimo PCM 24 bit: anche il FLAC non supera questa dimensione.
-    let needed = (frames * CHANNELS * 3 * audio.tracks.len()) as u64;
+    let needed = (frames * CHANNELS * 3 * count) as u64;
     ensure_space(path, needed)?;
 
     let (ffmt, codec, ext) = match format {
         AudioClipFormat::FlacPerTrack => ("flac", AudioCodec::Flac, ".flac"),
         AudioClipFormat::WavPerTrack => ("wav", AudioCodec::PcmS24, ".wav"),
         AudioClipFormat::Mka => ("matroska", AudioCodec::Flac, ".mka"),
-        // Formati nuovi del contratto: li implementa replay-buffer (m27).
-        AudioClipFormat::PolyWav | AudioClipFormat::Opus | AudioClipFormat::Aac => {
-            return Err(MuxError::EncoderMissing(format!("{format:?} non ancora supportato")));
+        AudioClipFormat::Opus => ("opus", AudioCodec::Opus { bit_rate: 128_000 }, ".opus"),
+        AudioClipFormat::Aac => ("mp4", AudioCodec::Aac { bit_rate: 192_000 }, ".m4a"),
+        AudioClipFormat::PolyWav => {
+            let saved = write_reserved(path, ".wav", false, |part| polywav::write(part, audio))?;
+            return Ok(SavedClip { kind: ClipKind::Audio, bytes: size_of(&saved), path: saved, duration_secs });
         }
     };
-    let tracks: Vec<Track<'_>> = audio
-        .tracks
-        .iter()
-        .map(|t| Track { name: &t.name, samples: &t.samples, skip: 0, frames: t.samples.len() / CHANNELS })
-        .collect();
+    let faststart = ffmt == "mp4";
+    let track = |i: usize| Track { name: audio.track_name(i), source: Aligned::new(audio.reader(i), 0, frames) };
 
-    let saved = if format == AudioClipFormat::Mka || tracks.len() == 1 {
-        write_reserved(path, ext, false, |part| ffi::write(part, ffmt, None, &tracks, codec, false))?
+    let saved = if format == AudioClipFormat::Mka || count == 1 {
+        write_reserved(path, ext, false, |part| ffi::write(part, ffmt, None, (0..count).map(track).collect(), codec, faststart))?
     } else {
         write_reserved(path, "", true, |part| {
             std::fs::create_dir(part).map_err(io("creazione della cartella", part))?;
-            for (i, t) in tracks.iter().enumerate() {
-                let file = part.join(format!("{:02} - {}{ext}", i + 1, file_name(t.name)));
-                ffi::write(&file, ffmt, None, std::slice::from_ref(t), codec, false)?;
+            for i in 0..count {
+                let file = part.join(format!("{:02} - {}{ext}", i + 1, file_name(audio.track_name(i))));
+                ffi::write(&file, ffmt, None, vec![track(i)], codec, faststart)?;
             }
             Ok(())
         })?
@@ -335,13 +461,27 @@ mod tests {
     #[test]
     fn align_trims_or_pads() {
         let s: Vec<f32> = (0..10).flat_map(|i| [i as f32, -(i as f32)]).collect();
+        let read_all = |skip: i64, frames: usize| {
+            let mut a = Aligned::new(Box::new(SliceReader { samples: &s }), skip, frames);
+            let mut out = Vec::new();
+            let mut buf = [9.9f32; 6]; // pezzi da 3 frame
+            loop {
+                let n = a.read(&mut buf);
+                if n == 0 {
+                    break out;
+                }
+                out.extend_from_slice(&buf[..n * 2]);
+            }
+        };
         // Audio iniziato 2 frame prima del video: si saltano.
-        assert_eq!(frame_at(&s, 2, 0), [2.0, -2.0]);
-        assert_eq!(frame_at(&s, 2, 2), [4.0, -4.0]);
+        assert_eq!(read_all(2, 3), vec![2.0, -2.0, 3.0, -3.0, 4.0, -4.0]);
         // Audio iniziato 2 frame dopo: silenzio davanti, silenzio in coda oltre i dati.
-        assert_eq!(frame_at(&s, -2, 1), [0.0, 0.0]);
-        assert_eq!(frame_at(&s, -2, 11), [9.0, -9.0]);
-        assert_eq!(frame_at(&s, -2, 12), [0.0, 0.0]);
+        let a = read_all(-2, 13);
+        assert_eq!(a.len(), 26);
+        assert_eq!(&a[..4], &[0.0, 0.0, 0.0, 0.0]);
+        assert_eq!(&a[4..6], &[0.0, -0.0]);
+        assert_eq!(&a[22..24], &[9.0, -9.0]);
+        assert_eq!(&a[24..26], &[0.0, 0.0]);
     }
 
     #[test]
@@ -449,6 +589,19 @@ mod tests {
         let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/test-output/mux/space");
         assert!(ensure_space(&target, 1 << 20).is_ok());
         assert!(matches!(ensure_space(&target, u64::MAX / 4), Err(MuxError::DiskFull { .. })));
+    }
+
+    /// m8: i thread di codifica audio girano sotto la priorità normale.
+    #[test]
+    fn encoder_threads_run_at_low_priority() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/test-output/mux/priority");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let tracks = vec![cliprec_core::AudioTrackPcm { name: "A".into(), samples: vec![0.1; 48_000 * 2] }];
+        let audio = AudioSnapshot { start: QpcTime(0), tracks };
+        write_audio_clip(&dir.join("clip"), &audio, AudioClipFormat::FlacPerTrack).unwrap();
+        let p = ffi::ENCODER_PRIORITY.load(Ordering::Relaxed);
+        assert!(p < 0, "priorità del thread di codifica: {p} (0 = normale)");
     }
 
     #[test]
