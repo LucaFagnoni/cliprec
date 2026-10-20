@@ -9,7 +9,8 @@ Le voci [DEFAULT] e [PROPOSTA] di SPEC.md valgono come decise; qui ci sono quell
   FFmpeg 9.0.2), scaricata da `cargo xtask ffmpeg` in `third_party/ffmpeg` (fuori da git).
 - [DEFAULT] Impostazioni in processo separato Slint 1.18 con `AboutSlint`.
 - [DEFAULT] Sorgente video automatica; HEVC se disponibile; VBR a qualità costante con tetto;
-  NVENC P5, lookahead spento, 2 B-frame, keyframe ogni 1 s; MP4 con indice in testa.
+  NVENC P5, lookahead spento, keyframe ogni 1 s; MP4 con indice in testa. I 2 B-frame valgono per
+  QSV e AMF H.264, non più per NVENC (voce 31).
 - [DEFAULT] Clip video 60 s, clip audio 120 s; hotkey Ctrl+Alt+F10 (video) e Ctrl+Alt+F9 (audio).
 - [DEFAULT] Fino a 8 sorgenti audio; modalità tracce separate; AAC-LC 48 kHz 192 kbit/s nelle clip video;
   clip audio un FLAC per traccia in una cartella per clip.
@@ -94,3 +95,23 @@ Le voci [DEFAULT] e [PROPOSTA] di SPEC.md valgono come decise; qui ci sono quell
 29. **Encoder di riserva software**: SVT-AV1 (BSD, già nelle DLL di FFmpeg) dopo NVENC, AMF e QSV, con
     lettura del frame su CPU solo in quel caso.
 30. **VC++ Redistributable nell'installer** (M1, scelta di Luca) invece del CRT statico.
+31. **NVENC senza B-frame, SVT-AV1 con `lp=4`** (m4, 20 ottobre). La scomposizione della memoria
+    (`cargo xtask mem`, `cliprec-encode/tests/memory.rs`, PROGRESS «Scomposizione della RAM») mostra
+    che oltre ai buffer la RAM era quasi tutta dell'encoder: FFmpeg 9 tiene almeno 4 × (B + 1)
+    superfici NVENC (un valore di `surfaces` più basso viene rialzato) e per ognuna il driver tiene
+    residente in RAM un buffer di bitstream di circa 2,5 byte per pixel. Con 2 B-frame erano 12 × 5,2 MB
+    a 1080p e 12 × 9,2 MB a 1440p. Senza B-frame le superfici sono 4: `hevc_nvenc` a 1080p passa da
+    84 a 30 MB residenti e l'app da 96 a 29 MB esclusi i buffer (soglia 50). Il prezzo, misurato su una
+    registrazione di gioco 1080p con le opzioni e il tetto di ClipRec (CQ 23): +15% di bitrate in HEVC
+    (10,5 contro 9,1 Mbit/s, SSIM 0,9898 contro 0,9907) e +7% in H.264, quindi un buffer un po' più
+    grande a pari durata (a 60 s circa +10 MB, contro −54 MB dell'encoder). Con 1 B-frame l'encoder
+    tiene 62 MB e la soglia non si rispetta. Per tornare indietro basta una riga in
+    `cliprec-encode/src/lib.rs`. Due test NVENC cambiano soglia, con i valori misurati nel codice: sul
+    rumore puro la media su 3 s arriva a 1,36 volte il tetto (1,30 con i B-frame; limite teorico del
+    VBV 1,33), tollerato fino a 1,40; sul campo piatto `h264_nvenc` a 720p sbaglia fino a 7 livelli
+    (tolleranza da 6 a 8). Le superfici restano 4 (default di FFmpeg senza B-frame): con 3 o 2 si
+    risparmiano altri 5,5 MB ciascuna, ma con meno margine quando la GPU è carica, e non l'ho potuto
+    provare con un gioco. SVT-AV1, la riserva software, con il parallelismo automatico (che su questo
+    PC a 28 thread vale quanto `lp=6`) teneva circa 1 GB residente a 1080p; `lp=4` lo porta a 660 MB con 90 fps a
+    1440p sul rumore (servono 60). Scartati `pred-struct=1` e `rtc=1` (sotto 100 MB, ma il tetto di
+    bitrate salta a 416 Mbit/s e sul rumore si scende sotto 20 fps) e `lp=3` (57 fps a 1440p).

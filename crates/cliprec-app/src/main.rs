@@ -30,10 +30,12 @@ fn main() -> anyhow::Result<()> {
         return prova(&args[1..]);
     }
     if args.first().is_some_and(|a| a == "--sessione-lunga") {
-        // `--sessione-lunga <minuti> <cartella>`: sorgenti sintetiche, CSV di memoria e frame.
+        // `--sessione-lunga <minuti> <cartella>`: sorgenti sintetiche, CSV di memoria e frame; codec,
+        // fps, risoluzione, durate e video sì/no da config.toml (`CLIPREC_CONFIG`).
         let minutes = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(60);
-        let out = args.get(2).map_or_else(|| Config::default().clips.folder().join("sessione-lunga"), Into::into);
-        return engine::run_soak(Config::default(), minutes, out);
+        let config = Config::load(&shell::config_path()).unwrap_or_default();
+        let out = args.get(2).map_or_else(|| config.clips.folder().join("sessione-lunga"), Into::into);
+        return engine::run_soak(config, minutes, out);
     }
     // Dopo «Riavvia come amministratore» la vecchia istanza sta ancora chiudendo: la si aspetta.
     let instance = if args.iter().any(|a| a == sys::RESTART_ARG) {

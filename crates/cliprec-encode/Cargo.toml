@@ -23,6 +23,7 @@ windows = { workspace = true, features = [
 
 [dev-dependencies]
 tracing-subscriber.workspace = true
+windows = { workspace = true, features = ["Win32_System_ProcessStatus"] }
 
 [lints]
 workspace = true

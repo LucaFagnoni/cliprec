@@ -352,7 +352,9 @@ fn encode_and_probe(
     let path = write_stream(file, &params.extradata, &pkts);
     let probe = ffprobe(&path);
     if !noise {
-        check_colors(&path, out.0, out.1, 0, 6);
+        // 8 livelli: senza B-frame (NVENC, DECISIONS 31) h264_nvenc a 720p non codifica alcune
+        // variazioni di 1-4 livelli per frame del campo piatto: misurato fino a 7.
+        check_colors(&path, out.0, out.1, 0, 8);
     }
     eprintln!(
         "{encoder}{} su {}: {fps:.0} fps di encode, {} pacchetti, {:.1} KB/pacchetto medi, keyframe max {:.1} KB, {:.2} Mbit/s (tetto {:.2}), extradata {} B (inizio {:02x?}); ffprobe: {probe}",
@@ -373,6 +375,12 @@ fn encode_and_probe(
 const NVIDIA: u32 = 0x10de;
 const INTEL: u32 = 0x8086;
 
+/// Media su 3 s di rumore rispetto al tetto. Con un VBV di 1 s pari al tetto il limite teorico è
+/// 4/3 (tetto più buffer iniziale); senza B-frame (DECISIONS 31) NVENC lo supera di circa il 2% sul
+/// rumore puro, con un I-frame da 7 Mbit ogni secondo: misurato 1,36 a 1080p e 1,35 a 1440p (con
+/// 2 B-frame 1,30 e 1,29).
+const NVENC_NOISE_CAP: f64 = 1.40;
+
 #[test]
 fn hevc_nvenc_1080p_native() {
     encode_and_probe(NVIDIA, "hevc_nvenc", &[(1920, 1080)], (1920, 1080), "hevc_nvenc.hevc", "hevc", false);
@@ -391,8 +399,7 @@ fn hevc_nvenc_noise_respects_bitrate_cap() {
     else {
         return;
     };
-    // VBV di 1 s pari al tetto: su 3 s la media resta sotto il tetto più il buffer iniziale.
-    assert!(bps <= cap as f64 * 1.35, "{bps} bit/s oltre il tetto {cap}");
+    assert!(bps <= cap as f64 * NVENC_NOISE_CAP, "{bps} bit/s oltre il tetto {cap}");
 }
 
 #[test]
@@ -402,7 +409,7 @@ fn hevc_nvenc_1440p_noise() {
     else {
         return;
     };
-    assert!(bps <= cap as f64 * 1.35, "{bps} bit/s oltre il tetto {cap}");
+    assert!(bps <= cap as f64 * NVENC_NOISE_CAP, "{bps} bit/s oltre il tetto {cap}");
 }
 
 #[test]

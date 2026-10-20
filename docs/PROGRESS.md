@@ -1,7 +1,7 @@
 # Stato di ClipRec
 
 Ultimo aggiornamento: 20 ottobre 2026, mattina (correzioni dopo la revisione del codice, verifica
-indipendente). Il riepilogo della notte segue più sotto, aggiornato dove le correzioni lo cambiano.
+indipendente, analisi della RAM). Il riepilogo della notte segue più sotto, aggiornato dove le correzioni lo cambiano.
 
 ## Riepilogo per Luca
 
@@ -39,10 +39,13 @@ i test di regressione, è nella tabella di `docs/REVIEW-CODICE.md`.
   com'era (M2); la clip video non finisce con l'audio muto quando il mixer è in ritardo (m3); la coda
   dei salvataggi sopravvive a un panic; un ritardo negativo non lascia silenzio in coda.
   Clip di prova dopo il secondo giro: `probe` ok, A/V −3,75 ms, 0 ms tra le tracce.
-- **Misura onesta della RAM (m4):** working set privato 111 MB con 19 MB di buffer, cioè circa 92 MB
-  esclusi i buffer contro una soglia di 50 MB. **La soglia non è rispettata**: va analizzata con
-  VMMap (sospetto il driver NVENC/D3D). La sessione di 3,5 h è stata fatta col binario di prima delle
-  correzioni.
+- **RAM esclusi i buffer (m4): ora rispettata.** Prima 96 MB esclusi i buffer (working set privato
+  115 MB con 19 MB di buffer) contro una soglia di 50. La scomposizione (sotto, «Scomposizione della
+  RAM») mostra che erano i buffer di bitstream di NVENC: 12 superfici da 5,2 MB a 1080p, imposte da
+  FFmpeg con 2 B-frame. Senza B-frame su NVENC (DECISIONS 31) sono 4: **29 MB esclusi i buffer** in HEVC
+  1080p60, da 24 a 34 MB fra 720p e 1440p e fra 30 e 144 fps. Il prezzo è circa il 15% di bitrate in
+  più a qualità costante. SVT-AV1 di riserva da circa 1 GB a 660 MB (`lp=4`). La sessione di 3,5 h è
+  stata fatta col binario di prima delle correzioni.
 
 ### Cosa funziona
 
@@ -99,7 +102,8 @@ l'app scrive la config predefinita e apre le impostazioni.
 5. Microfono, Discord e un gioco come sorgenti audio; scollegare le cuffie durante la registrazione.
 6. Un controller con `video_pad = "Back+A"` in config.toml, le lingue (`language = "en"`) e
    «Riavvia come amministratore» con un gioco elevato (apre il dialogo UAC).
-7. RAM con VMMap: circa 92 MB esclusi i buffer contro 50 (sospetto il driver NVENC/D3D).
+7. RAM con cattura vera e un gioco: `cargo xtask mem cliprec-app.exe` con l'app in tray (oggi solo
+   sorgenti sintetiche); qualità e bitrate senza B-frame su NVENC con un gioco vero (DECISIONS 31).
 8. Dopo le correzioni della revisione:
    - finestra minimizzata come bersaglio all'avvio: la clip deve avere la risoluzione della finestra;
    - uscita a 1080p su uno schermo 1440p (impostazioni → Video → Risoluzione);
@@ -127,10 +131,11 @@ l'app scrive la config predefinita e apre le impostazioni.
 
 ### Decisioni da confermare
 
-Tutte in `docs/DECISIONS.md` (30 voci; 27-30 dopo la revisione: iniezione DLL, risoluzione d'uscita, SVT-AV1, Redistributable). Le più importanti: Rust 1.93 invece di 1.99.1 (1); contratti
+Tutte in `docs/DECISIONS.md` (31 voci; 27-31 dopo la revisione: iniezione DLL, risoluzione d'uscita, SVT-AV1, Redistributable, NVENC senza B-frame per la RAM). Le più importanti: Rust 1.93 invece di 1.99.1 (1); contratti
 approvati senza di te (2); `MinUpdateInterval` a 3/4 di periodo (17); pts video = tick, senza
 compensazione (18); tick persi riempiti con l'ultimo frame (19); RAM insufficiente → tetto ridotto e
-avviso invece della proposta interattiva (20); spegnimento del PC lasciato alla sessione di pokewilds (12).
+avviso invece della proposta interattiva (20); spegnimento del PC lasciato alla sessione di pokewilds (12);
+NVENC senza B-frame, +15% di bitrate per 54 MB di RAM in meno (31).
 
 ### Spegnimento del PC: annullato da Luca, il PC resta acceso
 
@@ -167,9 +172,54 @@ Le righe della sessione continua vengono dal binario di prima della revisione.
 | Sincronia A/V (sintetica) | ±20 ms | da −3 a −16 ms (al più un frame, artefatto della misura); −11 ms dopo 3,5 ore |
 | Sessione continua | 8 h senza crescita né frame persi sistematici | 3,5 h: memoria privata 400 → 411 MB, piatta dal minuto 90; buffer costante 84,9 MB; 2 frame persi, entrambi all'avvio |
 | CPU del processo | < 2% | 4,4% di un core = 0,16% della CPU |
-| RAM del processo esclusi i buffer | < 50 MB | **non rispettata**: working set privato 111,2 MB con 18,9 MB di buffer, circa 92 MB esclusi i buffer (binario dopo le correzioni); da analizzare con VMMap |
+| RAM del processo esclusi i buffer | < 50 MB | **29 MB** (working set privato 47,8 MB con 18,9 MB di buffer; prima 114,8, cioè 96 esclusi i buffer). Da 24 a 34 MB fra 720p e 1440p e fra 30 e 144 fps; 5 MB in solo audio. Scomposizione sotto |
 | Picco di memoria al salvataggio | (nessuna) | 131 kB per una clip di 60 s su 2 tracce (prima 44 MB) |
 | Distribuzione | < 40 MB | 134 MB oggi (FFmpeg completa, runtime VC++, licenze); 26-30 MB stimati con la build ridotta |
+
+### Scomposizione della RAM (m4)
+
+Working set privato di `cliprec-app.exe --sessione-lunga` (sorgenti sintetiche, RTX 3080, driver
+616.56), misurato con `cargo xtask mem` dopo 75 s, a buffer pieno; le pagine bloccate con
+`VirtualLock` sono il buffer. «Prima» è il binario di `f568a23`, «dopo» quello con NVENC senza B-frame
+(DECISIONS 31).
+
+| Categoria, HEVC 1080p60 (MB) | Prima | Dopo |
+| --- | --- | --- |
+| Immagini (DLL ed exe, solo le pagine scritte) | 1,0 | 1,0 |
+| Heap del processo (primo segmento) | 0,4 | 0,5 |
+| Stack dei thread (30) | 0,1 | 0,1 |
+| Privata: buffer (bloccata) | 18,9 | 18,9 |
+| Privata: bitstream NVENC | 57,5 (12 × 5,2 MB) | 5,2 (4 × 5,2 MB, uno residente) |
+| Privata: resto (device D3D11 e driver NVIDIA, sessione NVENC, blocchi grandi degli heap) | 36,7 | 22,1 |
+| **Totale** | 114,8 | 47,8 |
+| **Esclusi i buffer** | 95,9 | 28,9 |
+
+- Ciò che è di ClipRec (exe, FFmpeg, audio, FLAC, stack, heap) vale circa 5 MB: in solo audio il
+  processo sta a 7,4 MB con 2,1 MB di buffer. Il resto è del driver e cresce con la risoluzione.
+- Il buffer di bitstream di NVENC vale circa 2,5 byte per pixel (2,4 MB a 720p, 5,2 MB a 1080p,
+  9,2 MB a 1440p), uno per superficie. FFmpeg 9 ne impone almeno 4 × (B-frame + 1): l'opzione
+  `surfaces` più bassa viene rialzata (l'avviso è sotto il livello di log che teniamo).
+- Il commit privato (230 MB dopo, 376 prima) non è RAM occupata: è soprattutto memoria del driver
+  allocata e mai toccata (per esempio 3 × 8,9 MB senza pagine residenti).
+- Per fase (`cargo test --release -p cliprec-encode --test memory -- --nocapture`, 1080p60, MB
+  residenti dopo 120 frame): device D3D11 NVIDIA 8; `hevc_nvenc` 84 con 2 B-frame, 62 con 1, 30 senza;
+  `h264_nvenc` 33; `hevc_qsv` sulla UHD 770 170 alla prima apertura, poi il driver Intel tiene una
+  cache che si stabilizza (circa 250 MB nel processo, solo quando si cattura sull'Intel); `libsvtav1`
+  circa 1 GB, 660 MB con `lp=4`. Dopo la chiusura ogni encoder restituisce tutto (nessuna perdita in 4
+  aperture).
+
+| Variante (MB esclusi i buffer) | Prima | Dopo |
+| --- | --- | --- |
+| HEVC 1080p60 | 95,9 | 28,9 |
+| H.264 1080p60 | 70,5 | 26,0 |
+| HEVC 1440p60 | 138,4 | 33,5 |
+| HEVC 720p60 | 64,9 | 24,4 |
+| HEVC 1080p30 | 93,8 | 34,3 |
+| HEVC 1080p144 | 81,8 | 27,6 |
+| Solo audio | 5,4 | 5,3 |
+
+Nessun frame perso in nessuna variante, prima e dopo. Non misurati: la cattura WGC vera (il suo
+frame pool è in VRAM) e AMF (nessuna GPU AMD qui).
 
 ## Fatto, in ordine
 
