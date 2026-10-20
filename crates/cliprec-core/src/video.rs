@@ -68,15 +68,17 @@ pub struct VideoStreamParams {
     pub width: u32,
     pub height: u32,
     pub fps: u32,
-    /// Header globali (avcC/hvcC/av1C) come prodotti dall'encoder con `AV_CODEC_FLAG_GLOBAL_HEADER`.
+    /// Header globali come prodotti dall'encoder con `AV_CODEC_FLAG_GLOBAL_HEADER`. Per NVENC e QSV
+    /// sono in formato Annex B (`00 00 00 01`), come i pacchetti: il muxer MP4 di FFmpeg li converte.
     pub extradata: Vec<u8>,
-    /// Tetto di bitrate in bit/s.
+    /// Tetto di bitrate (maxrate) in bit/s.
     pub bit_rate: u64,
     /// Nome dell'encoder, es. `hevc_nvenc`.
     pub encoder_name: String,
 }
 
 /// Pacchetto compresso preso in prestito dall'encoder: chi lo riceve copia `data` se lo tiene.
+/// Con i B-frame il `dts` dei primi pacchetti può precedere il `pts` del primo frame.
 #[derive(Clone, Copy, Debug)]
 pub struct PacketRef<'a> {
     pub data: &'a [u8],
