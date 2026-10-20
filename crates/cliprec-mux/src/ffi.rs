@@ -470,7 +470,7 @@ fn encode_track(
 /// Byte liberi per l'utente sul volume di `dir`, o `None` se non si riesce a saperlo.
 pub(crate) fn free_space(dir: &Path) -> Option<u64> {
     let mut free = 0u64;
-    let dir = HSTRING::from(dir.as_os_str());
+    let dir = verbatim(dir);
     // SAFETY: stringa wide terminata da NUL viva per la chiamata; il puntatore d'uscita è locale.
     unsafe { GetDiskFreeSpaceExW(&dir, Some(&mut free), None, None) }.ok()?;
     Some(free)
@@ -478,8 +478,25 @@ pub(crate) fn free_space(dir: &Path) -> Option<u64> {
 
 /// Rinomina file o cartella senza mai sovrascrivere: se `to` esiste dà `AlreadyExists`.
 pub(crate) fn rename_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
-    let (from, to) = (HSTRING::from(from.as_os_str()), HSTRING::from(to.as_os_str()));
+    let (from, to) = (verbatim(from), verbatim(to));
     // SAFETY: stringhe wide terminate da NUL vive per la chiamata; nessun flag = niente sostituzione.
     unsafe { MoveFileExW(&from, &to, MOVE_FILE_FLAGS(0)) }
         .map_err(|e| std::io::Error::from_raw_os_error(e.code().0 & 0xFFFF))
+}
+
+/// Percorso assoluto con prefisso `\\?\` (o `\\?\UNC\`), per superare MAX_PATH nelle API
+/// Win32 chiamate direttamente (std e FFmpeg lo fanno da soli).
+fn verbatim(path: &Path) -> HSTRING {
+    use std::os::windows::ffi::OsStrExt;
+    let abs = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let wide: Vec<u16> = abs.as_os_str().encode_wide().collect();
+    let w = |s: &str| s.encode_utf16().collect::<Vec<u16>>();
+    let full = if wide.starts_with(&w(r"\\?\")) {
+        wide
+    } else if let Some(unc) = wide.strip_prefix(&w(r"\\")[..]) {
+        [w(r"\\?\UNC\").as_slice(), unc].concat()
+    } else {
+        [w(r"\\?\").as_slice(), &wide].concat()
+    };
+    HSTRING::from_wide(&full)
 }

@@ -331,6 +331,26 @@ fn parallel_clips_with_the_same_name() {
     }
 }
 
+/// Cartella annidata con un percorso totale oltre MAX_PATH (260): la clip si salva.
+#[test]
+fn long_path_clip() {
+    let b = filled_buffer();
+    let end = pts(6 * FPS);
+    let video = b.snapshot_video(3.0, end).unwrap();
+    let audio = b.snapshot_audio(video.start().unwrap(), end).unwrap();
+    let root = std::path::absolute(out_dir().join("lungo")).unwrap();
+    let _ = std::fs::remove_dir_all(&root);
+    let dir = root.join("a".repeat(120)).join("b".repeat(120));
+    std::fs::create_dir_all(&dir).unwrap();
+    let base = dir.join(format!("clip_{}", "c".repeat(40)));
+    let saved = write_video_clip(&base, &video, Some(&audio), &VideoClipOptions::default()).unwrap();
+    assert!(saved.path.as_os_str().len() > 260, "{}", saved.path.as_os_str().len());
+    assert!(std::fs::metadata(&saved.path).unwrap().len() > 10_000);
+    let flac = write_audio_clip(&base, &audio, AudioClipFormat::FlacPerTrack).unwrap();
+    assert_eq!(std::fs::read_dir(&flac.path).unwrap().count(), 2);
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
 /// HEVC con frame riordinati: dopo aver portato a zero il primo pts, i primi dts sono negativi.
 #[test]
 fn video_clip_with_reordered_frames() {

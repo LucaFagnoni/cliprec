@@ -90,7 +90,7 @@ static PART_SEQ: AtomicU64 = AtomicU64::new(0);
 /// antivirus, OneDrive): 10 × 50 ms.
 const RENAME_TRIES: u32 = 10;
 const RENAME_WAIT: Duration = Duration::from_millis(50);
-/// Estensioni delle clip, per `cleanup_stale`.
+/// Estensioni dei file di clip, per riconoscere i `.part` in `cleanup_stale`.
 const CLIP_EXTENSIONS: [&str; 5] = ["mp4", "mkv", "flac", "wav", "mka"];
 
 /// Scrive con `write` su un `.part` univoco (`<base><suffix>.<PID>-<n>.part`) e solo a scrittura
@@ -113,8 +113,9 @@ fn write_reserved(
     publish(&part, base, suffix, ffi::rename_no_replace)
 }
 
-/// Rinomina `part` sul primo nome libero, ritentando per circa mezzo secondo se il file è
-/// bloccato. Non cancella mai `part`.
+/// Rinomina `part` (una clip completa) sul primo nome libero, ritentando per circa mezzo secondo
+/// se il file è bloccato. Non cancella mai `part`: se non riesce lo segna con `.ok`, così
+/// `cleanup_stale` lo rinomina al prossimo avvio invece di cancellarlo.
 fn publish(
     part: &Path,
     base: &Path,
@@ -132,32 +133,87 @@ fn publish(
                 tries += 1;
                 std::thread::sleep(RENAME_WAIT);
             }
-            Err(source) => return Err(MuxError::RenameFailed { part: part.to_path_buf(), source }),
+            Err(source) => {
+                let _ = std::fs::write(with_suffix(part, COMPLETE_MARK), b"");
+                return Err(MuxError::RenameFailed { part: part.to_path_buf(), source });
+            }
         }
     }
 }
 
-/// Pulizia all'avvio di `dir` (la cartella delle clip): toglie i `.part` più vecchi di un'ora
-/// (scritture interrotte) e i file di clip da 0 byte. Restituisce quanti elementi ha tolto.
+/// Segno accanto a un `.part` completo che non si è potuto rinominare.
+const COMPLETE_MARK: &str = ".ok";
+
+/// Se `name` è un `.part` scritto da ClipRec (`<nome><ext>.<PID>-<n>.part`, PID e contatore
+/// numerici) restituisce `<nome>` ed `<ext>` (vuota per le cartelle delle clip audio).
+fn parse_part(name: &str) -> Option<(&str, &str)> {
+    let (head, id) = name.strip_suffix(".part")?.rsplit_once('.')?;
+    let (pid, n) = id.split_once('-')?;
+    let numeric = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    if !numeric(pid) || !numeric(n) {
+        return None;
+    }
+    for ext in CLIP_EXTENSIONS {
+        if let Some(base) = head.strip_suffix(ext).and_then(|h| h.strip_suffix('.')) {
+            return Some((base, &head[base.len()..]));
+        }
+    }
+    Some((head, ""))
+}
+
+/// `true` se la cartella contiene solo file di traccia di ClipRec (`NN - Nome.flac`/`.wav`).
+fn is_clip_folder(path: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(path) else { return false };
+    entries.filter_map(Result::ok).all(|e| {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let b = name.as_bytes();
+        e.file_type().is_ok_and(|t| t.is_file())
+            && b.len() > 5
+            && b[..2].iter().all(u8::is_ascii_digit)
+            && name[2..].starts_with(" - ")
+            && (name.ends_with(".flac") || name.ends_with(".wav"))
+    })
+}
+
+/// Pulizia all'avvio di `dir` (la cartella delle clip). Tocca solo i `.part` con lo schema di
+/// ClipRec: quelli completi ma non rinominati (segnati con `.ok`) vengono rinominati sul nome
+/// libero; quelli più vecchi di un'ora senza segno (scritture interrotte) vengono tolti. Le
+/// cartelle `.part` si tolgono solo se contengono soltanto file di traccia. Restituisce quanti
+/// elementi ha sistemato.
 pub fn cleanup_stale(dir: &Path) -> usize {
     let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
     let hour_ago = SystemTime::now().checked_sub(Duration::from_secs(3600));
-    let mut removed = 0;
+    let mut done = 0;
     for entry in entries.filter_map(Result::ok) {
         let path = entry.path();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        // Segno rimasto senza il suo `.part`.
+        if let Some(part) = name.strip_suffix(COMPLETE_MARK).filter(|p| parse_part(p).is_some()) {
+            if !dir.join(part).exists() && std::fs::remove_file(&path).is_ok() {
+                done += 1;
+            }
+            continue;
+        }
+        let Some((base, ext)) = parse_part(&name) else { continue };
         let Ok(meta) = entry.metadata() else { continue };
-        let ext = path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default();
+        let is_dir = meta.is_dir();
+        if ext.is_empty() != is_dir || (is_dir && !is_clip_folder(&path)) {
+            continue;
+        }
+        let mark = with_suffix(&path, COMPLETE_MARK);
+        if mark.exists() {
+            if publish(&path, &dir.join(base), ext, ffi::rename_no_replace).is_ok() {
+                let _ = std::fs::remove_file(&mark);
+                done += 1;
+            }
+            continue;
+        }
         let old = matches!((meta.modified(), hour_ago), (Ok(m), Some(h)) if m < h);
-        let gone = if ext == "part" && old {
-            if meta.is_dir() { std::fs::remove_dir_all(&path) } else { std::fs::remove_file(&path) }.is_ok()
-        } else if meta.is_file() && meta.len() == 0 && CLIP_EXTENSIONS.contains(&ext.as_str()) {
-            std::fs::remove_file(&path).is_ok()
-        } else {
-            false
-        };
-        removed += usize::from(gone);
+        if old && if is_dir { std::fs::remove_dir_all(&path) } else { std::fs::remove_file(&path) }.is_ok() {
+            done += 1;
+        }
     }
-    removed
+    done
 }
 
 fn size_of(path: &Path) -> u64 {
@@ -300,6 +356,9 @@ mod tests {
         }
         assert!(t.elapsed() >= Duration::from_millis(400), "ritenta per circa mezzo secondo");
         assert!(part.exists(), "la clip non va cancellata");
+        let mark = dir.join("clip.mp4.1-1.part.ok");
+        assert!(mark.exists(), "segno di clip completa per cleanup_stale");
+        std::fs::remove_file(mark).unwrap();
         // Bloccato per due tentativi, poi libero: riesce.
         let calls = std::cell::Cell::new(0);
         let flaky = |a: &Path, b: &Path| {
@@ -338,14 +397,24 @@ mod tests {
     fn stale_files_are_cleaned() {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/test-output/mux/stale");
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join("old.123-0.part")).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        // Cartella audio interrotta (schema ClipRec, solo file di traccia): da togliere.
+        std::fs::create_dir_all(dir.join("audio.123-0.part")).unwrap();
+        std::fs::write(dir.join("audio.123-0.part").join("01 - Gioco.flac"), b"x").unwrap();
+        // Cartella con lo schema ma con altro dentro: mai remove_dir_all.
+        std::fs::create_dir_all(dir.join("altro.123-1.part")).unwrap();
+        std::fs::write(dir.join("altro.123-1.part").join("documento.txt"), b"x").unwrap();
         std::fs::write(dir.join("old.mp4.1-0.part"), b"x").unwrap();
         std::fs::write(dir.join("new.mp4.1-1.part"), b"x").unwrap();
+        // Download di Firefox in pausa e simili: fuori schema, intoccabili.
+        std::fs::write(dir.join("film.mp4.part"), b"x").unwrap();
+        std::fs::write(dir.join("serie.mkv.abc-1.part"), b"x").unwrap();
         std::fs::write(dir.join("vuota.mp4"), b"").unwrap();
-        std::fs::write(dir.join("buona.mp4"), b"x").unwrap();
-        std::fs::write(dir.join("vuoto.txt"), b"").unwrap();
+        // Clip completa non rinominata: va rinominata, non cancellata.
+        std::fs::write(dir.join("salvata.mp4.7-3.part"), b"clip").unwrap();
+        std::fs::write(dir.join("salvata.mp4.7-3.part.ok"), b"").unwrap();
         let two_hours_ago = SystemTime::now() - Duration::from_secs(7200);
-        for p in ["old.123-0.part", "old.mp4.1-0.part"] {
+        for p in ["audio.123-0.part", "altro.123-1.part", "old.mp4.1-0.part", "film.mp4.part", "serie.mkv.abc-1.part", "salvata.mp4.7-3.part"] {
             use std::os::windows::fs::OpenOptionsExt;
             // FILE_FLAG_BACKUP_SEMANTICS: serve per aprire anche una cartella.
             let f = std::fs::File::options().write(true).custom_flags(0x0200_0000).open(dir.join(p)).unwrap();
@@ -354,7 +423,21 @@ mod tests {
         assert_eq!(cleanup_stale(&dir), 3);
         let mut left: Vec<String> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
         left.sort();
-        assert_eq!(left, ["buona.mp4", "new.mp4.1-1.part", "vuoto.txt"]);
+        assert_eq!(
+            left,
+            ["altro.123-1.part", "film.mp4.part", "new.mp4.1-1.part", "salvata.mp4", "serie.mkv.abc-1.part", "vuota.mp4"]
+        );
+        assert_eq!(std::fs::read(dir.join("salvata.mp4")).unwrap(), b"clip");
+    }
+
+    #[test]
+    fn part_names_follow_the_schema() {
+        assert_eq!(parse_part("Gioco_2026.mp4.1234-0.part"), Some(("Gioco_2026", ".mp4")));
+        assert_eq!(parse_part("Gioco 2.5.mkv.1-22.part"), Some(("Gioco 2.5", ".mkv")));
+        assert_eq!(parse_part("audio.1-2.part"), Some(("audio", "")));
+        assert_eq!(parse_part("film.mp4.part"), None);
+        assert_eq!(parse_part("x.mp4.12-.part"), None);
+        assert_eq!(parse_part("x.mp4.a-1.part"), None);
     }
 
     #[test]
