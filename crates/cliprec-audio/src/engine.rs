@@ -5,8 +5,9 @@
 //! - Traccia unica, o traccia «Mix» in testa: le sorgenti passano dal [`Mixer`] su un thread che
 //!   produce blocchi da 10 ms su una griglia ancorata al QPC, con un ritardo fisso.
 
-use std::sync::Arc;
+use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -67,6 +68,7 @@ pub struct AudioEngine {
     stop: Arc<AtomicBool>,
     mixer_thread: Option<JoinHandle<()>>,
     mix_latency: Arc<AtomicI64>,
+    mixer_error: Arc<Mutex<Option<String>>>,
 }
 
 impl AudioEngine {
@@ -140,18 +142,24 @@ impl AudioEngine {
         };
         let stop = Arc::new(AtomicBool::new(false));
         let mix_latency = Arc::new(AtomicI64::new(MIX_LATENCY_HNS));
+        let mixer_error = Arc::new(Mutex::new(None));
         let mixer_thread = if mixer.is_some() || !silent.is_empty() {
-            let (stop, latency) = (stop.clone(), mix_latency.clone());
+            let (stop, latency, error) = (stop.clone(), mix_latency.clone(), mixer_error.clone());
             Some(
                 std::thread::Builder::new()
                     .name("mixer audio".into())
-                    .spawn(move || mixer_loop(mixer, silent, sink, stop, latency))
+                    .spawn(move || mixer_loop(mixer, silent, sink, stop, latency, error))
                     .map_err(|e| SourceError::Failed(format!("thread del mixer: {e}")))?,
             )
         } else {
             None
         };
-        Ok(Self { sources, errors, stop, mixer_thread, mix_latency })
+        Ok(Self { sources, errors, stop, mixer_thread, mix_latency, mixer_error })
+    }
+
+    /// Ultimo panic del thread del mixer (il mixer prosegue col blocco successivo), se c'è stato.
+    pub fn mixer_error(&self) -> Option<String> {
+        self.mixer_error.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// Ritardo attuale del mixer (traccia unica e «Mix») rispetto ad adesso, in unità da 100 ns:
@@ -198,6 +206,7 @@ fn mixer_loop(
     sink: Arc<dyn AudioTrackSink>,
     stop: Arc<AtomicBool>,
     latency: Arc<AtomicI64>,
+    error: Arc<Mutex<Option<String>>>,
 ) {
     let mmcss = crate::wasapi_source::Mmcss::register();
     let zeros = vec![0.0f32; MIX_BLOCK_FRAMES * CHANNELS];
@@ -216,11 +225,19 @@ fn mixer_loop(
             if origin.add_hns(frames_to_hns((k + 1) * block)) > ready_until {
                 break;
             }
-            if let Some(m) = &mut mixer {
-                sink.push(0, start, m.render(start));
-            }
-            for &t in &silent {
-                sink.push(t, start, &zeros);
+            // Supervisione: un panic perde al più questo blocco; il mixer prosegue col successivo.
+            let block = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                if let Some(m) = &mut mixer {
+                    sink.push(0, start, m.render(start));
+                }
+                for &t in &silent {
+                    sink.push(t, start, &zeros);
+                }
+            }));
+            if let Err(p) = block {
+                let msg = crate::panic_message(p.as_ref());
+                tracing::error!("panic nel mixer audio: {msg}");
+                *error.lock().unwrap_or_else(|e| e.into_inner()) = Some(format!("errore interno del mixer (panic): {msg}"));
             }
             k += 1;
         }
@@ -432,6 +449,31 @@ mod tests {
         let ratio = audible as f64 / tail.len().max(1) as f64;
         println!("Mix con sorgente a 300 ms: {:.1}% dei campioni con il segnale", ratio * 100.0);
         assert!(ratio > 0.95, "{:.1}%", ratio * 100.0);
+    }
+
+    /// M9: un panic nel thread del mixer (qui nel sink, al primo blocco del Mix) non ferma il Mix.
+    #[test]
+    fn mixer_survives_panic() {
+        struct PanicOnce(TestSink, AtomicBool);
+        impl AudioTrackSink for PanicOnce {
+            fn set_tracks(&self, names: &[String]) {
+                self.0.set_tracks(names);
+            }
+            fn push(&self, track: usize, start: QpcTime, samples: &[f32]) {
+                if track == 0 && !self.1.swap(true, Ordering::AcqRel) {
+                    panic!("panic di prova nel mixer");
+                }
+                self.0.push(track, start, samples);
+            }
+        }
+        let sink = Arc::new(PanicOnce(TestSink::default(), AtomicBool::new(false)));
+        let mut engine = AudioEngine::with_sources(beeps(), &[], TrackMode::Merged, false, sink.clone()).unwrap();
+        std::thread::sleep(Duration::from_millis(1000));
+        assert!(engine.mixer_error().is_some_and(|m| m.contains("panic di prova")));
+        engine.stop();
+        let total: usize = sink.0.blocks.lock().unwrap()[0].iter().map(|b| b.1).sum();
+        println!("Mix dopo il panic: {:.3} s", total as f64 / 48_000.0);
+        assert!(total > 48_000 / 2, "il Mix si è fermato: {total} campioni");
     }
 
     struct Denied;

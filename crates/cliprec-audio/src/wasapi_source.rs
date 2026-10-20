@@ -2,6 +2,7 @@
 //! process loopback di un'applicazione. Un thread per sorgente, registrato in MMCSS «Pro Audio»,
 //! a eventi con attesa massima di 10 ms; i vuoti diventano silenzio tramite [`Continuity`].
 
+use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -202,7 +203,7 @@ impl AudioSource for WasapiSource {
     }
 
     fn state(&self) -> SourceState {
-        self.state.lock().map(|g| g.clone()).unwrap_or(SourceState::Error("stato non leggibile".into()))
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     fn name(&self) -> &str {
@@ -272,9 +273,8 @@ struct Capture {
 
 impl Capture {
     fn set_state(&self, s: SourceState) {
-        if let Ok(mut g) = self.state.lock()
-            && *g != s
-        {
+        let mut g = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if *g != s {
             tracing::info!(state = ?s, "sorgente audio");
             *g = s;
         }
@@ -283,7 +283,16 @@ impl Capture {
     fn run(mut self) {
         let com = wasapi::initialize_mta();
         let mmcss = Mmcss::register();
-        self.capture_loop();
+        // Supervisione: un panic nella cattura porta lo stato a `Error`, si consegna silenzio e si
+        // riparte dopo l'attesa normale dei tentativi (3 s o una notifica di dispositivo).
+        while !self.stop.load(Ordering::Acquire) {
+            let Err(p) = std::panic::catch_unwind(AssertUnwindSafe(|| self.capture_loop())) else { break };
+            let msg = crate::panic_message(p.as_ref());
+            tracing::error!("panic nel thread di cattura audio: {msg}");
+            self.set_state(SourceState::Error(format!("errore interno della cattura (panic): {msg}")));
+            let flags = self.flags.clone();
+            let _ = std::panic::catch_unwind(AssertUnwindSafe(|| self.wait_silently(&flags)));
+        }
         drop(mmcss);
         if com.is_ok() {
             wasapi::deinitialize();
@@ -720,6 +729,42 @@ mod tests {
         println!("Running dopo {recovered:.2} s");
         assert!(recovered >= 2.9, "il nuovo tentativo arriva dopo 3 s, non prima: {recovered}");
         assert_continuous(&chunks.lock().unwrap(), wall);
+    }
+
+    /// M9: un panic sul thread di cattura (qui nella callback) porta la sorgente in `Error`, poi
+    /// riparte da sola al tentativo successivo.
+    #[test]
+    fn panic_in_capture_thread_restarts_source() {
+        let chunks: Chunks = Arc::default();
+        let sink = chunks.clone();
+        let mut calls = 0;
+        let mut src = WasapiSource::new("test", AudioSourceKind::Output { device: None });
+        src.start(Box::new(move |c| {
+            calls += 1;
+            if calls == 3 {
+                panic!("panic di prova nella cattura");
+            }
+            sink.lock().unwrap().push((c.qpc, c.samples.len() / 2, 0.0));
+        }))
+        .unwrap();
+        let t0 = Instant::now();
+        let mut seen_error = None;
+        while t0.elapsed() < Duration::from_secs(6) {
+            match src.state() {
+                SourceState::Error(m) => seen_error = Some(m),
+                SourceState::Running if seen_error.is_some() => break,
+                _ => {}
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let state = src.state();
+        std::thread::sleep(Duration::from_millis(300));
+        src.stop();
+        println!("errore visto: {seen_error:?}, stato finale {state:?}");
+        assert!(seen_error.is_some_and(|m| m.contains("panic")), "lo stato deve passare a Error");
+        assert_eq!(state, SourceState::Running);
+        let last = chunks.lock().unwrap().last().unwrap().0;
+        assert!(QpcTime::now().hns_since(last) < 5_000_000, "la cattura deve aver ripreso");
     }
 
     /// Cattura reale dal microfono: solo a mano (`cargo test -- --ignored`), mai di notte.
