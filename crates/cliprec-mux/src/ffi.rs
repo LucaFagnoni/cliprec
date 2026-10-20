@@ -19,7 +19,7 @@ use ffmpeg_the_third::ffi::{
     avformat_alloc_output_context2, avformat_free_context, avformat_new_stream, avformat_write_header, avio_closep,
     avio_open,
 };
-use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+use windows::Win32::Storage::FileSystem::{GetDiskFreeSpaceExW, MOVE_FILE_FLAGS, MoveFileExW};
 use windows::core::HSTRING;
 
 use crate::MuxError;
@@ -474,4 +474,12 @@ pub(crate) fn free_space(dir: &Path) -> Option<u64> {
     // SAFETY: stringa wide terminata da NUL viva per la chiamata; il puntatore d'uscita è locale.
     unsafe { GetDiskFreeSpaceExW(&dir, Some(&mut free), None, None) }.ok()?;
     Some(free)
+}
+
+/// Rinomina file o cartella senza mai sovrascrivere: se `to` esiste dà `AlreadyExists`.
+pub(crate) fn rename_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
+    let (from, to) = (HSTRING::from(from.as_os_str()), HSTRING::from(to.as_os_str()));
+    // SAFETY: stringhe wide terminate da NUL vive per la chiamata; nessun flag = niente sostituzione.
+    unsafe { MoveFileExW(&from, &to, MOVE_FILE_FLAGS(0)) }
+        .map_err(|e| std::io::Error::from_raw_os_error(e.code().0 & 0xFFFF))
 }
