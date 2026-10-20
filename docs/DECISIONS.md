@@ -84,3 +84,13 @@ Le voci [DEFAULT] e [PROPOSTA] di SPEC.md valgono come decise; qui ci sono quell
     arrivano dagli altri crate dentro un avviso (stato di una sorgente, errori del muxer).
 26. **Test end-to-end del motore in fila** (mutex nei test): in parallelo, sotto carico, l'avvio di
     `ffprobe` falliva a volte con `0xc0000142` (risorse di sistema), non per un difetto di ClipRec.
+27. **Iniezione DLL per il fullscreen esclusivo: valutata, non implementata** (20 ottobre, su richiesta
+    di Luca). Rischio anti-cheat e costo di manutenzione alti, beneficio limitato perché WGC cattura già la
+    maggior parte dei giochi DX11/DX12 «a schermo intero». Eventuale modulo futuro solo sperimentale,
+    opzionale e per elenco di giochi. Dettagli in `docs/REVIEW-CODICE.md`, «Valutazione».
+28. **Risoluzione d'uscita fissa** (C1): «Nativa» = risoluzione del monitor del bersaglio, non del primo
+    frame; 1440p, 1080p e 720p scalano l'immagine (es. 1080p da uno schermo 1440p) con bande nere se le
+    proporzioni differiscono. L'encoder non si apre mai sulla dimensione di un segnaposto.
+29. **Encoder di riserva software**: SVT-AV1 (BSD, già nelle DLL di FFmpeg) dopo NVENC, AMF e QSV, con
+    lettura del frame su CPU solo in quel caso.
+30. **VC++ Redistributable nell'installer** (M1, scelta di Luca) invece del CRT statico.

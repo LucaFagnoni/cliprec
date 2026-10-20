@@ -28,6 +28,63 @@ può pubblicare (manca il runtime VC++, avvisi di licenza incompleti). Le correz
    fissata per URL e hash, avvisi di licenza completi (librerie statiche in FFmpeg, testo GPLv3, testi
    delle licenze dei crate).
 
+## Piano delle correzioni (20 ottobre 2026, 10:10)
+
+Richiesta di Luca: correggere critiche e maggiori, le minori solo se banali e isolate; M1 con il
+redistributable nell'installer; uscita scalabile (es. 1080p da uno schermo 1440p); encoder di riserva;
+le lacune rispetto a OBS e Moments; valutare l'iniezione DLL. Ogni correzione ha un test di regressione
+che fallisce prima e passa dopo (se impossibile, il motivo è nel rapporto del subagente).
+
+1. **Contratti** (`cliprec-core`, agente principale, da solo e per primo): `VideoSource::native_size`
+   (C1), ritardo per sorgente audio, richieste IPC per salvare le clip (automazione), codec disponibili ed
+   esito della «Prova» nello stato, formati audio Opus/AAC/WAV polifonico (m27). Commit prima di tutto.
+2. **In parallelo, un subagente per crate in worktree separati** (nessun file in comune):
+
+| Gruppo | Subagente (modello, effort) | Falle | File |
+| --- | --- | --- | --- |
+| Cattura | video-capture (Opus, xhigh) | C1, m17, m18 | `crates/cliprec-capture` |
+| Encoder | video-encoder (Opus, xhigh) | M6 (ripiego software SVT-AV1), m19 | `crates/cliprec-encode` |
+| Audio | audio-engine (Opus, high) | M3, M9 (thread audio), m7, m9, ritardo per sorgente | `crates/cliprec-audio` |
+| Buffer e mux | replay-buffer (Opus, high) | M4, M5, M7, m8, m27 | `crates/cliprec-buffer`, `crates/cliprec-mux` |
+| Shell dell'app | app-shell (Sonnet, medium) | M2, M9 (gamepad, IPC), m5 (server), m6, m12 (app), m13, m21, m22, m26, IPC «salva clip» | `crates/cliprec-app` tranne `engine.rs` |
+| Impostazioni | settings-ui (Sonnet, medium) | m5 (client), m14, m24, m25, ritardo e formati nell'interfaccia | `crates/cliprec-settings` |
+| Distribuzione | packaging (Sonnet, medium), parte quando si libera un posto | M1 (redistributable VC++ nell'installer), M8, m12 (installer) | `installer/`, `xtask/src/{dist,notices}.rs`, `THIRD_PARTY_NOTICES.md` |
+
+3. **Motore** (`crates/cliprec-app/src/engine.rs`, agente principale, in parallelo ai subagenti): C1
+   (uscita fissa dalla dimensione nativa), M5 (coda dei salvataggi), M6 (clip audio se manca l'encoder),
+   M9 (thread di apertura dell'encoder), m1, m2, m3, m10, m11, m14, m15, m20, m23, m24.
+4. **Integrazione** un ramo alla volta; dopo ognuno `cargo build --release`, tutti i test, `cargo clippy
+   --workspace --all-targets -- -D warnings`. Poi m4 (nuove misure), tabella aggiornata, verifica finale
+   da un subagente nuovo (Opus, high).
+
+**Rimandate**: m16 (consenso `RequestAccessAsync`: apre un dialogo di sistema, va progettato con
+l'interfaccia), m28 (spostare gli `unsafe` in un modulo FFI: rifattorizzazione su molti file, senza
+effetto per l'utente, meglio dopo queste correzioni), iniezione DLL (valutata sotto, non implementata).
+
+### Valutazione: iniezione DLL per il fullscreen esclusivo
+
+- **Come si fa** (OBS Game Capture): una DLL caricata nel processo del gioco aggancia la presentazione di
+  ogni API grafica (D3D9/10/11/12, OpenGL, Vulkan con layer implicito), copia il backbuffer in una texture
+  condivisa tra processi e la segnala al registratore. È l'unico modo di catturare il vero fullscreen
+  esclusivo.
+- **Quanto serve davvero**: dal 2019-2020 Windows presenta tramite DWM la gran parte dei giochi DX11/DX12
+  «a schermo intero» (ottimizzazioni a schermo intero e flip model): WGC li cattura già. Il caso scoperto
+  resta per alcuni giochi OpenGL/DX9, per chi disattiva le ottimizzazioni e per la regressione di 24H2 con
+  OpenGL (OBS #14021).
+- **Costi**: un aggancio per API grafica, sincronizzazione GPU tra processi, helper a 32 bit per i giochi
+  vecchi, firma del codice obbligatoria e manutenzione continua a ogni aggiornamento dei driver e dei
+  giochi. Stima: 4-8 settimane per una prima versione affidabile limitata a D3D11, D3D12 e Vulkan.
+- **Rischi**: gli anti-cheat (Riot Vanguard, FACEIT, in parte EAC e BattlEye) bloccano o segnalano le DLL
+  iniettate non riconosciute; OBS stesso ha avuto conflitti con i giochi Riot dopo un cambio di
+  certificato. Per l'utente il rischio è un crash, una cattura bloccata o, nel caso peggiore, una sanzione
+  sull'account. Contraddice il posizionamento di SPEC.md («Nessuna iniezione: solo API di cattura del
+  sistema»), che è uno dei vantaggi su OBS e Medal.
+- **Raccomandazione**: non implementarla nel prodotto base; mantenere rilevamento, avviso e suggerimento
+  della finestra senza bordi. Se in futuro servisse, solo come modulo separato «Cattura gioco
+  (sperimentale)», spento per impostazione predefinita, attivabile per gioco da un elenco esplicito di
+  giochi senza anti-cheat, con DLL firmata e solo D3D11/D3D12/Vulkan. Decisione da confermare
+  (DECISIONS.md, voce 27).
+
 ## Falle, in ordine di gravità
 
 Verifica: **CONFERMATA** = dimostrata leggendo il codice in modo univoco o con un test/comando;
