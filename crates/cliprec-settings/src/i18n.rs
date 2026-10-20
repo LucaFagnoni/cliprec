@@ -86,6 +86,9 @@ strings! {
     set_placeholder_device: "(predefinito di Windows)", "(Windows default)";
     set_hotkey_video: "Clip video", "Video clip";
     set_hotkey_audio: "Clip audio", "Audio clip";
+    set_pad_video: "Controller · clip video (facoltativo)", "Controller · video clip (optional)";
+    set_pad_audio: "Controller · clip audio (facoltativo)", "Controller · audio clip (optional)";
+    set_pad_hint: "Tasti separati da +: A B X Y LB RB LS RS Back Start DPadUp DPadDown DPadLeft DPadRight (es. Back+A). Vuoto = nessun controller.", "Buttons separated by +: A B X Y LB RB LS RS Back Start DPadUp DPadDown DPadLeft DPadRight (e.g. Back+A). Empty = no controller.";
     set_hotkey_press: "Premi la combinazione…", "Press the combination…";
     set_hotkey_clear: "Cancella", "Clear";
     set_hotkey_hint: "Clicca il campo e premi la combinazione (anche i tasti laterali del mouse).", "Click the field and press the combination (side mouse buttons work too).";
@@ -133,6 +136,8 @@ pub fn problem_text(lang: Lang, p: &Problem) -> String {
         Problem::AudioSecondsZero => t("La durata della clip audio deve essere maggiore di 0.", "The audio clip length must be greater than 0."),
         Problem::HotkeyEmpty(0) => t("Manca la hotkey della clip video.", "The video clip hotkey is missing."),
         Problem::HotkeyEmpty(_) => t("Manca la hotkey della clip audio.", "The audio clip hotkey is missing."),
+        Problem::BadPad(_) => t("Combinazione del controller non valida: usa solo A B X Y LB RB LS RS Back Start DPadUp DPadDown DPadLeft DPadRight separati da +.", "Invalid controller combination: use only A B X Y LB RB LS RS Back Start DPadUp DPadDown DPadLeft DPadRight separated by +."),
+        Problem::SamePad => t("Le due combinazioni del controller devono essere diverse.", "The two controller combinations must be different."),
         Problem::SameHotkey => t("Le due hotkey devono essere diverse.", "The two hotkeys must be different."),
         Problem::BadBitrate => t("Tetto di bitrate non valido (numero intero in kbit/s, o vuoto).", "Invalid bitrate cap (whole kbit/s, or empty)."),
         Problem::BadMaxMb => t("Tetto di RAM non valido (numero intero in MB, o vuoto).", "Invalid RAM cap (whole MB, or empty)."),

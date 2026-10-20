@@ -23,6 +23,9 @@ pub enum Problem {
     /// 0 = video, 1 = audio.
     HotkeyEmpty(u8),
     SameHotkey,
+    /// 0 = video, 1 = audio.
+    BadPad(u8),
+    SamePad,
     BadBitrate,
     BadMaxMb,
     BadMonitor,
@@ -70,6 +73,8 @@ pub fn to_form(c: &Config) -> (Form, Vec<SourceRow>) {
         add_mix: c.audio.add_mix_track,
         hotkey_video: c.hotkeys.video.clone().into(),
         hotkey_audio: c.hotkeys.audio.clone().into(),
+        pad_video: c.hotkeys.video_pad.clone().into(),
+        pad_audio: c.hotkeys.audio_pad.clone().into(),
         video_seconds: i32::try_from(c.clips.video_seconds).unwrap_or(i32::MAX),
         audio_seconds: i32::try_from(c.clips.audio_seconds).unwrap_or(i32::MAX),
         folder: c.clips.folder.as_ref().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default().into(),
@@ -205,6 +210,17 @@ pub fn build_lenient(form: &Form, rows: &[SourceRow], base: &Config) -> (Config,
         problems.push(Problem::SameHotkey);
     }
 
+    c.hotkeys.video_pad = trimmed(&form.pad_video);
+    c.hotkeys.audio_pad = trimmed(&form.pad_audio);
+    for (n, pad) in [&c.hotkeys.video_pad, &c.hotkeys.audio_pad].into_iter().enumerate() {
+        if !pad_is_valid(pad) {
+            problems.push(Problem::BadPad(n as u8));
+        }
+    }
+    if !c.hotkeys.video_pad.is_empty() && pad_normalized(&c.hotkeys.video_pad) == pad_normalized(&c.hotkeys.audio_pad) {
+        problems.push(Problem::SamePad);
+    }
+
     let secs = |v: i32| u32::try_from(v).unwrap_or(0);
     c.clips.video_seconds = secs(form.video_seconds);
     c.clips.audio_seconds = secs(form.audio_seconds);
@@ -247,6 +263,21 @@ pub fn build_lenient(form: &Form, rows: &[SourceRow], base: &Config) -> (Config,
     c.general.notifications = form.notifications;
 
     (c, problems)
+}
+
+const PAD_BUTTONS: [&str; 14] =
+    ["a", "b", "x", "y", "lb", "rb", "ls", "rs", "back", "start", "dpadup", "dpaddown", "dpadleft", "dpadright"];
+
+/// Vuoto o `Tasto+Tasto` con soli nomi ammessi (maiuscole indifferenti).
+pub fn pad_is_valid(s: &str) -> bool {
+    s.is_empty() || s.split('+').all(|t| PAD_BUTTONS.contains(&t.trim().to_ascii_lowercase().as_str()))
+}
+
+/// Forma canonica per confrontare due combinazioni (maiuscole e ordine indifferenti).
+fn pad_normalized(s: &str) -> Vec<String> {
+    let mut v: Vec<String> = s.split('+').map(|t| t.trim().to_ascii_lowercase()).collect();
+    v.sort();
+    v
 }
 
 /// Vuoto = `None`; un numero intero positivo = `Some`; altro = errore.
@@ -372,6 +403,26 @@ mod tests {
         f.source_kind = 1;
         f.source_target = "x".into();
         assert!(build_config(&f, &r, &c).unwrap_err().contains(&Problem::BadMonitor));
+    }
+
+    #[test]
+    fn pad_round_trip_and_validation() {
+        let mut c = Config::default();
+        c.hotkeys.video_pad = "Back+A".into();
+        c.hotkeys.audio_pad = "LB+RB+Y".into();
+        let (f, r) = rows_of(&c);
+        assert_eq!(build_config(&f, &r, &c).unwrap(), c);
+        let (mut f, r) = rows_of(&Config::default());
+        assert!(build_config(&f, &r, &c).is_ok(), "campi vuoti ammessi");
+        f.pad_video = "dpadup+Start".into();
+        assert!(build_config(&f, &r, &c).is_ok(), "maiuscole indifferenti");
+        f.pad_video = "Back+Z".into();
+        assert!(build_config(&f, &r, &c).unwrap_err().contains(&Problem::BadPad(0)));
+        f.pad_video = "Back+A".into();
+        f.pad_audio = "a+BACK".into();
+        assert!(build_config(&f, &r, &c).unwrap_err().contains(&Problem::SamePad));
+        f.pad_audio = "Back+".into();
+        assert!(build_config(&f, &r, &c).unwrap_err().contains(&Problem::BadPad(1)));
     }
 
     #[test]
