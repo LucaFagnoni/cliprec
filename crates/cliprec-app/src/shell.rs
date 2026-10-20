@@ -40,6 +40,8 @@ pub struct ShellIo {
 
 const WM_REFRESH: u32 = WM_APP + 1;
 const WM_RELOAD: u32 = WM_APP + 2;
+/// Chiusura richiesta via IPC: il motore ha già ricevuto `Quit`, qui esce il loop.
+const WM_QUIT_REQUEST: u32 = WM_APP + 3;
 const TIMER_ID: usize = 1;
 const RECENT_MAX: usize = 5;
 
@@ -318,6 +320,11 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             // SAFETY: parametri passati tali e quali dal sistema.
             unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
         }
+        WM_QUIT_REQUEST => {
+            // SAFETY: siamo nel wndproc, sul thread del loop di messaggi.
+            unsafe { PostQuitMessage(0) };
+            LRESULT(0)
+        }
         WM_TIMER | WM_REFRESH | WM_RELOAD => {
             UI.with(|u| {
                 if let Ok(mut u) = u.try_borrow_mut()
@@ -471,8 +478,13 @@ pub fn run(io: ShellIo) -> anyhow::Result<()> {
         }
     })?;
 
-    let reload_app = Arc::clone(&app);
-    let ctx = crate::ipc_server::Context { status, commands, on_reload: Arc::new(move || reload_app.wake(WM_RELOAD)) };
+    let (reload_app, quit_app) = (Arc::clone(&app), Arc::clone(&app));
+    let ctx = crate::ipc_server::Context {
+        status,
+        commands,
+        on_reload: Arc::new(move || reload_app.wake(WM_RELOAD)),
+        on_quit: Arc::new(move || quit_app.wake(WM_QUIT_REQUEST)),
+    };
     if let Err(e) = crate::ipc_server::spawn(pipe_name(), ctx) {
         tracing::error!("server IPC non avviato: {e}");
     }

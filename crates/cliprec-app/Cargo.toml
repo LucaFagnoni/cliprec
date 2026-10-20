@@ -8,6 +8,11 @@ publish.workspace = true
 
 [dependencies]
 cliprec-core.workspace = true
+cliprec-capture.workspace = true
+cliprec-encode.workspace = true
+cliprec-audio.workspace = true
+cliprec-buffer.workspace = true
+cliprec-mux.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
@@ -29,6 +34,7 @@ windows = { workspace = true, features = [
     "Win32_System_IO",
     "Win32_System_LibraryLoader",
     "Win32_System_Pipes",
+    "Win32_System_SystemInformation",
     "Win32_System_Threading",
     "Win32_UI_Input",
     "Win32_UI_Input_KeyboardAndMouse",
@@ -36,6 +42,9 @@ windows = { workspace = true, features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_Media_Audio",
 ] }
+
+[dev-dependencies]
+cliprec-tests = { path = "../../tests" }
 
 [lints]
 workspace = true

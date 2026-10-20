@@ -19,6 +19,8 @@ pub enum IpcRequest {
     ReloadConfig,
     /// Pulsante «Prova»: salva una clip di 5 s.
     TestClip,
+    /// Chiude ClipRec (usato dai test e dagli script).
+    Quit,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]

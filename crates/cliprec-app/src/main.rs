@@ -2,7 +2,7 @@
 #![windows_subsystem = "windows"]
 
 mod autostart;
-mod engine_stub;
+mod engine;
 mod hotkey;
 mod icon;
 mod ipc_server;
@@ -21,6 +21,10 @@ use cliprec_core::{AppCommand, Config, EngineEvent, EngineStatus};
 
 fn main() -> anyhow::Result<()> {
     let _log = logging::init()?;
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|a| a == "--prova") {
+        return prova(&args[1..]);
+    }
     let Some(_instance) = sys::acquire_single_instance(&sys::mutex_name())? else {
         tracing::info!("ClipRec è già in esecuzione: esco");
         return Ok(());
@@ -35,10 +39,9 @@ fn main() -> anyhow::Result<()> {
     let (event_tx, event_rx) = channel::<EngineEvent>();
     let status = Arc::new(Mutex::new(EngineStatus::default()));
 
-    // L'integrazione sostituisce `engine_stub::run` con il motore vero, stessa forma.
     let engine = {
         let (config, status) = (config.clone(), Arc::clone(&status));
-        supervisor::spawn_supervised("motore", move || engine_stub::run(config.clone(), &cmd_rx, event_tx.clone(), Arc::clone(&status)))?
+        supervisor::spawn_supervised("motore", move || engine::run(config.clone(), &cmd_rx, event_tx.clone(), Arc::clone(&status)))?
     };
 
     let result = shell::run(shell::ShellIo { commands: cmd_tx, events: event_rx, status, config });
@@ -49,4 +52,27 @@ fn main() -> anyhow::Result<()> {
         std::thread::sleep(Duration::from_millis(50));
     }
     result
+}
+
+/// `cliprec-app --prova [secondi] [--sintetica] [--cartella DIR]`: registra, salva una clip video e
+/// una audio, scrive l'esito in `prova.txt` nella cartella delle clip ed esce. Senza `--sintetica`
+/// usa le sorgenti di config.toml.
+fn prova(args: &[String]) -> anyhow::Result<()> {
+    let seconds = args.first().and_then(|s| s.parse().ok()).unwrap_or(10);
+    let synthetic = args.iter().any(|a| a == "--sintetica");
+    let mut config = Config::load(&shell::config_path()).unwrap_or_default();
+    if let Some(dir) = args.iter().position(|a| a == "--cartella").and_then(|i| args.get(i + 1)) {
+        config.clips.folder = Some(dir.into());
+    }
+    let out = config.clips.folder();
+    std::fs::create_dir_all(&out)?;
+    let report = match engine::run_test_clip(config, seconds, synthetic, out.clone()) {
+        Ok(clips) => clips.iter().map(|c| format!("{:?} {} ({:.1} s, {} B)
+", c.kind, c.path.display(), c.duration_secs, c.bytes)).collect(),
+        Err(e) => format!("ERRORE: {e:#}
+"),
+    };
+    tracing::info!("prova: {report}");
+    std::fs::write(out.join("prova.txt"), report)?;
+    Ok(())
 }

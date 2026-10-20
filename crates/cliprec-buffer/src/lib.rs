@@ -178,12 +178,31 @@ impl ReplayBuffer {
         }
     }
 
-    /// Pacchetti degli ultimi `seconds` prima di `end`: dall'ultimo keyframe con pts ≤
-    /// `end - seconds` (o dal più vecchio disponibile) all'ultimo pacchetto con dts ≤ `end`.
+    /// Pacchetti degli ultimi `seconds` prima di `end`, misurati dalla fine dell'ultimo frame
+    /// completo: dall'ultimo keyframe con pts ≤ `fine - seconds` (o dal più vecchio disponibile)
+    /// all'ultimo frame completo, così la clip non è mai più corta di `seconds` se il buffer li ha.
+    ///
+    /// Con i B-frame la coda in ordine di decodifica può contenere un P-frame i cui B-frame
+    /// precedenti non sono ancora usciti dall'encoder: la clip si tronca al primo pacchetto oltre
+    /// il primo buco di pts, e finisce su un frame decodificabile senza salti.
     pub fn snapshot_video(&self, seconds: f64, end: QpcTime) -> Option<VideoSnapshot> {
         let mut v = lock(&self.video);
         let params = v.params.clone()?;
-        let target = end.add_hns(-secs_to_hns(seconds));
+        let frame = HNS_PER_SEC / i64::from(params.fps.max(1));
+        let mut shown: Vec<QpcTime> =
+            v.ring.iter().filter(|(_, e)| e.meta.dts <= end).map(|(_, e)| e.meta.pts).collect();
+        shown.sort_unstable();
+        let cut = shown.windows(2).find(|w| w[1].hns_since(w[0]) > frame * 3 / 2).map_or(*shown.last()?, |w| w[0]);
+        // Ultimo pacchetto tenuto (ordine di decodifica) e fine dell'ultimo frame tenuto.
+        let mut stop = None;
+        let mut last_end = None;
+        for (seq, e) in v.ring.iter().take_while(|(_, e)| e.meta.dts <= end && e.meta.pts <= cut) {
+            stop = Some(seq);
+            let frame_end = e.meta.pts.add_hns(e.meta.duration.max(frame));
+            last_end = Some(last_end.map_or(frame_end, |t: QpcTime| t.max(frame_end)));
+        }
+        let (stop, last_end) = (stop?, last_end?);
+        let target = last_end.add_hns(-secs_to_hns(seconds));
         let first = v
             .keyframes
             .iter()
@@ -196,7 +215,7 @@ impl ReplayBuffer {
             .ring
             .iter()
             .skip_while(|(seq, _)| *seq < first)
-            .take_while(|(_, e)| e.meta.dts <= end)
+            .take_while(|(seq, _)| *seq <= stop)
             .map(|(_, e)| EncodedPacket {
                 data: v.ring.share(e),
                 pts: e.meta.pts,

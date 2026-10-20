@@ -346,3 +346,33 @@ fn long_gap_opens_a_new_segment_filled_with_silence() {
         assert_sample(s.tracks[1].samples[i], 1, f, 0);
     }
 }
+
+/// Con i B-frame la coda in ordine di decodifica (I0 P3 B1 B2 P6 B4) ha un buco di pts (manca B5):
+/// lo snapshot si ferma all'ultimo frame completo (B2), senza P6 né B4 che da P6 dipende.
+#[test]
+fn snapshot_drops_incomplete_b_frame_tail() {
+    let b = buffer(10.0, 64 * MB);
+    let t = |f: i64| QpcTime(1_000_000_000 + f * FRAME_HNS);
+    for (f, dts, key) in [(0, -2, true), (3, -1, false), (1, 0, false), (2, 1, false), (6, 2, false), (4, 3, false)] {
+        let data = packet_bytes(f as u64, 16);
+        b.push_video(PacketRef { data: &data, pts: t(f), dts: t(dts), duration: FRAME_HNS, keyframe: key });
+    }
+    let s = b.snapshot_video(0.01, t(100)).unwrap();
+    let frames: Vec<i64> = s.packets.iter().map(|p| (p.pts.0 - 1_000_000_000) / FRAME_HNS).collect();
+    assert_eq!(frames, [0, 3, 1, 2]);
+}
+
+/// La durata si misura dalla fine dell'ultimo frame, non da `end`: con `end` molto dopo l'ultimo
+/// pacchetto la clip copre comunque i secondi chiesti.
+#[test]
+fn snapshot_seconds_are_measured_from_last_frame() {
+    let b = buffer(10.0, 64 * MB);
+    for seq in 0..250 {
+        push(&b, seq, 32, seq % 50 == 0);
+    }
+    let last_end = QpcTime(1_000_000_000 + 250 * FRAME_HNS);
+    let s = b.snapshot_video(2.0, last_end.add_hns(HNS_PER_SEC / 2)).unwrap();
+    let start = s.start().unwrap();
+    assert!(last_end.hns_since(start) >= 2 * HNS_PER_SEC, "clip più corta di 2 s");
+    assert!(last_end.hns_since(start) <= 3 * HNS_PER_SEC, "clip oltre un GOP in più");
+}

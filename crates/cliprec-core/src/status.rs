@@ -9,6 +9,8 @@ use crate::clip::{ClipKind, SavedClip};
 pub enum AppCommand {
     SaveVideoClip,
     SaveAudioClip,
+    /// Pulsante «Prova» delle impostazioni: clip video di 5 s (audio in modalità solo audio).
+    SaveTestClip,
     StartBuffer,
     StopBuffer,
     /// Rilegge config.toml e riavvia ciò che è cambiato.

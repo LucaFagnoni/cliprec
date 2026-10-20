@@ -27,6 +27,8 @@ pub struct Context {
     pub commands: Sender<AppCommand>,
     /// Chiamata su `ReloadConfig`, oltre all'inoltro del comando al motore (es. ricarica le hotkey).
     pub on_reload: Arc<dyn Fn() + Send + Sync>,
+    /// Chiamata su `Quit`, dopo aver inoltrato `AppCommand::Quit` al motore: chiude il loop della shell.
+    pub on_quit: Arc<dyn Fn() + Send + Sync>,
 }
 
 /// Risposta a una richiesta (pura rispetto alla pipe, così si prova senza Win32).
@@ -45,8 +47,12 @@ pub fn handle_request(ctx: &Context, req: IpcRequest) -> IpcResponse {
             (ctx.on_reload)();
             r
         }
-        // ponytail: il contratto non ha una clip da 5 s; usa la clip video normale.
-        IpcRequest::TestClip => sent(AppCommand::SaveVideoClip),
+        IpcRequest::TestClip => sent(AppCommand::SaveTestClip),
+        IpcRequest::Quit => {
+            let r = sent(AppCommand::Quit);
+            (ctx.on_quit)();
+            r
+        }
     }
 }
 
@@ -158,7 +164,9 @@ mod tests {
         let reloads = Arc::new(AtomicU32::new(0));
         let r = reloads.clone();
         let status = Arc::new(Mutex::new(EngineStatus { video_seconds: 42.0, ..Default::default() }));
-        (Context { status, commands: tx, on_reload: Arc::new(move || _ = r.fetch_add(1, Ordering::SeqCst)) }, rx, reloads)
+        let q = reloads.clone();
+        let on_quit = Arc::new(move || _ = q.fetch_add(100, Ordering::SeqCst));
+        (Context { status, commands: tx, on_reload: Arc::new(move || _ = r.fetch_add(1, Ordering::SeqCst)), on_quit }, rx, reloads)
     }
 
     #[test]
@@ -167,8 +175,12 @@ mod tests {
         assert!(matches!(handle_request(&c, IpcRequest::Status), IpcResponse::Status(s) if s.video_seconds == 42.0));
         assert_eq!(handle_request(&c, IpcRequest::ReloadConfig), IpcResponse::Ok);
         assert_eq!(handle_request(&c, IpcRequest::TestClip), IpcResponse::Ok);
-        assert_eq!(rx.try_iter().collect::<Vec<_>>(), [AppCommand::ReloadConfig, AppCommand::SaveVideoClip]);
-        assert_eq!(reloads.load(Ordering::SeqCst), 1);
+        assert_eq!(handle_request(&c, IpcRequest::Quit), IpcResponse::Ok);
+        assert_eq!(
+            rx.try_iter().collect::<Vec<_>>(),
+            [AppCommand::ReloadConfig, AppCommand::SaveTestClip, AppCommand::Quit]
+        );
+        assert_eq!(reloads.load(Ordering::SeqCst), 101);
     }
 
     #[test]

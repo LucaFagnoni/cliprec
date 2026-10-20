@@ -898,7 +898,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "auto-launch",
+ "cliprec-audio",
+ "cliprec-buffer",
+ "cliprec-capture",
  "cliprec-core",
+ "cliprec-encode",
+ "cliprec-mux",
+ "cliprec-tests",
  "tauri-winrt-notification",
  "tracing",
  "tracing-appender",
