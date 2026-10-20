@@ -22,6 +22,7 @@ tauri-winrt-notification.workspace = true
 auto-launch.workspace = true
 windows = { workspace = true, features = [
     "Win32_Foundation",
+    "Win32_Globalization",
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_Graphics_Direct3D11",

@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use crate::i18n::{K, current, fmt};
 use cliprec_core::{ClipKind, EngineEvent, SavedClip};
 use tauri_winrt_notification::Toast;
 
@@ -85,10 +86,10 @@ impl Notifier {
             }
             EngineEvent::ClipFailed { kind, reason } => {
                 let k = format!("clip-{kind:?}:{}", error_kind(reason));
-                self.problem(&k, "Clip non salvata", reason);
+                self.problem(&k, &fmt(current(), K::ToastFailed, &[]), reason);
             }
             EngineEvent::Warning(t) => self.problem(&format!("w:{}", error_kind(t)), "ClipRec", t),
-            EngineEvent::Error(t) => self.problem(&format!("e:{}", error_kind(t)), "ClipRec: errore", t),
+            EngineEvent::Error(t) => self.problem(&format!("e:{}", error_kind(t)), &fmt(current(), K::ToastError, &[]), t),
         }
     }
 
@@ -101,27 +102,29 @@ impl Notifier {
 }
 
 fn show_clip_saved(c: &SavedClip) {
-    let title = if c.kind == ClipKind::Audio { "Clip audio salvata" } else { "Clip salvata" };
-    show(title, &clip_summary(c), &[("Apri", &c.path), ("Cartella", &c.path)]);
+    let l = current();
+    let title = fmt(l, if c.kind == ClipKind::Audio { K::ToastAudioSaved } else { K::ToastSaved }, &[]);
+    let (open, folder) = (fmt(l, K::ToastOpen, &[]), fmt(l, K::ToastFolder, &[]));
+    show(&title, &clip_summary(c), &[(&open, "open", &c.path), (&folder, "folder", &c.path)]);
 }
 
 /// Mostra un toast; i pulsanti aprono il file («Apri») o la cartella che lo contiene («Cartella»).
-fn show(title: &str, text: &str, buttons: &[(&str, &PathBuf)]) {
+fn show(title: &str, text: &str, buttons: &[(&str, &str, &PathBuf)]) {
     if headless() {
         tracing::info!(title, text, "toast soppresso (headless)");
         return;
     }
     let mut toast = Toast::new(APP_ID).title(title).text1(text).sound(None);
     let mut paths: HashMap<String, PathBuf> = HashMap::new();
-    for (label, path) in buttons {
-        toast = toast.add_button(label, label);
-        paths.insert((*label).to_owned(), (*path).clone());
+    for (label, action, path) in buttons {
+        toast = toast.add_button(label, action);
+        paths.insert((*action).to_owned(), (*path).clone());
     }
     if !paths.is_empty() {
         toast = toast.on_activated(move |action| {
             if let Some(path) = action.as_deref().and_then(|a| paths.get(a)) {
                 match action.as_deref() {
-                    Some("Cartella") => open_folder_of(path),
+                    Some("folder") => open_folder_of(path),
                     _ => crate::sys::open_path(path),
                 }
             }

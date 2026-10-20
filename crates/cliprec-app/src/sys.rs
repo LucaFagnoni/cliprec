@@ -12,7 +12,9 @@ use windows::Win32::System::Threading::{
     QueryFullProcessImageNameW,
 };
 use windows::Win32::UI::Shell::ShellExecuteW;
-use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowRect, GetWindowThreadProcessId, SW_SHOWNORMAL};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetForegroundWindow, GetWindowRect, FindWindowExW, GetWindowThreadProcessId, HWND_MESSAGE, PostMessageW, RegisterWindowMessageW, SW_SHOWNORMAL,
+};
 use windows::core::{PCWSTR, PWSTR};
 
 pub fn wide(s: &str) -> Vec<u16> {
@@ -160,6 +162,23 @@ fn is_fullscreen(hwnd: windows::Win32::Foundation::HWND) -> bool {
     }
     let m = mi.rcMonitor;
     r.left <= m.left && r.top <= m.top && r.right >= m.right && r.bottom >= m.bottom
+}
+
+/// Messaggio registrato con cui una seconda istanza avvisa la prima.
+pub fn second_instance_msg() -> u32 {
+    // SAFETY: stringa statica terminata da NUL; il valore è lo stesso in tutti i processi.
+    unsafe { RegisterWindowMessageW(windows::core::w!("ClipRec.SecondInstance")) }
+}
+
+/// Dice alla prima istanza (finestra nascosta della shell) che ne è partita un'altra.
+pub fn ping_first_instance() {
+    use windows::Win32::Foundation::{LPARAM, WPARAM};
+    // SAFETY: ricerca tra le finestre solo-messaggi; PostMessage verso un HWND trovato è sempre sicuro.
+    unsafe {
+        if let Ok(hwnd) = FindWindowExW(Some(HWND_MESSAGE), None, windows::core::w!("ClipRecShell"), None) {
+            let _ = PostMessageW(Some(hwnd), second_instance_msg(), WPARAM(0), LPARAM(0));
+        }
+    }
 }
 
 /// Apre un file o una cartella con l'app predefinita di Windows.

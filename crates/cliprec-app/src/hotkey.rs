@@ -121,23 +121,27 @@ pub fn parse(text: &str) -> Result<Chord, ParseError> {
 }
 
 /// Hotkey di altri programmi note; `(combinazione, chi la usa)`.
-const KNOWN: &[(&str, &str)] = &[
-    ("Alt+F10", "NVIDIA App (salva replay istantaneo)"),
-    ("Alt+F9", "NVIDIA App (avvia/ferma registrazione)"),
-    ("Alt+F12", "NVIDIA App (mostra FPS)"),
-    ("Alt+Z", "NVIDIA App (overlay)"),
-    ("Win+Alt+G", "Xbox Game Bar (registra gli ultimi secondi)"),
-    ("Win+Alt+R", "Xbox Game Bar (avvia/ferma registrazione)"),
-    ("Win+G", "Xbox Game Bar"),
-    ("F12", "Steam (screenshot)"),
-    ("Shift+Tab", "Steam (overlay)"),
-    ("Alt+F1", "AMD Software (replay istantaneo)"),
-    ("Ctrl+Shift+S", "AMD Software (screenshot)"),
+const KNOWN: &[(&str, &str, &str)] = &[
+    ("Alt+F10", "NVIDIA App (salva replay istantaneo)", "NVIDIA App (instant replay)"),
+    ("Alt+F9", "NVIDIA App (avvia/ferma registrazione)", "NVIDIA App (start/stop recording)"),
+    ("Alt+F12", "NVIDIA App (mostra FPS)", "NVIDIA App (show FPS)"),
+    ("Alt+Z", "NVIDIA App (overlay)", "NVIDIA App (overlay)"),
+    ("Win+Alt+G", "Xbox Game Bar (registra gli ultimi secondi)", "Xbox Game Bar (record last moments)"),
+    ("Win+Alt+R", "Xbox Game Bar (avvia/ferma registrazione)", "Xbox Game Bar (start/stop recording)"),
+    ("Win+G", "Xbox Game Bar", "Xbox Game Bar"),
+    ("F12", "Steam (screenshot)", "Steam (screenshot)"),
+    ("Shift+Tab", "Steam (overlay)", "Steam (overlay)"),
+    ("Alt+F1", "AMD Software (replay istantaneo)", "AMD Software (instant replay)"),
+    ("Ctrl+Shift+S", "AMD Software (screenshot)", "AMD Software (screenshot)"),
 ];
 
 /// Descrizioni dei programmi che usano già la stessa combinazione.
-pub fn known_conflicts(chord: &Chord) -> Vec<&'static str> {
-    KNOWN.iter().filter(|(c, _)| parse(c).is_ok_and(|k| k == *chord)).map(|(_, who)| *who).collect()
+pub fn known_conflicts(chord: &Chord, lang: crate::i18n::Lang) -> Vec<&'static str> {
+    KNOWN
+        .iter()
+        .filter(|(c, ..)| parse(c).is_ok_and(|k| k == *chord))
+        .map(|&(_, it, en)| if lang == crate::i18n::Lang::It { it } else { en })
+        .collect()
 }
 
 /// Evento d'ingresso già decodificato da Raw Input.
@@ -344,8 +348,8 @@ mod tests {
 
     #[test]
     fn conflicts_are_reported() {
-        assert!(!known_conflicts(&parse("Alt+F10").unwrap()).is_empty());
-        assert!(known_conflicts(&parse("Ctrl+Alt+F10").unwrap()).is_empty());
-        assert!(!known_conflicts(&parse("Alt+F9").unwrap()).is_empty());
+        assert!(!known_conflicts(&parse("Alt+F10").unwrap(), crate::i18n::Lang::En).is_empty());
+        assert!(known_conflicts(&parse("Ctrl+Alt+F10").unwrap(), crate::i18n::Lang::En).is_empty());
+        assert!(!known_conflicts(&parse("Alt+F9").unwrap(), crate::i18n::Lang::En).is_empty());
     }
 }
