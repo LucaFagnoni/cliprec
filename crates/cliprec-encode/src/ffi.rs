@@ -19,7 +19,8 @@ use cliprec_core::config::RateControl;
 /// `initial_pool_size > 0` crea un array: per NVENC/AMF il pool è quindi dinamico (texture singole
 /// render target), per QSV, che richiede un pool fisso da derivare, è un array `BIND_DECODER`
 /// riempito con una copia GPU da una texture render target intermedia.
-const QSV_POOL_SIZE: c_int = 16;
+// Coda del thread dell'encoder (12) + async_depth 4 + 2 B-frame + 2 di margine.
+const QSV_POOL_SIZE: c_int = crate::worker::QUEUE as c_int + 8;
 
 pub(crate) const EAGAIN: c_int = 11;
 const ENOENT: c_int = 2;

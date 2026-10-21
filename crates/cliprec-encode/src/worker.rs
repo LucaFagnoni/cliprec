@@ -19,8 +19,10 @@ use cliprec_core::{HNS_PER_SEC, PacketRef, QpcTime, VideoCodec};
 use ffmpeg_the_third::ffi;
 use windows::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_ABOVE_NORMAL};
 
-/// Frame che possono aspettare in coda oltre a quelli che l'encoder tiene già (100 ms a 60 fps).
-pub(crate) const QUEUE: usize = 6;
+/// Frame che possono aspettare in coda oltre a quelli che l'encoder tiene già (200 ms a 60 fps): assorbe
+/// i picchi della GPU durante il gioco. Ognuno tiene una superficie dell'encoder (circa 3 MB a 1080p
+/// 4:2:0, 6 MB in 4:4:4).
+pub(crate) const QUEUE: usize = 12;
 /// Attesa massima della fine dello svuotamento.
 pub(crate) const STALL: Duration = Duration::from_secs(2);
 /// Coda ferma da tanto: l'encoder è bloccato davvero, non solo indietro perché la GPU è satura (un
