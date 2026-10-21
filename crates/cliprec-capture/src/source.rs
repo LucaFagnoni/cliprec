@@ -465,6 +465,7 @@ impl Watch {
                 tracing::warn!("{ADAPTER_CHANGED} (device {:?})", self.slots.device);
             }
         }
+        let mut monitor_bad = false;
         let state = match &self.current {
             None => SourceState::Waiting(format!("in attesa di {}", self.target.label())),
             Some((Resolved::Window(h), _)) if is_minimized(*h) => {
@@ -483,13 +484,21 @@ impl Watch {
                     Resolved::Monitor(m) => fullscreen_on(*m),
                 };
                 let arrived = self.stats.arrived.load(Ordering::Relaxed);
-                match self.health.check(&self.slots, arrived, foreground, now) {
-                    Some(warning) => SourceState::Waiting(warning.into()),
-                    None => SourceState::Running,
+                match (r, self.health.check(&self.slots, arrived, foreground, now)) {
+                    // Sul monitor nero e fermo sono contenuto vero (caricamenti, desktop fermo): niente
+                    // avviso. Servono solo a riconoscere lo schermo intero esclusivo, insieme al
+                    // segnale di Windows (`exclusive_fullscreen`).
+                    (Resolved::Monitor(_), Some(_)) => {
+                        monitor_bad = true;
+                        SourceState::Running
+                    }
+                    (_, Some(warning)) => SourceState::Waiting(warning.into()),
+                    (_, None) => SourceState::Running,
                 }
             }
         };
-        let frames_bad = matches!(state, SourceState::Waiting(ref m) if m == crate::health::BLACK_MSG || m == crate::health::FROZEN_MSG);
+        let frames_bad = monitor_bad
+            || matches!(state, SourceState::Waiting(ref m) if m == crate::health::BLACK_MSG || m == crate::health::FROZEN_MSG);
         self.stats.set_state(state);
         self.exclusive_fullscreen(frames_bad, now);
         Ok(())
@@ -506,8 +515,12 @@ impl Watch {
         };
         // Con il segnale di Windows basta un secondo di frame neri o fermi invece di 3-5: il segnale da
         // solo non basta, perché c'è anche per i giochi che WGC cattura bene (ottimizzazioni a schermo
-        // intero) e lì conviene restare su WGC.
-        let exclusive = frames_bad || (fullscreen && d3d_fullscreen() && self.health.failing(now, EXCLUSIVE_AFTER));
+        // intero) e lì conviene restare su WGC. Sul monitor i frame neri o fermi da soli non bastano:
+        // sono le schermate di caricamento, e passare a DDA e tornare indietro a ogni caricamento
+        // costa frame e avvisi per niente.
+        let signal = fullscreen && d3d_fullscreen();
+        let monitor = matches!(r, Resolved::Monitor(_));
+        let exclusive = looks_exclusive(monitor, frames_bad, signal, self.health.failing(now, EXCLUSIVE_AFTER));
         let Some(to_dda) = exclusive_switch(switched, exclusive, fullscreen) else { return };
         // Un monitor già su DDA (preferito o ripiego) vede anche lo schermo intero esclusivo.
         if (to_dda && on_dda) || now < self.switch_retry {
@@ -537,6 +550,13 @@ impl Watch {
             }
         }
     }
+}
+
+/// Il bersaglio sembra a schermo intero esclusivo: frame neri o fermi da 3-5 s (`frames_bad`) o da
+/// 1 s (`failing`), e il segnale di Windows sull'esclusivo (`signal`). Per una finestra bastano i
+/// frame cattivi; per un monitor serve sempre il segnale, perché lì il nero è un caricamento.
+fn looks_exclusive(monitor: bool, frames_bad: bool, signal: bool, failing: bool) -> bool {
+    if monitor { signal && (frames_bad || failing) } else { frames_bad || (signal && failing) }
 }
 
 /// Un'app a schermo intero in primo piano copre il monitor `m`.
@@ -920,6 +940,20 @@ mod tests {
         // Stesso adattatore o adattatore ignoto: niente da fare, e nessuna prova di creazione.
         assert!(!should_reopen(Some(default_gpu), default_gpu, |_| unreachable!()));
         assert!(!should_reopen(None, default_gpu, |_| unreachable!()));
+    }
+
+    #[test]
+    fn monitor_switches_only_with_the_windows_signal() {
+        // Schermata di caricamento nera sul monitor, senza esclusivo: nessun cambio.
+        assert!(!looks_exclusive(true, true, false, true));
+        // Esclusivo vero sul monitor: segnale di Windows e frame cattivi.
+        assert!(looks_exclusive(true, false, true, true));
+        // Segnale ma WGC cattura bene (ottimizzazioni a schermo intero): resta WGC.
+        assert!(!looks_exclusive(true, false, true, false));
+        // Finestra: bastano i frame neri o fermi a lungo.
+        assert!(looks_exclusive(false, true, false, false));
+        assert!(looks_exclusive(false, false, true, true));
+        assert!(!looks_exclusive(false, false, false, true));
     }
 
     #[test]
