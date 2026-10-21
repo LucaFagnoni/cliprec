@@ -299,3 +299,17 @@ Le voci [DEFAULT] e [PROPOSTA] di SPEC.md valgono come decise; qui ci sono quell
     diverso da quello video, come per le tracce (46). Ogni pagina di clip ha durata e file o formato,
     tracce, sorgenti (componente `SourceList` riusato) e scorciatoie; «Audio» tiene le opzioni comuni
     alle sorgenti, «Generale» cartella, nome del file, avvio, notifiche, memoria e lingua.
+50. **Frame persi: misurati, e il pacer fa solo conversione e coda** (21 ottobre, 61 tick persi
+    nell'istanza di Luca, tutti in pochi episodi: a riposo il contatore resta fermo). In prova sul
+    PC di Luca, sessione vera (monitor 1440p → 1080p, HEVC 4:4:4): 0 tick persi a riposo, salvando
+    una clip, con la CPU satura (56 thread) e con la GPU satura da un altro processo (`gpu_hog`).
+    La causa non si è riprodotta, quindi: (1) il pacer scrive nel log ogni 10 s i tick persi con il
+    ritardo massimo del risveglio e la callback più lunga, per sapere la prossima volta se è lo
+    scheduler o la conversione; (2) i pacchetti vanno nel buffer dal thread dell'encoder
+    (`Encoder::set_sink`), non più dal pacer: allocazione e `VirtualLock` di un blocco nuovo
+    dell'arena, il lock del buffer e gli snapshot non toccano più il thread dei tick (test: sink
+    fermo 80 ms ogni 30 pacchetti, `encode` resta a 0,35 ms); (3) i frame WGC tornano al pool sul
+    thread della cattura, fuori dal lock degli slot, mai sul pacer; (4) pacer in MMCSS «Capture»
+    (THREAD_PRIORITY_HIGHEST se non disponibile); (5) la ricerca dei codec all'avvio usa un device
+    suo. Gli fps effettivi nello stato sono fps scelti × tick consegnati ÷ tick scaduti: 60,0 se
+    non se ne perde nessuno (prima 59,9 per l'arrotondamento su finestre di poco più di 1 s).

@@ -3,13 +3,13 @@
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::ptr;
 
-use cliprec_core::{EncodeError, GpuDevice, GpuFrame, HNS_PER_SEC, PacketRef, QpcTime, VideoStreamParams};
+use cliprec_core::{EncodeError, GpuDevice, GpuFrame, QpcTime, VideoStreamParams};
 use ffmpeg_the_third::ffi;
 use windows::Win32::Graphics::Direct3D11::{D3D11_BIND_DECODER, D3D11_BIND_RENDER_TARGET};
 use windows::core::Interface;
 
 use crate::d3d::{Converter, Output};
-use crate::worker::{Done, Worker};
+use crate::worker::{Done, PacketSink, Stream, Worker};
 use crate::yuv::{Plane, nv12_to_i420};
 use crate::{EncoderSettings, Vendor};
 use cliprec_core::config::RateControl;
@@ -423,7 +423,9 @@ impl HwEncoder {
                 enc.params.extradata = std::slice::from_raw_parts(c.extradata, c.extradata_size as usize).to_vec();
             }
             // Da qui `ctx` e `pkt` li usa solo il thread dell'encoder; `enc` lo ferma prima di liberarli.
-            let worker = Worker::start(enc.ctx, enc.pkt).map_err(|e| EncodeError::Failed(format!("{name}: thread dell'encoder: {e}")))?;
+            let stream = Stream { fps: enc.params.fps, codec: enc.params.codec };
+            let worker =
+                Worker::start(enc.ctx, enc.pkt, stream).map_err(|e| EncodeError::Failed(format!("{name}: thread dell'encoder: {e}")))?;
             enc.worker = Some(worker);
         }
         Ok(enc)
@@ -549,50 +551,25 @@ impl HwEncoder {
         }
     }
 
-    fn to_qpc(&self, ts: i64) -> QpcTime {
-        let (_, base) = self.first.unwrap_or_default();
-        let hns = i128::from(ts) * i128::from(HNS_PER_SEC) / i128::from(self.params.fps.max(1));
-        base.add_hns(hns as i64)
+    fn worker_error(&self, d: Done) -> EncodeError {
+        match d {
+            Done::Failed(step, e) => self.runtime_error(step, e),
+            Done::Flushed => self.runtime_error("encoder", "risposta inattesa".into()),
+        }
     }
 
     /// Accoda per il thread dell'encoder un riferimento a `send` (un frame di `self` già riempito)
-    /// con il pts dato, e consegna a `sink` i pacchetti pronti.
-    fn queue(&mut self, send: *mut ffi::AVFrame, pts: i64, sink: &mut dyn FnMut(PacketRef<'_>)) -> Result<(), EncodeError> {
+    /// con il pts dato.
+    fn queue(&mut self, send: *mut ffi::AVFrame, pts: i64) -> Result<(), EncodeError> {
         let Some(worker) = self.worker.as_ref() else { return Err(self.runtime_error("encoder", "chiuso".into())) };
-        let mut failed = None;
-        let mut ready = |d: Done| self.deliver(d, sink, &mut failed);
+        let (_, base) = self.first.unwrap_or_default();
         // SAFETY: `send` è un frame di `self` con un buffer valido, convertito sopra.
-        let queued = unsafe { worker.queue(send, pts, &mut ready) };
-        if let Err(Done::Failed(step, e)) = queued {
-            return Err(self.runtime_error(step, e));
-        }
-        failed.map_or(Ok(()), Err)
-    }
-
-    /// Consegna un risultato del thread: pacchetto a `sink`, errore in `failed`.
-    fn deliver(&self, d: Done, sink: &mut dyn FnMut(PacketRef<'_>), failed: &mut Option<EncodeError>) {
-        match d {
-            Done::Packet(p) => {
-                sink(PacketRef {
-                    data: &p.data,
-                    pts: self.to_qpc(p.pts),
-                    dts: self.to_qpc(p.dts),
-                    duration: HNS_PER_SEC / i64::from(self.params.fps.max(1)),
-                    // Solo gli IDR aprono un GOP chiuso: un I-frame non IDR o un CRA non bastano.
-                    keyframe: p.key && crate::nal::first_vcl_is_idr(self.params.codec, &p.data).unwrap_or(true),
-                });
-                if let Some(w) = self.worker.as_ref() {
-                    w.recycle(p.data);
-                }
-            }
-            Done::Failed(step, e) => *failed = Some(self.runtime_error(step, e)),
-            Done::Flushed => {}
-        }
+        unsafe { worker.queue(send, pts, base) }.map_err(|d| self.worker_error(d))
     }
 
     /// Superficie QSV libera (l'encoder e la coda hanno rilasciato il loro riferimento), aspettando
-    /// fino a [`crate::worker::STALL`] e consegnando intanto i pacchetti.
-    fn free_qsv_slot(&mut self, sink: &mut dyn FnMut(PacketRef<'_>)) -> Result<usize, EncodeError> {
+    /// fino a [`crate::worker::STALL`].
+    fn free_qsv_slot(&mut self) -> Result<usize, EncodeError> {
         let n = self.qsv_slots.len();
         let deadline = std::time::Instant::now() + crate::worker::STALL;
         loop {
@@ -607,12 +584,8 @@ impl HwEncoder {
             if std::time::Instant::now() >= deadline {
                 return Err(self.runtime_error("superficie QSV", format!("tutte le {n} superfici sono occupate")));
             }
-            let mut failed = None;
             if let Some(w) = self.worker.as_ref() {
-                w.poll(&mut |d| self.deliver(d, sink, &mut failed));
-            }
-            if let Some(e) = failed {
-                return Err(e);
+                w.failed().map_err(|d| self.worker_error(d))?;
             }
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
@@ -624,9 +597,19 @@ impl HwEncoder {
         &self.params
     }
 
-    /// Codifica un frame; i pacchetti pronti vanno a `sink` in ordine di decodifica. Al ritorno
-    /// `frame.texture` è già stata letta (o la sua conversione accodata sulla GPU).
-    pub fn encode(&mut self, frame: &GpuFrame, sink: &mut dyn FnMut(PacketRef<'_>)) -> Result<(), EncodeError> {
+    /// Da qui i pacchetti vanno a `sink`, in ordine di decodifica, chiamato dal thread dell'encoder
+    /// (mai da quello che chiama `encode`). Senza sink si scartano.
+    pub fn set_sink(&mut self, sink: PacketSink) -> Result<(), EncodeError> {
+        match self.worker.as_ref() {
+            Some(w) => w.set_sink(sink).map_err(|d| self.worker_error(d)),
+            None => Err(self.runtime_error("encoder", "chiuso".into())),
+        }
+    }
+
+    /// Converte il frame e lo accoda per il thread dell'encoder; i pacchetti vanno al sink
+    /// ([`Self::set_sink`]). Al ritorno `frame.texture` è già stata letta (o la sua conversione
+    /// accodata sulla GPU). Un errore del thread dell'encoder si riporta qui alla chiamata dopo.
+    pub fn encode(&mut self, frame: &GpuFrame) -> Result<(), EncodeError> {
         let (first_index, _) = *self.first.get_or_insert((frame.index, frame.pts));
         let pts = (frame.index.saturating_sub(first_index) as i64).max(self.last_pts + 1);
         self.last_pts = pts;
@@ -635,7 +618,7 @@ impl HwEncoder {
         // la superficie già convertita. Niente conversione sulla GPU, che sotto carico compete col
         // gioco e fa perdere tick; come i frame duplicati di `ffmpeg -r`, che gli encoder accettano.
         if frame.repeated && !self.last_sent.is_null() {
-            return self.queue(self.last_sent, pts, sink);
+            return self.queue(self.last_sent, pts);
         }
         // Finché la conversione non riesce, nessuna superficie è valida da rimandare.
         self.last_sent = ptr::null_mut();
@@ -660,7 +643,7 @@ impl HwEncoder {
             }
         } else {
             let n = self.qsv_slots.len();
-            let i = self.free_qsv_slot(sink)?;
+            let i = self.free_qsv_slot()?;
             self.next_slot = (i + 1) % n;
             let slot = &self.qsv_slots[i];
             (slot.texture, slot.index, slot.frame)
@@ -687,17 +670,14 @@ impl HwEncoder {
         }
 
         self.last_sent = send;
-        self.queue(send, pts, sink)
+        self.queue(send, pts)
     }
 
-    /// Svuota l'encoder e consegna gli ultimi pacchetti.
-    pub fn flush(&mut self, sink: &mut dyn FnMut(PacketRef<'_>)) -> Result<(), EncodeError> {
-        let Some(worker) = self.worker.as_ref() else { return Ok(()) };
-        let mut failed = None;
-        let flushed = worker.flush(&mut |d| self.deliver(d, sink, &mut failed));
-        if let Err(Done::Failed(step, e)) = flushed {
-            return Err(self.runtime_error(step, e));
+    /// Svuota l'encoder: al ritorno gli ultimi pacchetti sono passati dal sink.
+    pub fn flush(&mut self) -> Result<(), EncodeError> {
+        match self.worker.as_ref() {
+            Some(w) => w.flush().map_err(|d| self.worker_error(d)),
+            None => Ok(()),
         }
-        failed.map_or(Ok(()), Err)
     }
 }

@@ -25,6 +25,7 @@ target\release\cliprec-app.exe --prova 10 --sintetica --cartella <dir>   # clip 
 target\release\cliprec-app.exe --sessione-lunga <minuti> <dir>          # CSV di memoria e frame (config da CLIPREC_CONFIG)
 cargo xtask mem <pid|cliprec-app.exe>                # memoria per categoria (immagini, heap, stack, privata, bloccata)
 cargo test --release -p cliprec-encode --test memory -- --nocapture   # RAM residente per encoder e fase
+cargo run --release -p cliprec-capture --example gpu_hog -- 10      # GPU al 100% per 10 s (prove dei frame persi)
 scripts\pipe.ps1 Status TestClip Quit                # comandi al core sulla named pipe
 ```
 

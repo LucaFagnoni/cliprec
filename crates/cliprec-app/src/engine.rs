@@ -166,8 +166,8 @@ pub struct Session {
     events: Sender<EngineEvent>,
     /// Ultimo stato visto per sorgente, per avvisare solo quando cambia.
     states: Vec<(String, SourceState)>,
-    /// fps effettivi: ultimo campione (istante, frame consegnati) e valore calcolato (m23).
-    fps_sample: (Instant, u64),
+    /// fps effettivi: ultimo campione (istante, frame consegnati, tick persi) e valore calcolato (m23).
+    fps_sample: (Instant, u64, u64),
     fps_effective: f64,
 }
 
@@ -226,7 +226,7 @@ impl Session {
             video_retry: (Instant::now(), Duration::from_secs(5)),
             events: events.clone(),
             states: Vec::new(),
-            fps_sample: (Instant::now(), 0),
+            fps_sample: (Instant::now(), 0, 0),
             fps_effective: 0.0,
         };
         if config.video.enabled {
@@ -287,8 +287,11 @@ impl Session {
             lower_thread_priority();
             let mut codecs: Vec<cliprec_core::VideoCodec> = Vec::new();
             let mut encoders: Vec<String> = Vec::new();
+            // Su un device proprio della stessa scheda: aprire e chiudere nove encoder sul device della
+            // cattura ne occupa il contesto proprio mentre il pacer consegna i primi frame.
+            let own = GpuDevice::create(Some(device.adapter_luid)).unwrap_or(device);
             // Un panic nel driver non lascia `probing` acceso per sempre.
-            let probed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cliprec_encode::probe(&device)));
+            let probed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cliprec_encode::probe(&own)));
             for (codec, name) in probed.unwrap_or_default() {
                 if !codecs.contains(&codec) {
                     codecs.push(codec);
@@ -404,18 +407,19 @@ impl Session {
         self.audio.as_ref().map_or(cliprec_audio::MIX_LATENCY_HNS, cliprec_audio::AudioEngine::mix_latency_hns)
     }
 
-    /// Aggiorna le misure dal vivo: fps effettivi = frame consegnati dal pacer al secondo, su
-    /// finestre di almeno un secondo (m23). Chiamata dal loop ogni 500 ms.
+    /// Aggiorna le misure dal vivo: fps effettivi = fps scelti × tick consegnati ÷ tick scaduti
+    /// (consegnati più persi), su finestre di almeno un secondo (m23): 60,0 esatti se non se ne perde
+    /// nessuno, invece del 59,9 che dava contare frame interi su una finestra di poco più di 1 s.
+    /// Pacer fermo del tutto: nessun tick scaduto, 0. Chiamata dal loop ogni 500 ms.
     fn measure(&mut self) {
         let Some(v) = &self.video else { return };
-        let delivered = v.stats().frames_delivered;
-        let (t0, d0) = self.fps_sample;
-        let dt = t0.elapsed().as_secs_f64();
-        if dt >= 1.0 {
-            if d0 > 0 || self.fps_effective > 0.0 {
-                self.fps_effective = delivered.saturating_sub(d0) as f64 / dt;
-            }
-            self.fps_sample = (Instant::now(), delivered);
+        let stats = v.stats();
+        let (t0, d0, l0) = self.fps_sample;
+        if t0.elapsed() >= Duration::from_secs(1) {
+            let delivered = stats.frames_delivered.saturating_sub(d0);
+            let due = delivered + stats.frames_dropped.saturating_sub(l0);
+            self.fps_effective = if due == 0 { 0.0 } else { f64::from(self.config.video.fps) * delivered as f64 / due as f64 };
+            self.fps_sample = (Instant::now(), stats.frames_delivered, stats.frames_dropped);
         }
     }
 
@@ -741,7 +745,6 @@ fn video_callback(
             }
             return;
         };
-        let mut push = |p: cliprec_core::PacketRef<'_>| buffer.push_video(p);
         // Il pacer salta l'indice sui tick persi: ripetendo l'ultimo frame codificato per quei tick il
         // file resta a frequenza costante e l'audio resta allineato (come i frame duplicati di OBS).
         // Un frame `repeated` costa solo il passaggio all'encoder, che rimanda la superficie già
@@ -758,9 +761,9 @@ fn video_callback(
                 index: frame.index - k,
                 repeated: true,
             };
-            result = result.and_then(|()| enc.encode(&filler, &mut push));
+            result = result.and_then(|()| enc.encode(&filler));
         }
-        let result = result.and_then(|()| enc.encode(frame, &mut push));
+        let result = result.and_then(|()| enc.encode(frame));
         match result {
             Ok(()) => next_index = Some(frame.index + 1),
             Err(e) => {
@@ -786,12 +789,16 @@ fn open_encoder(
     device: &GpuDevice,
     settings: &cliprec_encode::EncoderSettings,
     skip: &[String],
-    buffer: &ReplayBuffer,
+    buffer: &Arc<ReplayBuffer>,
     encoder_name: &Mutex<String>,
     alive: &Mutex<bool>,
     events: &Sender<EngineEvent>,
 ) -> Opened {
-    let e = cliprec_encode::open_after(device, settings, skip).map_err(|e| e.to_string())?;
+    let mut e = cliprec_encode::open_after(device, settings, skip).map_err(|e| e.to_string())?;
+    // I pacchetti vanno nel buffer dal thread dell'encoder: il pacer converte e accoda soltanto, e un
+    // blocco nuovo dell'arena (allocazione e VirtualLock) o uno snapshot non gli fanno perdere tick.
+    let sink = buffer.clone();
+    e.set_sink(Box::new(move |p| sink.push_video(p))).map_err(|e| e.to_string())?;
     // Sotto il lock di `alive`: se la sessione si è fermata nel frattempo, i parametri del buffer li
     // imposterà la sessione nuova, e questo encoder viene scartato.
     let alive = alive.lock().map_err(|_| "sessione chiusa".to_string())?;

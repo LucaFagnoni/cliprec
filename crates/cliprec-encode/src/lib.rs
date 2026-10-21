@@ -29,6 +29,7 @@ use cliprec_core::config::{CodecChoice, ColorFormat, EncoderAdvanced, OutputReso
 use cliprec_core::{EncodeError, GpuDevice, VideoCodec};
 
 pub use ffi::HwEncoder as Encoder;
+pub use worker::PacketSink;
 
 /// Famiglia di encoder.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

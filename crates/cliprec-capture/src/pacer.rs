@@ -15,9 +15,10 @@ use windows::Win32::Graphics::Direct3D11::{
 use windows::Graphics::Capture::Direct3D11CaptureFrame;
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
 use windows::Win32::System::Threading::{
-    CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, CreateWaitableTimerExW, GetCurrentThread, INFINITE, SetThreadPriority,
-    SetWaitableTimer, THREAD_PRIORITY_HIGHEST, TIMER_ALL_ACCESS, WaitForSingleObject,
+    AvRevertMmThreadCharacteristics, AvSetMmThreadCharacteristicsW, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, CreateWaitableTimerExW,
+    GetCurrentThread, INFINITE, SetThreadPriority, SetWaitableTimer, THREAD_PRIORITY_HIGHEST, TIMER_ALL_ACCESS, WaitForSingleObject,
 };
+use windows::core::w;
 
 /// Frequenze accettate dal pacer.
 pub const SUPPORTED_FPS: [u32; 4] = [30, 60, 120, 144];
@@ -94,12 +95,13 @@ struct SlotsInner {
 }
 
 impl SlotsInner {
-    /// Restituisce al pool i frame WGC che non sono né l'ultimo né quello in consegna.
-    fn drop_stale_frames(&mut self) {
+    /// Toglie dagli slot i frame WGC che non sono né l'ultimo né quello in consegna (si chiudono
+    /// quando `out` viene distrutto, fuori dal lock).
+    fn take_stale_frames(&mut self, out: &mut [Option<Slot>]) {
         let (latest, in_use) = (self.latest, self.in_use);
-        for (i, s) in self.slots.iter_mut().enumerate() {
+        for ((i, s), o) in self.slots.iter_mut().enumerate().zip(out) {
             if Some(i) != latest && Some(i) != in_use && s.as_ref().is_some_and(|s| s.frame.is_some()) {
-                *s = None;
+                *o = s.take();
             }
         }
     }
@@ -186,14 +188,20 @@ impl FrameSlots {
     /// in alto a sinistra) resta valida finché il frame non torna al pool, cioè quando ne arriva uno
     /// più nuovo e il pacer non lo sta consegnando. Così restano in mano al più due frame del pool.
     pub fn publish_frame(&self, frame: Direct3D11CaptureFrame, tex: ID3D11Texture2D, width: u32, height: u32, captured: QpcTime) {
-        let mut g = lock(&self.inner);
-        let (latest, in_use) = (g.latest, g.in_use);
-        let i = (0..3).find(|&i| Some(i) != latest && Some(i) != in_use).unwrap_or(0);
-        g.slots[i] = Some(Slot { tex, width, height, captured, frame: Some(frame) });
-        g.latest = Some(i);
-        g.seq += 1;
-        g.real = true;
-        g.drop_stale_frames();
+        // I frame che tornano al pool si chiudono dopo aver lasciato il lock: `Close()` è una
+        // chiamata WinRT e il pacer non deve aspettarla per prendere il frame successivo.
+        let mut spent: [Option<Slot>; 4] = Default::default();
+        {
+            let mut g = lock(&self.inner);
+            let (latest, in_use) = (g.latest, g.in_use);
+            let i = (0..3).find(|&i| Some(i) != latest && Some(i) != in_use).unwrap_or(0);
+            spent[3] = g.slots[i].replace(Slot { tex, width, height, captured, frame: Some(frame) });
+            g.latest = Some(i);
+            g.seq += 1;
+            g.real = true;
+            g.take_stale_frames(&mut spent[..3]);
+        }
+        drop(spent);
     }
 
     fn has_real(&self) -> bool {
@@ -215,10 +223,10 @@ impl FrameSlots {
         })
     }
 
+    /// Il frame consegnato, se nel frattempo ne è arrivato uno nuovo, torna al pool al prossimo
+    /// `publish_frame`, sul thread della cattura: niente chiamate WinRT sul thread del pacer.
     fn release(&self) {
-        let mut g = lock(&self.inner);
-        g.in_use = None;
-        g.drop_stale_frames();
+        lock(&self.inner).in_use = None;
     }
 
     /// Esegue `f` sull'ultimo frame tenendo il lock: la cattura non può riscriverlo finché `f` non
@@ -406,9 +414,26 @@ fn run(
     running: &AtomicBool,
 ) {
     let PacerOptions { mut prepare, first_frame_wait, pts_offset } = options;
-    // SAFETY: GetCurrentThread restituisce una pseudo-handle sempre valida per il thread corrente.
-    if let Err(e) = unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST) } {
-        tracing::debug!("priorità del pacer non alzata: {e}");
+    // MMCSS «Capture»: Windows schedula il thread come quelli audio, con priorità alta anche quando
+    // un gioco satura la CPU (i tick persi vengono da risvegli in ritardo o da callback lente).
+    // Senza MMCSS (servizio fermo) resta THREAD_PRIORITY_HIGHEST.
+    struct Mmcss(Option<windows::Win32::Foundation::HANDLE>);
+    impl Drop for Mmcss {
+        fn drop(&mut self) {
+            if let Some(h) = self.0 {
+                // SAFETY: handle restituita da AvSetMmThreadCharacteristicsW su questo thread.
+                let _ = unsafe { AvRevertMmThreadCharacteristics(h) };
+            }
+        }
+    }
+    let mut task = 0u32;
+    // SAFETY: nome statico terminato da zero; `task` è un'uscita valida. La registrazione si annulla sotto.
+    let mmcss = Mmcss(unsafe { AvSetMmThreadCharacteristicsW(w!("Capture"), &mut task) }.ok());
+    if mmcss.0.is_none() {
+        // SAFETY: GetCurrentThread restituisce una pseudo-handle sempre valida per il thread corrente.
+        if let Err(e) = unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST) } {
+            tracing::debug!("priorità del pacer non alzata: {e}");
+        }
     }
     // Il primo frame consegnato decide la dimensione dell'encoder: meglio quello vero del segnaposto.
     let give_up = Instant::now() + first_frame_wait;
@@ -423,6 +448,8 @@ fn run(
     // Istanti degli ultimi MAX_PANICS panic, in un anello.
     let mut panics = [None::<Instant>; MAX_PANICS];
     let mut panic_count = 0usize;
+    let mut last_callback = Duration::ZERO;
+    let mut drops = DropReport::default();
     while running.load(Ordering::Acquire) {
         timer.wait_until(grid_pts(start, tick, fps));
         if !running.load(Ordering::Acquire) {
@@ -430,11 +457,14 @@ fn run(
         }
         // Se la callback (o lo scheduler) ci ha fatto saltare uno slot intero, quei tick sono persi:
         // si consegna solo l'ultimo tick scaduto, senza mai accumulare.
-        let due = last_due_tick(start, QpcTime::now(), fps);
+        let now = QpcTime::now();
+        let due = last_due_tick(start, now, fps);
         if due > tick {
             stats.dropped.fetch_add(due - tick, Ordering::Relaxed);
+            drops.add(due - tick, now.hns_since(grid_pts(start, tick, fps)), last_callback);
             tick = due;
         }
+        drops.log_if_due();
         let pts = grid_pts(pts_start, tick, fps);
         if let Some(p) = prepare.as_mut() {
             p(slots, pts, tick);
@@ -451,7 +481,9 @@ fn run(
         }
         let (width, height) = (a.width, a.height);
         let frame = GpuFrame { texture: a.tex, width, height, pts, index: tick, repeated };
+        let began = Instant::now();
         let result = catch_unwind(AssertUnwindSafe(|| on_frame(&frame)));
+        last_callback = began.elapsed();
         drop(frame);
         slots.release();
         stats.delivered.fetch_add(1, Ordering::Relaxed);
@@ -479,6 +511,41 @@ fn run(
                 )));
                 break;
             }
+        }
+    }
+}
+
+/// Tick persi raccolti e scritti nel log al più ogni 10 s, con quanto tardi si è svegliato il pacer e
+/// quanto era durata la callback precedente: callback lunga = conversione o encoder lenti, callback
+/// breve e risveglio tardi = thread del pacer non schedulato in tempo.
+#[derive(Default)]
+struct DropReport {
+    lost: u64,
+    events: u32,
+    worst_late_hns: i64,
+    worst_callback: Duration,
+    since: Option<Instant>,
+}
+
+impl DropReport {
+    fn add(&mut self, lost: u64, late_hns: i64, previous_callback: Duration) {
+        self.lost += lost;
+        self.events += 1;
+        self.worst_late_hns = self.worst_late_hns.max(late_hns);
+        self.worst_callback = self.worst_callback.max(previous_callback);
+        self.since.get_or_insert_with(Instant::now);
+    }
+
+    fn log_if_due(&mut self) {
+        if self.since.is_some_and(|t| t.elapsed() >= Duration::from_secs(10)) {
+            tracing::warn!(
+                tick_persi = self.lost,
+                episodi = self.events,
+                ritardo_max_ms = self.worst_late_hns as f64 / 1e4,
+                callback_max_ms = self.worst_callback.as_secs_f64() * 1000.0,
+                "tick persi negli ultimi 10 s"
+            );
+            *self = Self::default();
         }
     }
 }

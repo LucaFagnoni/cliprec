@@ -59,14 +59,13 @@ fn stages(gpu: &GpuDevice, name: &str) -> (f64, f64, f64, f64) {
     let base = private_ws();
     let mut enc = cliprec_encode::open(gpu, &settings, name).unwrap();
     let opened = private_ws() - base;
-    let mut sink = |_: cliprec_core::PacketRef<'_>| {};
     let t0 = std::time::Instant::now();
     for i in 0..120u64 {
         let pts = QpcTime(1_000_000_000).add_hns(i as i64 * HNS_PER_SEC / 60);
         let frame = GpuFrame { texture: tex.clone(), width: 1920, height: 1080, pts, index: i, repeated: false };
-        enc.encode(&frame, &mut sink).unwrap();
+        enc.encode(&frame).unwrap();
     }
-    enc.flush(&mut sink).unwrap();
+    enc.flush().unwrap();
     let fps = 120.0 / t0.elapsed().as_secs_f64();
     let encoded = private_ws() - base;
     drop(enc);

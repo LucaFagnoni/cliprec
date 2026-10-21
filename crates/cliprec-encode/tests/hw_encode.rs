@@ -6,6 +6,7 @@
 #![allow(clippy::unwrap_used)]
 
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::process::Command;
 use std::time::Instant;
 
@@ -91,6 +92,19 @@ struct Pkt {
     keyframe: bool,
 }
 
+/// Pacchetti consegnati dal thread dell'encoder al suo sink.
+fn collect(enc: &mut Encoder) -> Arc<Mutex<Vec<Pkt>>> {
+    let out = Arc::new(Mutex::new(Vec::new()));
+    let sink = out.clone();
+    enc.set_sink(Box::new(move |p| sink.lock().unwrap().push(Pkt { data: p.data.to_vec(), pts: p.pts, dts: p.dts, keyframe: p.keyframe })))
+        .unwrap();
+    out
+}
+
+fn take(out: &Arc<Mutex<Vec<Pkt>>>) -> Vec<Pkt> {
+    std::mem::take(&mut *out.lock().unwrap())
+}
+
 /// Codifica `FRAMES` frame; le dimensioni della sorgente cambiano a metà se `sizes` ne ha due.
 /// Con `noise` ruota 4 texture di rumore (caso peggiore per il bitrate), altrimenti colori pieni.
 fn run(gpu: &GpuDevice, enc: &mut Encoder, sizes: &[(u32, u32)], noise: bool) -> (Vec<Pkt>, f64) {
@@ -102,10 +116,7 @@ fn run(gpu: &GpuDevice, enc: &mut Encoder, sizes: &[(u32, u32)], noise: bool) ->
         })
         .collect();
     let start = QpcTime(1_000_000_000);
-    let mut out = Vec::new();
-    let mut sink = |p: cliprec_core::PacketRef<'_>| {
-        out.push(Pkt { data: p.data.to_vec(), pts: p.pts, dts: p.dts, keyframe: p.keyframe });
-    };
+    let out = collect(enc);
     let t0 = Instant::now();
     for i in 0..FRAMES {
         let part = (i as usize * sizes.len()) / FRAMES as usize;
@@ -124,11 +135,11 @@ fn run(gpu: &GpuDevice, enc: &mut Encoder, sizes: &[(u32, u32)], noise: bool) ->
             index: i,
             repeated: false,
         };
-        enc.encode(&frame, &mut sink).unwrap();
+        enc.encode(&frame).unwrap();
     }
-    enc.flush(&mut sink).unwrap();
+    enc.flush().unwrap();
     let secs = t0.elapsed().as_secs_f64();
-    (out, FRAMES as f64 / secs)
+    (take(&out), FRAMES as f64 / secs)
 }
 
 /// Tipi dei NAL di un pacchetto Annex B (parser indipendente da quello del crate).
@@ -562,14 +573,14 @@ fn red_line_bleed(color_format: cliprec_core::config::ColorFormat) -> Option<(i3
     settings.advanced.color_format = color_format;
     let mut enc = cliprec_encode::open(&gpu, &settings, "hevc_nvenc").unwrap();
     let extradata = enc.params().extradata.clone();
-    let mut pkts = Vec::new();
-    let mut sink = |p: cliprec_core::PacketRef<'_>| pkts.push(Pkt { data: p.data.to_vec(), pts: p.pts, dts: p.dts, keyframe: p.keyframe });
+    let collected = collect(&mut enc);
     let start = QpcTime(1_000_000_000);
     for i in 0..30u64 {
         let frame = GpuFrame { texture: tex.clone(), width: w, height: h, pts: start.add_hns(i as i64 * HNS_PER_SEC / 60), index: i, repeated: false };
-        enc.encode(&frame, &mut sink).unwrap();
+        enc.encode(&frame).unwrap();
     }
-    enc.flush(&mut sink).unwrap();
+    enc.flush().unwrap();
+    let pkts = take(&collected);
     let path = write_stream(&format!("righe-rosse-{color_format:?}.hevc"), &extradata, &pkts);
     let ffmpeg = std::env::var("FFMPEG_TOOLS_DIR").unwrap_or_else(|_| "D:/Repositories/cliprec/third_party/ffmpeg".into());
     let bin = PathBuf::from(ffmpeg).join("bin");
@@ -634,10 +645,7 @@ fn repeated_frames_skip_conversion(gpu: &GpuDevice, encoder: &str, file: &str) {
     // SAFETY: vista valida sul device del contesto, protetto per l'uso da più thread.
     unsafe { gpu.context.ClearRenderTargetView(magenta_rtv.as_ref().unwrap(), &[1.0, 0.0, 1.0, 1.0]) };
     let color = |i: u64| [(i * 4) as f32 / 255.0, 0.5, 1.0 - (i * 4) as f32 / 255.0, 1.0];
-    let mut pkts = Vec::new();
-    let mut sink = |p: cliprec_core::PacketRef<'_>| {
-        pkts.push(Pkt { data: p.data.to_vec(), pts: p.pts, dts: p.dts, keyframe: p.keyframe });
-    };
+    let collected = collect(&mut enc);
     let n = 60u64;
     for i in 0..n {
         let repeated = i % 2 == 1;
@@ -653,9 +661,10 @@ fn repeated_frames_skip_conversion(gpu: &GpuDevice, encoder: &str, file: &str) {
             index: i,
             repeated,
         };
-        enc.encode(&frame, &mut sink).unwrap();
+        enc.encode(&frame).unwrap();
     }
-    enc.flush(&mut sink).unwrap();
+    enc.flush().unwrap();
+    let pkts = take(&collected);
     let path = match params.codec {
         cliprec_core::VideoCodec::Av1 => write_ivf(file, w, h, &params.extradata, &pkts),
         _ => write_stream(file, &params.extradata, &pkts),
