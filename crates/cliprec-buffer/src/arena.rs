@@ -11,6 +11,7 @@
 
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use cliprec_core::PacketData;
 
@@ -45,6 +46,11 @@ pub(crate) struct Entry<M> {
     pub meta: M,
 }
 
+/// Dopo tanto un blocco libero mai riusato torna al sistema ([`ChunkRing::trim_idle`]).
+pub(crate) const IDLE: Duration = Duration::from_secs(120);
+/// Blocchi liberi tenuti comunque pronti, per non riallocare a ogni oscillazione del bitrate.
+pub(crate) const KEEP_FREE: usize = 2;
+
 pub(crate) struct ChunkRing<M> {
     chunk_size: usize,
     lock_pages: bool,
@@ -55,7 +61,8 @@ pub(crate) struct ChunkRing<M> {
     first_chunk: u64,
     /// Byte già scritti nell'ultimo blocco.
     fill: usize,
-    free: Vec<Arc<Chunk>>,
+    /// Blocchi liberi pronti da riusare, con l'istante in cui si sono liberati.
+    free: Vec<(Arc<Chunk>, Instant)>,
     entries: VecDeque<Entry<M>>,
     /// Numero progressivo di `entries[0]`.
     first_seq: u64,
@@ -136,7 +143,7 @@ impl<M> ChunkRing<M> {
     pub fn reserve(&mut self, bytes: usize) {
         while self.allocated + self.chunk_size <= bytes {
             let c = self.alloc(self.chunk_size);
-            self.free.push(c);
+            self.free.push((c, Instant::now()));
         }
     }
 
@@ -159,9 +166,9 @@ impl<M> ChunkRing<M> {
             let reusable = self
                 .free
                 .iter()
-                .position(|c| c.0.len() >= len && Arc::strong_count(c) == 1 && Arc::weak_count(c) == 0);
+                .position(|(c, _)| c.0.len() >= len && Arc::strong_count(c) == 1 && Arc::weak_count(c) == 0);
             let chunk = match reusable {
-                Some(i) => self.free.swap_remove(i),
+                Some(i) => self.free.swap_remove(i).0,
                 None => self.alloc(len.max(self.chunk_size)),
             };
             self.in_use += chunk.0.len();
@@ -190,13 +197,31 @@ impl<M> ChunkRing<M> {
             if self.allocated > self.max_allocated {
                 self.allocated -= c.0.len();
             } else {
-                self.free.push(c);
+                self.free.push((c, Instant::now()));
             }
         }
         if self.chunks.is_empty() {
             self.fill = 0;
         }
+        if self.free.len() > KEEP_FREE {
+            self.trim_idle(Instant::now());
+        }
         Some(e)
+    }
+
+    /// Restituisce al sistema i blocchi liberi da più di [`IDLE`], tenendone [`KEEP_FREE`] pronti:
+    /// dopo un picco di bitrate (una scena d'azione in H.264) la memoria non resta occupata per
+    /// sempre. Se il bitrate risale si riallocano, sul thread dell'encoder (circa 1 ms per 4 MB).
+    pub fn trim_idle(&mut self, now: Instant) {
+        let mut i = 0;
+        while i < self.free.len() && self.free.len() > KEEP_FREE {
+            if now.duration_since(self.free[i].1) >= IDLE {
+                let (c, _) = self.free.swap_remove(i);
+                self.allocated -= c.0.len();
+            } else {
+                i += 1;
+            }
+        }
     }
 
     pub fn clear(&mut self) {
@@ -230,6 +255,28 @@ impl<M> ChunkRing<M> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Dopo un picco i blocchi liberi tornano al sistema, tranne i due tenuti pronti.
+    #[test]
+    fn idle_free_chunks_are_given_back() {
+        let mut r: ChunkRing<()> = ChunkRing::new(1024, false, usize::MAX);
+        for _ in 0..10 {
+            r.push(&[7u8; 1000], ());
+        }
+        assert_eq!(r.allocated_bytes(), 10 * 1024);
+        // Picco finito: il ring torna a due voci, otto blocchi liberi.
+        while r.len() > 2 {
+            r.pop_front();
+        }
+        let freed_at = Instant::now();
+        r.trim_idle(freed_at + IDLE / 2);
+        assert_eq!(r.allocated_bytes(), 10 * 1024, "troppo presto per restituire");
+        r.trim_idle(freed_at + IDLE + Duration::from_secs(1));
+        assert_eq!(r.allocated_bytes(), (2 + KEEP_FREE) * 1024, "in uso più i blocchi tenuti pronti");
+        // Il ring continua a funzionare e riusa quelli rimasti.
+        r.push(&[1u8; 1000], ());
+        assert_eq!(r.allocated_bytes(), (2 + KEEP_FREE) * 1024);
+    }
 
     #[test]
     fn reuses_chunks_and_shares_closed_ones() {
