@@ -330,3 +330,11 @@ Le voci [DEFAULT] e [PROPOSTA] di SPEC.md valgono come decise; qui ci sono quell
     tick persi, e i salti contano nei frame persi dello stato e negli fps; nel log ogni 10 s. Solo
     una coda ferma per 10 s è un guasto dell'encoder. Priorità GPU REALTIME scartata: blocca NVENC
     su NVIDIA (RESEARCH). Test: `full_queue_skips_frames_without_blocking_or_failing`.
+53. **Riempitivi solo con la coda libera; il frame saltato fa avanzare l'indice** (21 ottobre,
+    regressione della 0.1.13 in gioco: fps 0, circa 6900 «salti» ogni 10 s). Con la coda piena il
+    frame saltato lasciava `next_index` indietro; al tick dopo i riempitivi (fino a 15) prendevano i
+    posti che si liberavano e il frame nuovo veniva saltato di nuovo, per sempre: l'encoder ripeteva
+    frame vecchi e i pts correvano avanti. Ora `fill_and_encode` smette di riempire al primo
+    riempitivo saltato e salta anche il frame; un frame saltato fa comunque avanzare `next_index` (il
+    buco resta nel file come pausa) e conta una volta sola nei frame persi. Test:
+    `full_queue_never_starves_new_frames`.

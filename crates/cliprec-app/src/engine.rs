@@ -763,27 +763,10 @@ fn video_callback(
         // Un frame `repeated` costa solo il passaggio all'encoder, che rimanda la superficie già
         // convertita: niente copie né conversioni sulla GPU. ponytail: al massimo 250 ms per tick;
         // oltre, il buco resta nel file come salto di timestamp.
-        let missing = next_index.map_or(0, |n| frame.index.saturating_sub(n)).min(u64::from(fps / 4));
-        let mut result = Ok(());
-        let mut skips = 0u64;
-        for k in (1..=missing).rev() {
-            let filler = GpuFrame {
-                texture: frame.texture.clone(),
-                width: frame.width,
-                height: frame.height,
-                pts: frame.pts.add_hns(-(k as i64) * cliprec_core::HNS_PER_SEC / i64::from(fps)),
-                index: frame.index - k,
-                repeated: true,
-            };
-            result = result.and_then(|()| enc.encode(&filler)).map(|e| skips += u64::from(e == Encoded::Skipped));
-        }
-        let result = result.and_then(|()| enc.encode(frame));
+        let result = fill_and_encode(next_index, frame, fps, |f| enc.encode(f));
         if let Ok(Encoded::Skipped) = result {
-            skips += 1;
-        }
-        if skips > 0 {
-            skipped.fetch_add(skips, Ordering::Relaxed);
-            skip_report.0 += skips;
+            skipped.fetch_add(1, Ordering::Relaxed);
+            skip_report.0 += 1;
             skip_report.1.get_or_insert_with(Instant::now);
         }
         if skip_report.1.is_some_and(|t| t.elapsed() >= Duration::from_secs(10)) {
@@ -791,9 +774,10 @@ fn video_callback(
             skip_report = (0, None);
         }
         match result {
-            // Saltato: `next_index` resta, e il frame dopo riempie il buco ripetendo il precedente.
-            Ok(Encoded::Skipped) => {}
-            Ok(Encoded::Queued) => next_index = Some(frame.index + 1),
+            // Anche saltato il frame è passato: il buco resta nel file come pausa (il lettore tiene
+            // il frame precedente). Se `next_index` restasse indietro, i riempitivi del tick dopo
+            // prenderebbero i posti liberi in coda al posto dei frame nuovi, per sempre (0.1.13).
+            Ok(_) => next_index = Some(frame.index + 1),
             Err(e) => {
                 let name = enc.params().encoder_name.clone();
                 if matches!(e, EncodeError::DeviceLost) {
@@ -810,6 +794,36 @@ fn video_callback(
             }
         }
     })
+}
+
+/// Codifica `frame` preceduto dai riempitivi dei tick persi dal pacer (`next_index` = primo indice
+/// non ancora codificato): ripetendo l'ultimo frame codificato per quei tick il file resta a
+/// frequenza costante e l'audio allineato, come i frame duplicati di OBS. Un riempitivo costa solo
+/// il passaggio all'encoder, che rimanda la superficie già convertita. Con la coda dell'encoder
+/// piena (un riempitivo saltato) si smette di riempire e si salta anche il frame: con la GPU satura
+/// non si spende un posto in coda per ripetere il passato. ponytail: al più 250 ms di riempitivi per
+/// tick; oltre, il buco resta nel file come salto di timestamp.
+fn fill_and_encode(
+    next_index: Option<u64>,
+    frame: &GpuFrame,
+    fps: u32,
+    mut encode: impl FnMut(&GpuFrame) -> Result<Encoded, EncodeError>,
+) -> Result<Encoded, EncodeError> {
+    let missing = next_index.map_or(0, |n| frame.index.saturating_sub(n)).min(u64::from(fps / 4));
+    for k in (1..=missing).rev() {
+        let filler = GpuFrame {
+            texture: frame.texture.clone(),
+            width: frame.width,
+            height: frame.height,
+            pts: frame.pts.add_hns(-(k as i64) * cliprec_core::HNS_PER_SEC / i64::from(fps)),
+            index: frame.index - k,
+            repeated: true,
+        };
+        if encode(&filler)? == Encoded::Skipped {
+            return Ok(Encoded::Skipped);
+        }
+    }
+    encode(frame)
 }
 
 /// Prova i candidati in ordine saltando quelli già falliti; prenota il buffer per i nuovi parametri.
@@ -2111,6 +2125,60 @@ video_seconds = = 30").unwrap();
         assert_eq!(restart_scope(&a, &b), RestartScope::default());
         b.video.fps = 144;
         assert!(restart_scope(&a, &b).video);
+    }
+
+    /// Regressione 0.1.13: con la coda dell'encoder piena i riempitivi prendevano i posti liberi e il
+    /// frame nuovo veniva saltato per sempre. Qui un encoder con un solo posto ogni 4 chiamate: i
+    /// frame nuovi devono passare, `next_index` deve avanzare e nessun tick deve ripetere i riempitivi.
+    #[test]
+    fn full_queue_never_starves_new_frames() {
+        let device = GpuDevice::create(None).unwrap();
+        let desc = windows::Win32::Graphics::Direct3D11::D3D11_TEXTURE2D_DESC {
+            Width: 64,
+            Height: 64,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            ..Default::default()
+        };
+        let mut tex = None;
+        // SAFETY: test; descrittore e puntatore d'uscita locali.
+        unsafe { device.device.CreateTexture2D(&desc, None, Some(&mut tex)) }.unwrap();
+        let tex = tex.unwrap();
+        let mut calls = 0u32;
+        let mut encoded: Vec<(u64, bool)> = Vec::new();
+        let mut next_index = Some(0);
+        let mut skipped = 0;
+        for index in 0..120u64 {
+            // Il pacer perde un tick ogni 5: ci sono sempre buchi da riempire.
+            if index % 5 == 4 {
+                continue;
+            }
+            let frame = GpuFrame { texture: tex.clone(), width: 64, height: 64, pts: QpcTime(index as i64 * 166_667), index, repeated: false };
+            let r = fill_and_encode(next_index, &frame, 60, |f| {
+                calls += 1;
+                // Un posto libero ogni 4 chiamate: l'encoder è indietro.
+                if calls.is_multiple_of(4) {
+                    encoded.push((f.index, f.repeated));
+                    Ok(Encoded::Queued)
+                } else {
+                    Ok(Encoded::Skipped)
+                }
+            })
+            .unwrap();
+            skipped += u32::from(r == Encoded::Skipped);
+            next_index = Some(index + 1);
+        }
+        let new = encoded.iter().filter(|(_, rep)| !rep).count();
+        let fillers = encoded.len() - new;
+        println!("chiamate {calls}, codificati {} ({new} nuovi, {fillers} riempitivi), frame saltati {skipped}", encoded.len());
+        assert!(calls < 200, "si ritenta troppo con la coda piena: {calls} chiamate per 96 tick");
+        assert!(new >= 15, "i frame nuovi non passano più: {new}");
+        let mut indices: Vec<u64> = encoded.iter().map(|e| e.0).collect();
+        let len = indices.len();
+        indices.dedup();
+        assert_eq!(indices.len(), len, "stesso indice codificato due volte: riempitivi ripetuti");
     }
 
     /// Tracce diverse per tipo di clip dalla stessa sessione: clip video con una traccia per sorgente,
