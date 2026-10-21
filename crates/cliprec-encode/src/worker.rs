@@ -2,15 +2,16 @@
 //! mette in coda; questo thread lo manda a FFmpeg, raccoglie i pacchetti e li consegna direttamente
 //! al sink (il buffer di replay): sul thread del pacer restano solo conversione e accodamento. Se
 //! l'encoder si ferma un attimo (GPU satura nei caricamenti) la coda assorbe fino a [`QUEUE`] frame
-//! invece di far perdere tick al pacer; a coda piena il pacer aspetta, come quando la codifica era
-//! sul suo thread.
+//! invece di far perdere tick al pacer.
+//! Con la coda piena il pacer non aspetta: il frame si salta e il buco si riempie ripetendo il
+//! precedente; solo una coda ferma per [`STUCK`] è un guasto dell'encoder.
 //!
 //! Niente allocazioni a regime: i frame della coda girano tra i due thread, i pacchetti passano al
 //! sink in prestito.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TryRecvError, sync_channel};
+use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, sync_channel};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -20,8 +21,11 @@ use windows::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THR
 
 /// Frame che possono aspettare in coda oltre a quelli che l'encoder tiene già (100 ms a 60 fps).
 pub(crate) const QUEUE: usize = 6;
-/// Attesa massima di un posto in coda o della fine dello svuotamento: oltre, l'encoder è bloccato.
+/// Attesa massima della fine dello svuotamento.
 pub(crate) const STALL: Duration = Duration::from_secs(2);
+/// Coda ferma da tanto: l'encoder è bloccato davvero, non solo indietro perché la GPU è satura (un
+/// gioco che carica la tiene occupata anche per qualche secondo). Si passa al candidato successivo.
+pub(crate) const STUCK: Duration = Duration::from_secs(10);
 
 /// Dove vanno i pacchetti codificati, in ordine di decodifica, dal thread dell'encoder.
 pub type PacketSink = Box<dyn FnMut(PacketRef<'_>) + Send>;
@@ -58,10 +62,15 @@ pub(crate) struct Stream {
     pub codec: VideoCodec,
 }
 
+/// Posto libero nella coda dell'encoder (un frame vuoto), da [`Worker::try_slot`].
+pub(crate) struct Slot(Ptr<ffi::AVFrame>);
+
 pub(crate) struct Worker {
     jobs: Option<SyncSender<Job>>,
     done: Receiver<Done>,
     free: Receiver<Ptr<ffi::AVFrame>>,
+    /// Per restituire un posto non usato.
+    free_back: SyncSender<Ptr<ffi::AVFrame>>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
     /// Tutti i frame della coda, liberati in Drop dopo la fine del thread.
@@ -94,6 +103,7 @@ impl Worker {
         }
         let stop = Arc::new(AtomicBool::new(false));
         let (ctx, pkt, flag) = (Ptr(ctx), Ptr(pkt), stop.clone());
+        let free_back = free_tx.clone();
         let thread = std::thread::Builder::new().name("cliprec-encode".into()).spawn(move || {
             // SAFETY: pseudo-handle del thread corrente, sempre valida.
             let _ = unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL) };
@@ -109,7 +119,7 @@ impl Worker {
                 return Err(e);
             }
         };
-        Ok(Self { jobs: Some(jobs_tx), done, free, stop, thread: Some(thread), frames })
+        Ok(Self { jobs: Some(jobs_tx), done, free, free_back, stop, thread: Some(thread), frames })
     }
 
     /// Da qui i pacchetti vanno a `sink`, chiamato dal thread dell'encoder.
@@ -117,20 +127,23 @@ impl Worker {
         self.send(Job::Sink(sink))
     }
 
-    /// Accoda un riferimento a `src` con il pts dato (`base` = istante del pts 0). Aspetta un posto
-    /// libero al più [`STALL`].
+    /// Un posto libero in coda, se c'è subito. Niente attese: con la coda piena (encoder indietro
+    /// perché la GPU è satura) il chiamante salta il frame invece di fermare il pacer.
+    pub fn try_slot(&self) -> Option<Slot> {
+        self.free.try_recv().ok().map(Slot)
+    }
+
+    /// Restituisce un posto preso con [`Self::try_slot`] e non usato (conversione fallita).
+    pub fn give_back(&self, slot: Slot) {
+        let _ = self.free_back.try_send(slot.0);
+    }
+
+    /// Accoda nel posto `slot` un riferimento a `src` con il pts dato (`base` = istante del pts 0).
     ///
     /// # Safety
     /// `src` è un frame valido con un buffer (hw o in memoria) di cui l'encoder può prendere un riferimento.
-    pub unsafe fn queue(&self, src: *const ffi::AVFrame, pts: i64, base: QpcTime) -> Result<(), Done> {
-        self.failed()?;
-        let f = match self.free.recv_timeout(STALL) {
-            Ok(f) => f,
-            Err(RecvTimeoutError::Timeout) => {
-                return Err(Done::Failed("coda dell'encoder", format!("ferma da {} s", STALL.as_secs())));
-            }
-            Err(RecvTimeoutError::Disconnected) => return Err(self.exit_reason()),
-        };
+    pub unsafe fn submit(&self, slot: Slot, src: *const ffi::AVFrame, pts: i64, base: QpcTime) -> Result<(), Done> {
+        let f = slot.0;
         // SAFETY: `f` è un frame vuoto della coda; `src` è valido (contratto). L'encoder prende poi
         // un riferimento proprio in avcodec_send_frame.
         let ret = unsafe {
@@ -145,6 +158,7 @@ impl Worker {
             ret
         };
         if ret < 0 {
+            self.give_back(slot);
             return Err(Done::Failed("av_frame_ref", crate::ffi::av_error_string(ret)));
         }
         self.send(Job::Frame(f, base))

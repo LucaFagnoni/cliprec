@@ -9,7 +9,7 @@ use windows::Win32::Graphics::Direct3D11::{D3D11_BIND_DECODER, D3D11_BIND_RENDER
 use windows::core::Interface;
 
 use crate::d3d::{Converter, Output};
-use crate::worker::{Done, PacketSink, Stream, Worker};
+use crate::worker::{Done, PacketSink, Slot, Stream, Worker};
 use crate::yuv::{Plane, nv12_to_i420};
 use crate::{EncoderSettings, Vendor};
 use cliprec_core::config::RateControl;
@@ -143,6 +143,16 @@ pub struct HwEncoder {
     /// Thread che manda i frame a FFmpeg e raccoglie i pacchetti; da quando parte è l'unico a usare
     /// `ctx` e `pkt`.
     worker: Option<Worker>,
+    /// Da quando la coda dell'encoder è piena (frame saltati), se lo è.
+    full_since: Option<std::time::Instant>,
+}
+
+/// Esito di [`HwEncoder::encode`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Encoded {
+    Queued,
+    /// Coda piena (encoder indietro, GPU satura): il frame non è stato convertito né codificato.
+    Skipped,
 }
 
 // SAFETY: i contesti FFmpeg non sono legati al thread che li ha creati; `HwEncoder` è usato da un
@@ -261,6 +271,7 @@ impl HwEncoder {
             last_pts: -1,
             last_sent: ptr::null_mut(),
             worker: None,
+            full_since: None,
         };
 
         // SAFETY: sequenza documentata di libavutil/libavcodec. Ogni puntatore allocato finisce
@@ -558,37 +569,36 @@ impl HwEncoder {
         }
     }
 
-    /// Accoda per il thread dell'encoder un riferimento a `send` (un frame di `self` già riempito)
-    /// con il pts dato.
-    fn queue(&mut self, send: *mut ffi::AVFrame, pts: i64) -> Result<(), EncodeError> {
+    /// Accoda nel posto `slot` un riferimento a `send` (un frame di `self` già riempito) con il pts dato.
+    fn submit(&mut self, slot: Slot, send: *mut ffi::AVFrame, pts: i64) -> Result<Encoded, EncodeError> {
         let Some(worker) = self.worker.as_ref() else { return Err(self.runtime_error("encoder", "chiuso".into())) };
         let (_, base) = self.first.unwrap_or_default();
         // SAFETY: `send` è un frame di `self` con un buffer valido, convertito sopra.
-        unsafe { worker.queue(send, pts, base) }.map_err(|d| self.worker_error(d))
+        unsafe { worker.submit(slot, send, pts, base) }.map_err(|d| self.worker_error(d))?;
+        self.last_pts = pts;
+        Ok(Encoded::Queued)
     }
 
-    /// Superficie QSV libera (l'encoder e la coda hanno rilasciato il loro riferimento), aspettando
-    /// fino a [`crate::worker::STALL`].
-    fn free_qsv_slot(&mut self) -> Result<usize, EncodeError> {
+    /// Superficie QSV libera (l'encoder e la coda hanno rilasciato il loro riferimento), se c'è.
+    fn free_qsv_slot(&self) -> Option<usize> {
         let n = self.qsv_slots.len();
-        let deadline = std::time::Instant::now() + crate::worker::STALL;
-        loop {
-            // SAFETY: i frame delle superfici sono mappati e vivi fino a Drop; buf[0] non è nullo
-            // (verificato in map_qsv_slots).
-            let free = (0..n)
-                .map(|k| (self.next_slot + k) % n)
-                .find(|&i| unsafe { ffi::av_buffer_get_ref_count((*self.qsv_slots[i].frame).buf[0]) } == 1);
-            if let Some(i) = free {
-                return Ok(i);
-            }
-            if std::time::Instant::now() >= deadline {
-                return Err(self.runtime_error("superficie QSV", format!("tutte le {n} superfici sono occupate")));
-            }
-            if let Some(w) = self.worker.as_ref() {
-                w.failed().map_err(|d| self.worker_error(d))?;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(1));
+        // SAFETY: i frame delle superfici sono mappati e vivi fino a Drop; buf[0] non è nullo
+        // (verificato in map_qsv_slots).
+        (0..n).map(|k| (self.next_slot + k) % n).find(|&i| unsafe { ffi::av_buffer_get_ref_count((*self.qsv_slots[i].frame).buf[0]) } == 1)
+    }
+
+    /// Frame saltato perché l'encoder è indietro. Errore solo se la coda è ferma da [`crate::worker::STUCK`].
+    fn skip(&mut self, repeated: bool) -> Result<Encoded, EncodeError> {
+        let since = *self.full_since.get_or_insert_with(std::time::Instant::now);
+        if since.elapsed() >= crate::worker::STUCK {
+            return Err(self.runtime_error("coda dell'encoder", format!("ferma da {} s", crate::worker::STUCK.as_secs())));
         }
+        // Contenuto nuovo non codificato: il prossimo frame «ripetuto» va convertito, non deve
+        // ripetere la superficie precedente, che è più vecchia.
+        if !repeated {
+            self.last_sent = ptr::null_mut();
+        }
+        Ok(Encoded::Skipped)
     }
 }
 
@@ -608,18 +618,46 @@ impl HwEncoder {
 
     /// Converte il frame e lo accoda per il thread dell'encoder; i pacchetti vanno al sink
     /// ([`Self::set_sink`]). Al ritorno `frame.texture` è già stata letta (o la sua conversione
-    /// accodata sulla GPU). Un errore del thread dell'encoder si riporta qui alla chiamata dopo.
-    pub fn encode(&mut self, frame: &GpuFrame) -> Result<(), EncodeError> {
+    /// accodata sulla GPU). Con la coda piena non aspetta: [`Encoded::Skipped`], senza conversione.
+    /// Un errore del thread dell'encoder si riporta qui alla chiamata dopo.
+    pub fn encode(&mut self, frame: &GpuFrame) -> Result<Encoded, EncodeError> {
         let (first_index, _) = *self.first.get_or_insert((frame.index, frame.pts));
+        // `last_pts` avanza solo quando il frame entra in coda (in `submit`): un frame saltato non
+        // consuma un pts.
         let pts = (frame.index.saturating_sub(first_index) as i64).max(self.last_pts + 1);
-        self.last_pts = pts;
 
         // Frame ripetuto (stesso contenuto del precedente, o riempitivo di un tick perso): si rimanda
         // la superficie già convertita. Niente conversione sulla GPU, che sotto carico compete col
         // gioco e fa perdere tick; come i frame duplicati di `ffmpeg -r`, che gli encoder accettano.
-        if frame.repeated && !self.last_sent.is_null() {
-            return self.queue(self.last_sent, pts);
+        let Some(worker) = self.worker.as_ref() else { return Err(self.runtime_error("encoder", "chiuso".into())) };
+        worker.failed().map_err(|d| self.worker_error(d))?;
+        // QSV: anche le superfici del pool fisso possono essere tutte in mano all'encoder.
+        let reuse = frame.repeated && !self.last_sent.is_null();
+        if !reuse && !self.qsv_slots.is_empty() && self.free_qsv_slot().is_none() {
+            return self.skip(frame.repeated);
         }
+        let Some(slot) = worker.try_slot() else { return self.skip(frame.repeated) };
+        self.full_since = None;
+        if reuse {
+            return self.submit(slot, self.last_sent, pts);
+        }
+        let result = self.convert(frame);
+        match result {
+            Ok(send) => {
+                self.last_sent = send;
+                self.submit(slot, send, pts)
+            }
+            Err(e) => {
+                if let Some(w) = self.worker.as_ref() {
+                    w.give_back(slot);
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// Converte il frame su una superficie dell'encoder e restituisce il frame FFmpeg da mandare.
+    fn convert(&mut self, frame: &GpuFrame) -> Result<*mut ffi::AVFrame, EncodeError> {
         // Finché la conversione non riesce, nessuna superficie è valida da rimandare.
         self.last_sent = ptr::null_mut();
         let (tex, slice, send) = if self.vendor == Vendor::Software {
@@ -643,7 +681,9 @@ impl HwEncoder {
             }
         } else {
             let n = self.qsv_slots.len();
-            let i = self.free_qsv_slot()?;
+            let Some(i) = self.free_qsv_slot() else {
+                return Err(self.runtime_error("superficie QSV", format!("tutte le {n} superfici sono occupate")));
+            };
             self.next_slot = (i + 1) % n;
             let slot = &self.qsv_slots[i];
             (slot.texture, slot.index, slot.frame)
@@ -669,8 +709,7 @@ impl HwEncoder {
             }
         }
 
-        self.last_sent = send;
-        self.queue(send, pts)
+        Ok(send)
     }
 
     /// Svuota l'encoder: al ritorno gli ultimi pacchetti sono passati dal sink.

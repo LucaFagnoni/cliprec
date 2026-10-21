@@ -72,3 +72,60 @@ fn slow_sink_does_not_block_encode() {
     assert!(worst < period, "encode ha aspettato il sink: {worst:?}");
     assert_eq!(packets, 180, "pacchetti persi");
 }
+
+/// Regressione 0.1.10-0.1.12: l'encoder fermo (qui il sink bloccato 500 ms, in gioco la GPU satura)
+/// riempiva la coda, il pacer aspettava fino a 2 s e poi l'encoder era dichiarato guasto, con il
+/// passaggio a un altro codec e il buffer svuotato. Ora `encode` non aspetta: salta i frame, senza
+/// errori, e riprende ad accodare appena l'encoder si libera.
+#[test]
+fn full_queue_skips_frames_without_blocking_or_failing() {
+    use cliprec_encode::Encoded;
+    let Some(gpu) = GpuDevice::create(None).ok() else { return };
+    let settings = EncoderSettings::from_config(&Default::default(), 1280, 720);
+    let mut enc = cliprec_encode::open_best(&gpu, &settings).unwrap();
+    let blocked = Arc::new(Mutex::new(true));
+    let gate = blocked.clone();
+    enc.set_sink(Box::new(move |_| {
+        if std::mem::take(&mut *gate.lock().unwrap()) {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+    }))
+    .unwrap();
+    let desc = D3D11_TEXTURE2D_DESC {
+        Width: 1280,
+        Height: 720,
+        MipLevels: 1,
+        ArraySize: 1,
+        Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+        Usage: D3D11_USAGE_DEFAULT,
+        BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
+        ..Default::default()
+    };
+    let mut tex = None;
+    // SAFETY: descrittore e puntatore d'uscita locali.
+    unsafe { gpu.device.CreateTexture2D(&desc, None, Some(&mut tex)) }.unwrap();
+    let tex = tex.unwrap();
+    let period = std::time::Duration::from_secs(1) / FPS;
+    let t0 = Instant::now();
+    let (mut worst, mut skipped, mut queued_after) = (std::time::Duration::ZERO, 0, 0);
+    for i in 0..90u64 {
+        let frame = GpuFrame { texture: tex.clone(), width: 1280, height: 720, pts: QpcTime(1_000_000_000).add_hns(i as i64 * HNS_PER_SEC / 60), index: i, repeated: false };
+        let began = Instant::now();
+        let outcome = enc.encode(&frame).unwrap();
+        worst = worst.max(began.elapsed());
+        match outcome {
+            Encoded::Skipped => skipped += 1,
+            Encoded::Queued if skipped > 0 => queued_after += 1,
+            Encoded::Queued => {}
+        }
+        if let Some(wait) = (t0 + period * (i as u32 + 1)).checked_duration_since(Instant::now()) {
+            std::thread::sleep(wait);
+        }
+    }
+    enc.flush().unwrap();
+    eprintln!("sink fermo 500 ms: {skipped} frame saltati, {queued_after} accodati dopo, encode più lenta {:.2} ms", worst.as_secs_f64() * 1000.0);
+    assert!(skipped > 0, "il test deve riempire la coda");
+    assert!(queued_after > 20, "dopo lo sblocco l'encoder deve riprendere: {queued_after}");
+    assert!(worst < period, "encode ha aspettato: {worst:?}");
+}

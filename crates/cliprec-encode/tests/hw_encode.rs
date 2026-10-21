@@ -13,7 +13,7 @@ use std::time::Instant;
 use cliprec_core::config::CodecChoice;
 use cliprec_core::gpu::luid_to_i64;
 use cliprec_core::{GpuDevice, GpuFrame, HNS_PER_SEC, QpcTime};
-use cliprec_encode::Encoder;
+use cliprec_encode::{Encoded, Encoder};
 use cliprec_encode::EncoderSettings;
 use windows::Win32::Graphics::Direct3D11::{
     D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE2D_DESC,
@@ -92,6 +92,14 @@ struct Pkt {
     keyframe: bool,
 }
 
+/// Come il pacer, ma senza saltare frame: con la coda dell'encoder piena si riprova finché c'è posto
+/// (i test mandano i frame più in fretta del tempo reale).
+fn encode(enc: &mut Encoder, frame: &GpuFrame) {
+    while enc.encode(frame).unwrap() == Encoded::Skipped {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
 /// Pacchetti consegnati dal thread dell'encoder al suo sink.
 fn collect(enc: &mut Encoder) -> Arc<Mutex<Vec<Pkt>>> {
     let out = Arc::new(Mutex::new(Vec::new()));
@@ -135,7 +143,7 @@ fn run(gpu: &GpuDevice, enc: &mut Encoder, sizes: &[(u32, u32)], noise: bool) ->
             index: i,
             repeated: false,
         };
-        enc.encode(&frame).unwrap();
+        encode(enc, &frame);
     }
     enc.flush().unwrap();
     let secs = t0.elapsed().as_secs_f64();
@@ -577,7 +585,7 @@ fn red_line_bleed(color_format: cliprec_core::config::ColorFormat) -> Option<(i3
     let start = QpcTime(1_000_000_000);
     for i in 0..30u64 {
         let frame = GpuFrame { texture: tex.clone(), width: w, height: h, pts: start.add_hns(i as i64 * HNS_PER_SEC / 60), index: i, repeated: false };
-        enc.encode(&frame).unwrap();
+        encode(&mut enc, &frame);
     }
     enc.flush().unwrap();
     let pkts = take(&collected);
@@ -661,7 +669,7 @@ fn repeated_frames_skip_conversion(gpu: &GpuDevice, encoder: &str, file: &str) {
             index: i,
             repeated,
         };
-        enc.encode(&frame).unwrap();
+        encode(&mut enc, &frame);
     }
     enc.flush().unwrap();
     let pkts = take(&collected);

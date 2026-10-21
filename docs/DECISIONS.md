@@ -319,3 +319,14 @@ Le voci [DEFAULT] e [PROPOSTA] di SPEC.md valgono come decise; qui ci sono quell
     `target/debug/deps`. ClipRec in esecuzione su D: scrive solo le clip salvate. `cargo clean --profile
     dev` e `cargo clean --release` (non `cargo clean`: cancellerebbe `target/dist`, da cui gira il
     ClipRec di Luca) e `[profile.dev] incremental = false`. Da ripetere ogni tanto le due pulizie.
+52. **Coda dell'encoder piena: si salta il frame, non si aspetta, non si cambia encoder** (21
+    ottobre, istanza di Luca in gioco). Il log della 0.1.12 ha mostrato episodi con la callback del
+    pacer lunga quanto il ritardo (200-625 ms): il pacer aspettava un posto nella coda (6 frame)
+    mentre l'encoder era fermo dietro alla GPU satura dal gioco. Dopo 2 s di coda ferma l'encoder
+    veniva dichiarato guasto: alle 12:00:49 HEVC è passato a H.264, il buffer video si è svuotato e,
+    con il bitrate più alto di H.264, il buffer è cresciuto a 437 MiB. Ora il pacer prende prima un
+    posto in coda e solo se c'è converte il frame; con la coda piena il frame si salta subito
+    (`Encoded::Skipped`, senza conversione), il buco si riempie ripetendo il precedente come per i
+    tick persi, e i salti contano nei frame persi dello stato e negli fps; nel log ogni 10 s. Solo
+    una coda ferma per 10 s è un guasto dell'encoder. Priorità GPU REALTIME scartata: blocca NVENC
+    su NVIDIA (RESEARCH). Test: `full_queue_skips_frames_without_blocking_or_failing`.

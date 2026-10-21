@@ -28,7 +28,7 @@ mod yuv;
 use cliprec_core::config::{CodecChoice, ColorFormat, EncoderAdvanced, OutputResolution, VideoConfig, default_max_bitrate_kbps};
 use cliprec_core::{EncodeError, GpuDevice, VideoCodec};
 
-pub use ffi::HwEncoder as Encoder;
+pub use ffi::{Encoded, HwEncoder as Encoder};
 pub use worker::PacketSink;
 
 /// Famiglia di encoder.

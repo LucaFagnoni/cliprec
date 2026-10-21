@@ -7,7 +7,7 @@
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -16,6 +16,7 @@ use cliprec_buffer::{BufferConfig, ReplayBuffer};
 
 use crate::i18n::{K, tr};
 use cliprec_core::config::{Config, default_max_bitrate_kbps};
+use cliprec_encode::Encoded;
 use cliprec_core::{
     AppCommand, AudioTrackSink, ClipKind, EncodeError, EngineEvent, EngineStatus, GpuDevice, GpuFrame, QpcTime,
     SourceState, VideoSource,
@@ -161,13 +162,16 @@ pub struct Session {
     /// `false` dopo lo stop: un thread di apertura dell'encoder ancora in corso non deve più toccare
     /// il buffer (lo prenderà la sessione nuova con i suoi parametri).
     alive: Arc<Mutex<bool>>,
+    /// Frame saltati perché la coda dell'encoder era piena (GPU satura): contano come persi.
+    skipped: Arc<AtomicU64>,
     /// Prossimo tentativo di riavviare il video assente o in errore, e attesa attuale.
     video_retry: (Instant, Duration),
     events: Sender<EngineEvent>,
     /// Ultimo stato visto per sorgente, per avvisare solo quando cambia.
     states: Vec<(String, SourceState)>,
-    /// fps effettivi: ultimo campione (istante, frame consegnati, tick persi) e valore calcolato (m23).
-    fps_sample: (Instant, u64, u64),
+    /// fps effettivi: ultimo campione (istante, frame consegnati, tick persi, frame saltati) e valore
+    /// calcolato (m23).
+    fps_sample: (Instant, u64, u64, u64),
     fps_effective: f64,
 }
 
@@ -226,7 +230,8 @@ impl Session {
             video_retry: (Instant::now(), Duration::from_secs(5)),
             events: events.clone(),
             states: Vec::new(),
-            fps_sample: (Instant::now(), 0, 0),
+            fps_sample: (Instant::now(), 0, 0, 0),
+            skipped: Arc::new(AtomicU64::new(0)),
             fps_effective: 0.0,
         };
         if config.video.enabled {
@@ -270,6 +275,7 @@ impl Session {
             self.events.clone(),
             self.restart.clone(),
             self.alive.clone(),
+            self.skipped.clone(),
         );
         source.start(self.config.video.fps, on_frame)?;
         self.video = Some(source);
@@ -388,7 +394,7 @@ impl Session {
             encoder: self.encoder_name.lock().map(|n| n.clone()).unwrap_or_default(),
             source: self.video.as_ref().map(|v| v.describe()).unwrap_or_default(),
             fps: if self.video.is_some() { self.fps_effective } else { 0.0 },
-            frames_dropped: capture.frames_dropped,
+            frames_dropped: capture.frames_dropped + self.skipped.load(Ordering::Relaxed),
             saving: self.shared.saving.load(Ordering::SeqCst),
             recent_clips: self.shared.recent.lock().map(|r| r.iter().cloned().collect()).unwrap_or_default(),
             last_error: if stats.memory_limited {
@@ -414,12 +420,16 @@ impl Session {
     fn measure(&mut self) {
         let Some(v) = &self.video else { return };
         let stats = v.stats();
-        let (t0, d0, l0) = self.fps_sample;
+        let skipped = self.skipped.load(Ordering::Relaxed);
+        let (t0, d0, p0, s0) = self.fps_sample;
         if t0.elapsed() >= Duration::from_secs(1) {
+            // Tick scaduti = consegnati + persi dal pacer; codificati = consegnati − saltati con la
+            // coda dell'encoder piena.
             let delivered = stats.frames_delivered.saturating_sub(d0);
-            let due = delivered + stats.frames_dropped.saturating_sub(l0);
-            self.fps_effective = if due == 0 { 0.0 } else { f64::from(self.config.video.fps) * delivered as f64 / due as f64 };
-            self.fps_sample = (Instant::now(), stats.frames_delivered, stats.frames_dropped);
+            let due = delivered + stats.frames_dropped.saturating_sub(p0);
+            let encoded = delivered.saturating_sub(skipped.saturating_sub(s0));
+            self.fps_effective = if due == 0 { 0.0 } else { f64::from(self.config.video.fps) * encoded as f64 / due as f64 };
+            self.fps_sample = (Instant::now(), stats.frames_delivered, stats.frames_dropped, skipped);
         }
     }
 
@@ -660,6 +670,7 @@ fn video_callback(
     events: Sender<EngineEvent>,
     restart: Arc<AtomicBool>,
     alive: Arc<Mutex<bool>>,
+    skipped: Arc<AtomicU64>,
 ) -> Box<dyn FnMut(&GpuFrame) + Send> {
     let video_cfg = config.video.clone();
     let fps = config.video.fps.max(1);
@@ -672,6 +683,8 @@ fn video_callback(
     let mut last_error = String::new();
     let mut next_index: Option<u64> = None;
     let mut encoding_since: Option<Instant> = None;
+    // Frame saltati raccolti per il log, al più ogni 10 s.
+    let mut skip_report: (u64, Option<Instant>) = (0, None);
     Box::new(move |frame: &GpuFrame| {
         // L'attesa torna a 1 s solo dopo 10 s di codifica riuscita, non a ogni apertura.
         if encoding_since.is_some_and(|t| t.elapsed() > Duration::from_secs(10)) {
@@ -752,6 +765,7 @@ fn video_callback(
         // oltre, il buco resta nel file come salto di timestamp.
         let missing = next_index.map_or(0, |n| frame.index.saturating_sub(n)).min(u64::from(fps / 4));
         let mut result = Ok(());
+        let mut skips = 0u64;
         for k in (1..=missing).rev() {
             let filler = GpuFrame {
                 texture: frame.texture.clone(),
@@ -761,11 +775,25 @@ fn video_callback(
                 index: frame.index - k,
                 repeated: true,
             };
-            result = result.and_then(|()| enc.encode(&filler));
+            result = result.and_then(|()| enc.encode(&filler)).map(|e| skips += u64::from(e == Encoded::Skipped));
         }
         let result = result.and_then(|()| enc.encode(frame));
+        if let Ok(Encoded::Skipped) = result {
+            skips += 1;
+        }
+        if skips > 0 {
+            skipped.fetch_add(skips, Ordering::Relaxed);
+            skip_report.0 += skips;
+            skip_report.1.get_or_insert_with(Instant::now);
+        }
+        if skip_report.1.is_some_and(|t| t.elapsed() >= Duration::from_secs(10)) {
+            tracing::warn!(frame_saltati = skip_report.0, "coda dell'encoder piena negli ultimi 10 s: GPU satura, frame saltati");
+            skip_report = (0, None);
+        }
         match result {
-            Ok(()) => next_index = Some(frame.index + 1),
+            // Saltato: `next_index` resta, e il frame dopo riempie il buco ripetendo il precedente.
+            Ok(Encoded::Skipped) => {}
+            Ok(Encoded::Queued) => next_index = Some(frame.index + 1),
             Err(e) => {
                 let name = enc.params().encoder_name.clone();
                 if matches!(e, EncodeError::DeviceLost) {

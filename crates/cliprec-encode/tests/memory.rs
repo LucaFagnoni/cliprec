@@ -63,7 +63,9 @@ fn stages(gpu: &GpuDevice, name: &str) -> (f64, f64, f64, f64) {
     for i in 0..120u64 {
         let pts = QpcTime(1_000_000_000).add_hns(i as i64 * HNS_PER_SEC / 60);
         let frame = GpuFrame { texture: tex.clone(), width: 1920, height: 1080, pts, index: i, repeated: false };
-        enc.encode(&frame).unwrap();
+        while enc.encode(&frame).unwrap() == cliprec_encode::Encoded::Skipped {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
     }
     enc.flush().unwrap();
     let fps = 120.0 / t0.elapsed().as_secs_f64();
