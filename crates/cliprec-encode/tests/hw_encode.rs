@@ -22,6 +22,8 @@ use windows::Win32::Graphics::Direct3D11::{
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
 use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1};
+// CREATE_NO_WINDOW (0x0800_0000) sui processi di prova: nessuna finestra di console.
+use std::os::windows::process::CommandExt as _;
 
 const FPS: u32 = 60;
 const FRAMES: u64 = 180;
@@ -188,7 +190,7 @@ fn check_packets(pkts: &[Pkt], codec: &str) {
 
 fn ffprobe(path: &PathBuf) -> String {
     let ffmpeg = std::env::var("FFMPEG_TOOLS_DIR").unwrap_or_else(|_| "D:/Repositories/cliprec/third_party/ffmpeg".into());
-    let out = Command::new(PathBuf::from(ffmpeg).join("bin").join("ffprobe.exe"))
+    let out = Command::new(PathBuf::from(ffmpeg).join("bin").join("ffprobe.exe")).creation_flags(0x0800_0000)
         .args(["-v", "error", "-count_frames", "-select_streams", "v:0"])
         .args(["-show_entries", "stream=codec_name,width,height,nb_read_frames", "-of", "csv=p=0"])
         .arg(path)
@@ -205,7 +207,7 @@ fn ffprobe(path: &PathBuf) -> String {
 /// su un campo piatto e ripete un frame di riferimento, anche successivo: misurato fino a 4.
 fn check_colors(path: &PathBuf, w: u32, h: u32, lag: usize, tol: i32) {
     let ffmpeg = std::env::var("FFMPEG_TOOLS_DIR").unwrap_or_else(|_| "D:/Repositories/cliprec/third_party/ffmpeg".into());
-    let out = Command::new(PathBuf::from(ffmpeg).join("bin").join("ffmpeg.exe"))
+    let out = Command::new(PathBuf::from(ffmpeg).join("bin").join("ffmpeg.exe")).creation_flags(0x0800_0000)
         .args(["-v", "error", "-i"])
         .arg(path)
         .args(["-vf", &format!("crop=2:2:{}:{}", w / 2, h / 2), "-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
@@ -261,7 +263,7 @@ fn write_ivf(name: &str, w: u32, h: u32, extradata: &[u8], pkts: &[Pkt]) -> Path
 /// Indici dei frame decodificati marcati come chiave da ffprobe.
 fn probe_key_frames(path: &PathBuf) -> Vec<usize> {
     let ffmpeg = std::env::var("FFMPEG_TOOLS_DIR").unwrap_or_else(|_| "D:/Repositories/cliprec/third_party/ffmpeg".into());
-    let out = Command::new(PathBuf::from(ffmpeg).join("bin").join("ffprobe.exe"))
+    let out = Command::new(PathBuf::from(ffmpeg).join("bin").join("ffprobe.exe")).creation_flags(0x0800_0000)
         .args(["-v", "error", "-select_streams", "v:0", "-show_entries", "frame=key_frame", "-of", "csv=p=0"])
         .arg(path)
         .output()
@@ -592,7 +594,7 @@ fn red_line_bleed(color_format: cliprec_core::config::ColorFormat) -> Option<(i3
     let path = write_stream(&format!("righe-rosse-{color_format:?}.hevc"), &extradata, &pkts);
     let ffmpeg = std::env::var("FFMPEG_TOOLS_DIR").unwrap_or_else(|_| "D:/Repositories/cliprec/third_party/ffmpeg".into());
     let bin = PathBuf::from(ffmpeg).join("bin");
-    let out = Command::new(bin.join("ffmpeg.exe")).args(["-v", "error", "-i"]).arg(&path).args(["-f", "rawvideo", "-pix_fmt", "rgb24", "-"]).output().unwrap();
+    let out = Command::new(bin.join("ffmpeg.exe")).creation_flags(0x0800_0000).args(["-v", "error", "-i"]).arg(&path).args(["-f", "rawvideo", "-pix_fmt", "rgb24", "-"]).output().unwrap();
     assert!(out.status.success(), "ffmpeg: {}", String::from_utf8_lossy(&out.stderr));
     let size = (w * h * 3) as usize;
     let last = &out.stdout[out.stdout.len() - size..];
@@ -604,7 +606,7 @@ fn red_line_bleed(color_format: cliprec_core::config::ColorFormat) -> Option<(i3
             line = line.min(red(x + 1, y));
         }
     }
-    let probe = Command::new(bin.join("ffprobe.exe"))
+    let probe = Command::new(bin.join("ffprobe.exe")).creation_flags(0x0800_0000)
         .args(["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=pix_fmt", "-of", "csv=p=0"])
         .arg(&path)
         .output()
@@ -678,7 +680,7 @@ fn repeated_frames_skip_conversion(gpu: &GpuDevice, encoder: &str, file: &str) {
         _ => write_stream(file, &params.extradata, &pkts),
     };
     let ffmpeg = std::env::var("FFMPEG_TOOLS_DIR").unwrap_or_else(|_| "D:/Repositories/cliprec/third_party/ffmpeg".into());
-    let out = Command::new(PathBuf::from(ffmpeg).join("bin").join("ffmpeg.exe"))
+    let out = Command::new(PathBuf::from(ffmpeg).join("bin").join("ffmpeg.exe")).creation_flags(0x0800_0000)
         .args(["-v", "error", "-i"])
         .arg(&path)
         .args(["-vf", &format!("crop=2:2:{}:{}", w / 2, h / 2), "-f", "rawvideo", "-pix_fmt", "rgb24", "-"])

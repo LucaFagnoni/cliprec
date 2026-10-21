@@ -1247,6 +1247,8 @@ fn private_bytes() -> usize {
 
 #[cfg(test)]
 mod tests {
+    // CREATE_NO_WINDOW (0x0800_0000) sui processi di prova: nessuna finestra di console.
+    use std::os::windows::process::CommandExt as _;
     use std::thread::JoinHandle;
 
     use super::*;
@@ -2160,7 +2162,7 @@ video_seconds = = 30").unwrap();
         // Energia a 1 kHz e a 1,5 kHz (Goertzel) della prima traccia audio di ciascuna clip.
         let energy = |path: &std::path::Path, f: f64| {
             let ffmpeg = std::env::var("FFMPEG_TOOLS_DIR").unwrap_or_else(|_| "D:/Repositories/cliprec/third_party/ffmpeg".into());
-            let pcm = std::process::Command::new(std::path::Path::new(&ffmpeg).join("bin").join("ffmpeg.exe"))
+            let pcm = std::process::Command::new(std::path::Path::new(&ffmpeg).join("bin").join("ffmpeg.exe")).creation_flags(0x0800_0000)
                 .args(["-v", "error", "-i"])
                 .arg(path)
                 .args(["-map", "0:a:0", "-ac", "1", "-ar", "48000", "-f", "f32le", "-"])

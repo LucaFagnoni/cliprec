@@ -11,6 +11,8 @@ use cliprec_core::time::frames_to_hns;
 use cliprec_core::{AudioTrackSink, ClipKind, HNS_PER_SEC, PacketRef, QpcTime, VideoCodec, VideoStreamParams};
 use cliprec_mux::{VideoClipOptions, write_audio_clip, write_video_clip};
 use serde_json::Value;
+// CREATE_NO_WINDOW (0x0800_0000) sui processi di prova: nessuna finestra di console.
+use std::os::windows::process::CommandExt as _;
 
 const FPS: i64 = 30;
 const W: i32 = 320;
@@ -66,7 +68,7 @@ fn encoded(sw: Sw) -> &'static Encoded {
         let bin = Path::new(option_env!("FFMPEG_TOOLS_DIR").unwrap_or(r"D:\Repositories\cliprec\third_party\ffmpeg")).join("bin");
         let file = out_dir().join(format!("sorgente-{name}.nut"));
         let src = format!("testsrc2=size={W}x{H}:rate={FPS}");
-        let st = Command::new(bin.join("ffmpeg.exe"))
+        let st = Command::new(bin.join("ffmpeg.exe")).creation_flags(0x0800_0000)
             .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-f", "lavfi", "-i", &src])
             .args(["-frames:v", &FRAMES.to_string(), "-pix_fmt", "yuv420p", "-c:v", name])
             .args(["-g", &FPS.to_string(), "-bf", "0", "-b:v", "1M"])
@@ -75,7 +77,7 @@ fn encoded(sw: Sw) -> &'static Encoded {
             .status()
             .unwrap();
         assert!(st.success(), "ffmpeg {name}");
-        let out = Command::new(bin.join("ffprobe.exe"))
+        let out = Command::new(bin.join("ffprobe.exe")).creation_flags(0x0800_0000)
             .args(["-v", "error", "-show_streams", "-show_packets", "-show_data", "-of", "json"])
             .arg(&file)
             .output()
@@ -162,7 +164,7 @@ fn filled_buffer_with(sw: Sw) -> ReplayBuffer {
 fn ffprobe(path: &Path, extra: &[&str]) -> Value {
     let dir = option_env!("FFMPEG_TOOLS_DIR").unwrap_or(r"D:\Repositories\cliprec\third_party\ffmpeg");
     let exe = Path::new(dir).join("bin").join("ffprobe.exe");
-    let out = Command::new(exe)
+    let out = Command::new(exe).creation_flags(0x0800_0000)
         .args(["-v", "error", "-show_streams", "-show_format", "-of", "json"])
         .args(extra)
         .arg(path)
@@ -175,7 +177,7 @@ fn ffprobe(path: &Path, extra: &[&str]) -> Value {
 /// Decodifica con ffmpeg in PCM s32 interleaved.
 fn decode_s32(path: &Path) -> Vec<i32> {
     let dir = option_env!("FFMPEG_TOOLS_DIR").unwrap_or(r"D:\Repositories\cliprec\third_party\ffmpeg");
-    let out = Command::new(Path::new(dir).join("bin").join("ffmpeg.exe"))
+    let out = Command::new(Path::new(dir).join("bin").join("ffmpeg.exe")).creation_flags(0x0800_0000)
         .args(["-v", "error", "-i"])
         .arg(path)
         .args(["-f", "s32le", "-acodec", "pcm_s32le", "-"])
