@@ -519,8 +519,8 @@ impl Watch {
         // sono le schermate di caricamento, e passare a DDA e tornare indietro a ogni caricamento
         // costa frame e avvisi per niente.
         let signal = fullscreen && d3d_fullscreen();
-        let monitor = matches!(r, Resolved::Monitor(_));
-        let exclusive = looks_exclusive(monitor, frames_bad, signal, self.health.failing(now, EXCLUSIVE_AFTER));
+        let on_monitor = matches!(r, Resolved::Monitor(_));
+        let exclusive = looks_exclusive(on_monitor, frames_bad, signal, self.health.failing(now, EXCLUSIVE_AFTER));
         let Some(to_dda) = exclusive_switch(switched, exclusive, fullscreen) else { return };
         // Un monitor già su DDA (preferito o ripiego) vede anche lo schermo intero esclusivo.
         if (to_dda && on_dda) || now < self.switch_retry {
