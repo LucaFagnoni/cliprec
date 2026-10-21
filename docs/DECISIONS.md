@@ -313,3 +313,9 @@ Le voci [DEFAULT] e [PROPOSTA] di SPEC.md valgono come decise; qui ci sono quell
     (THREAD_PRIORITY_HIGHEST se non disponibile); (5) la ricerca dei codec all'avvio usa un device
     suo. Gli fps effettivi nello stato sono fps scelti × tick consegnati ÷ tick scaduti: 60,0 se
     non se ne perde nessuno (prima 59,9 per l'arrotondamento su finestre di poco più di 1 s).
+51. **Niente compilazione incrementale in debug** (21 ottobre, Luca vedeva calare lo spazio su D:).
+    `target` era arrivato a 93,9 GB in pochi giorni di build e test: 44,9 GB di cache incrementale in
+    `target/debug/incremental` (una copia nuova a ogni modifica, mai tolta) e 32,7 GB di librerie in
+    `target/debug/deps`. ClipRec in esecuzione su D: scrive solo le clip salvate. `cargo clean --profile
+    dev` e `cargo clean --release` (non `cargo clean`: cancellerebbe `target/dist`, da cui gira il
+    ClipRec di Luca) e `[profile.dev] incremental = false`. Da ripetere ogni tanto le due pulizie.

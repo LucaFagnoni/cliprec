@@ -46,6 +46,11 @@ unwrap_used = "warn"
 expect_used = "warn"
 undocumented_unsafe_blocks = "warn"
 
+# Niente compilazione incrementale in debug: la sua cache in target/debug/incremental cresce a ogni
+# modifica senza mai svuotarsi (45 GB in pochi giorni, DECISIONS 51). Costa qualche secondo a build.
+[profile.dev]
+incremental = false
+
 [profile.release]
 lto = "fat"
 codegen-units = 1
