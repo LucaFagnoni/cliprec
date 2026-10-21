@@ -10,9 +10,10 @@ use crate::time::QpcTime;
 /// Un frame video sulla GPU, già a frequenza costante.
 ///
 /// La texture è `DXGI_FORMAT_B8G8R8A8_UNORM`, vive sul [`crate::GpuDevice`] della sessione ed è
-/// della dimensione della sorgente (che può cambiare tra un frame e l'altro). Resta valida solo
-/// durante la chiamata a [`FrameCallback`]: chi la riceve deve finire di leggerla (o accodarne
-/// la copia sul contesto immediato) prima di tornare.
+/// della dimensione della sorgente (che può cambiare tra un frame e l'altro). Senza `hold` resta
+/// valida solo durante la chiamata a [`FrameCallback`]: chi la riceve deve finire di leggerla (o
+/// accodarne la copia sul contesto immediato) prima di tornare. Con `hold` resta valida finché vive
+/// una sua copia: chi la usa più tardi (la conversione su un altro thread) la clona.
 pub struct GpuFrame {
     /// Grande almeno `width`×`height`: il contenuto è il rettangolo in alto a sinistra (le superfici
     /// di WGC, consegnate senza copia, possono essere più grandi del contenuto).
@@ -25,6 +26,19 @@ pub struct GpuFrame {
     pub index: u64,
     /// `true` se il pacer ha ripetuto l'ultimo frame perché non ne era arrivato uno nuovo.
     pub repeated: bool,
+    /// Finché ne vive una copia, la sorgente non riscrive né restituisce la superficie di `texture`.
+    pub hold: Option<FrameHold>,
+}
+
+/// Prestito della superficie di un [`GpuFrame`] oltre la callback; lo rilascia l'ultima copia.
+#[derive(Clone)]
+pub struct FrameHold(#[allow(dead_code)] Arc<dyn Send + Sync>);
+
+impl FrameHold {
+    /// `guard` rilascia la superficie quando viene distrutto.
+    pub fn new(guard: impl Send + Sync + 'static) -> Self {
+        Self(Arc::new(guard))
+    }
 }
 
 /// Chiamata dal thread del pacer a ogni tick, a frequenza costante.

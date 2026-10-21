@@ -338,3 +338,28 @@ Le voci [DEFAULT] e [PROPOSTA] di SPEC.md valgono come decise; qui ci sono quell
     riempitivo saltato e salta anche il frame; un frame saltato fa comunque avanzare `next_index` (il
     buco resta nel file come pausa) e conta una volta sola nei frame persi. Test:
     `full_queue_never_starves_new_frames`.
+54. **Monitor: cambio a Desktop Duplication solo con il segnale di Windows** (22 ottobre, dopo la
+    0.1.14 in gioco). I frame neri e fermi sul monitor sono contenuto vero (schermate di
+    caricamento): facevano passare a DDA e tornare indietro a ogni caricamento, con qualche frame
+    perso a ogni cambio, e mostravano un avviso. Ora su un monitor si passa a DDA solo quando
+    Windows segnala lo schermo intero esclusivo (`looks_exclusive`, QUNS); niente avviso dei frame
+    neri. Test: `monitor_switches_only_with_the_windows_signal`.
+55. **Coda dell'encoder da 6 a 12 frame (200 ms a 60 fps)** (22 ottobre). Assorbe i picchi della
+    GPU in gioco che facevano saltare frame. Ogni frame in coda tiene una superficie dell'encoder
+    (circa 3 MB a 1080p 4:2:0, 6 MB in 4:4:4); il pool fisso di QSV è dimensionato sulla coda
+    (coda + 8).
+56. **Conversione fuori dal pacer** (22 ottobre). Nel log in gioco restavano tick persi con la
+    callback del pacer a 35-63 ms: `VideoProcessorBlt` (BGRA→NV12) blocca nel driver quando la GPU
+    è satura. Ora `Encoder` è un front sul thread del pacer (pts, contatori, decisione di saltare) e
+    la conversione la fa il thread `cliprec-convert`, proprietario di `HwEncoder`, che poi accoda
+    all'encoder. Il frame viaggia con un prestito della superficie (`GpuFrame::hold`, nuovo in
+    `cliprec-core`): la cattura non riscrive né restituisce al pool di WGC uno slot prestato. Il
+    triplo buffer regge un prestito oltre a quello del pacer, quindi si converte un frame alla
+    volta: con una conversione in corso un frame nuovo si salta (come con la coda piena, DECISIONS
+    52), uno ripetuto passa e rimanda la superficie già convertita. Un frame senza `hold` (test,
+    sorgenti di prova) si converte prima che `encode` torni, come prima. Test:
+    `frames_with_hold_are_converted_off_the_caller_thread`, `slot_in_use_is_never_written`.
+57. **Il buffer restituisce i blocchi liberi da 2 minuti** (22 ottobre, Luca vedeva 437 MiB dopo un
+    picco di bitrate). I blocchi dell'arena liberi e mai riusati da 2 minuti si sbloccano
+    (VirtualUnlock) e si liberano, tranne due tenuti pronti; se il bitrate risale si riallocano sul
+    thread dell'encoder. Test: `idle_free_chunks_are_given_back`.

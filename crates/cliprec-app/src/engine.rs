@@ -818,6 +818,7 @@ fn fill_and_encode(
             pts: frame.pts.add_hns(-(k as i64) * cliprec_core::HNS_PER_SEC / i64::from(fps)),
             index: frame.index - k,
             repeated: true,
+            hold: frame.hold.clone(),
         };
         if encode(&filler)? == Encoded::Skipped {
             return Ok(Encoded::Skipped);
@@ -1572,6 +1573,7 @@ mod tests {
                             pts: f.pts,
                             index: f.index,
                             repeated: f.repeated,
+                            hold: None,
                         };
                         on_frame(&small);
                     } else {
@@ -2155,7 +2157,7 @@ video_seconds = = 30").unwrap();
             if index % 5 == 4 {
                 continue;
             }
-            let frame = GpuFrame { texture: tex.clone(), width: 64, height: 64, pts: QpcTime(index as i64 * 166_667), index, repeated: false };
+            let frame = GpuFrame { texture: tex.clone(), width: 64, height: 64, pts: QpcTime(index as i64 * 166_667), index, repeated: false, hold: None };
             let r = fill_and_encode(next_index, &frame, 60, |f| {
                 calls += 1;
                 // Un posto libero ogni 4 chiamate: l'encoder è indietro.

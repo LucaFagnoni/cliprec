@@ -30,6 +30,6 @@ pub use gpu::{GpuDevice, GpuError};
 pub use status::{AppCommand, EngineEvent, EngineStatus, SourceError, SourceState};
 pub use time::{HNS_PER_SEC, QpcTime};
 pub use video::{
-    CaptureStats, EncodeError, EncodedPacket, FrameCallback, GpuFrame, PacketData, PacketRef,
+    CaptureStats, EncodeError, EncodedPacket, FrameCallback, FrameHold, GpuFrame, PacketData, PacketRef,
     VideoCodec, VideoSource, VideoStreamParams,
 };

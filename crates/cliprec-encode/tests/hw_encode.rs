@@ -144,6 +144,7 @@ fn run(gpu: &GpuDevice, enc: &mut Encoder, sizes: &[(u32, u32)], noise: bool) ->
             pts: start.add_hns(i as i64 * HNS_PER_SEC / i64::from(FPS)),
             index: i,
             repeated: false,
+            hold: None,
         };
         encode(enc, &frame);
     }
@@ -586,7 +587,7 @@ fn red_line_bleed(color_format: cliprec_core::config::ColorFormat) -> Option<(i3
     let collected = collect(&mut enc);
     let start = QpcTime(1_000_000_000);
     for i in 0..30u64 {
-        let frame = GpuFrame { texture: tex.clone(), width: w, height: h, pts: start.add_hns(i as i64 * HNS_PER_SEC / 60), index: i, repeated: false };
+        let frame = GpuFrame { texture: tex.clone(), width: w, height: h, pts: start.add_hns(i as i64 * HNS_PER_SEC / 60), index: i, repeated: false, hold: None };
         encode(&mut enc, &frame);
     }
     enc.flush().unwrap();
@@ -670,6 +671,7 @@ fn repeated_frames_skip_conversion(gpu: &GpuDevice, encoder: &str, file: &str) {
             pts: QpcTime(1_000_000_000).add_hns(i as i64 * HNS_PER_SEC / i64::from(FPS)),
             index: i,
             repeated,
+            hold: None,
         };
         encode(&mut enc, &frame);
     }

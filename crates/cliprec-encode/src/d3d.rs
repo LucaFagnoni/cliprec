@@ -187,8 +187,7 @@ impl Converter {
 
     /// `true` se il device è stato rimosso (driver aggiornato o reset, TDR).
     pub(crate) fn device_removed(&self) -> bool {
-        // SAFETY: chiamata COM senza parametri su un'interfaccia valida.
-        unsafe { self.device.GetDeviceRemovedReason() }.is_err()
+        device_removed(&self.device)
     }
 
     /// Copia l'ultimo frame convertito (con [`Output::Cpu`]) nella texture leggibile, la mappa e
@@ -370,6 +369,12 @@ impl Converter {
             })
         }
     }
+}
+
+/// D3D11 dice che il device è perso.
+pub(crate) fn device_removed(device: &ID3D11Device) -> bool {
+    // SAFETY: chiamata COM senza parametri su un'interfaccia valida.
+    unsafe { device.GetDeviceRemovedReason() }.is_err()
 }
 
 #[cfg(test)]

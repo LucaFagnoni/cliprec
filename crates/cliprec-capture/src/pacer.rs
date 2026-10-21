@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use cliprec_core::{CaptureStats, FrameCallback, GpuDevice, GpuFrame, HNS_PER_SEC, QpcTime, SourceError, SourceState};
+use cliprec_core::{CaptureStats, FrameCallback, FrameHold, GpuDevice, GpuFrame, HNS_PER_SEC, QpcTime, SourceError, SourceState};
 use windows::Win32::Foundation::{CloseHandle, E_POINTER, HANDLE};
 use windows::Win32::Graphics::Direct3D11::{
     D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, ID3D11RenderTargetView,
@@ -86,8 +86,9 @@ struct SlotsInner {
     slots: [Option<Slot>; 3],
     /// Slot dell'ultimo frame pubblicato.
     latest: Option<usize>,
-    /// Slot che il pacer sta consegnando alla callback: la cattura non ci scrive.
-    in_use: Option<usize>,
+    /// Prestiti attivi per slot (il pacer durante la callback, la conversione dopo): la cattura non
+    /// scrive negli slot prestati e non restituisce i loro frame WGC.
+    holds: [u32; 3],
     /// Numero di frame pubblicati: se non cambia tra due tick, il frame è ripetuto.
     seq: u64,
     /// `true` dopo il primo frame vero (non segnaposto).
@@ -95,20 +96,41 @@ struct SlotsInner {
 }
 
 impl SlotsInner {
-    /// Toglie dagli slot i frame WGC che non sono né l'ultimo né quello in consegna (si chiudono
-    /// quando `out` viene distrutto, fuori dal lock).
+    /// Toglie dagli slot i frame WGC che non sono né l'ultimo né prestati (si chiudono quando `out`
+    /// viene distrutto, fuori dal lock).
     fn take_stale_frames(&mut self, out: &mut [Option<Slot>]) {
-        let (latest, in_use) = (self.latest, self.in_use);
+        let latest = self.latest;
+        let holds = self.holds;
         for ((i, s), o) in self.slots.iter_mut().enumerate().zip(out) {
-            if Some(i) != latest && Some(i) != in_use && s.as_ref().is_some_and(|s| s.frame.is_some()) {
+            if Some(i) != latest && holds[i] == 0 && s.as_ref().is_some_and(|s| s.frame.is_some()) {
                 *o = s.take();
             }
         }
+    }
+
+    /// Uno slot in cui la cattura può scrivere: né l'ultimo pubblicato né prestato. Con tre slot, il
+    /// prestito del pacer e uno della conversione (che ne accetta un frame alla volta) uno c'è sempre.
+    fn writable(&self) -> Option<usize> {
+        (0..3).find(|&i| Some(i) != self.latest && self.holds[i] == 0)
+    }
+}
+
+/// Prestito di uno slot ([`FrameSlots::acquire`]), restituito alla distruzione dell'ultima copia del
+/// [`FrameHold`] che lo contiene.
+struct SlotHold {
+    slots: Arc<FrameSlots>,
+    index: usize,
+}
+
+impl Drop for SlotHold {
+    fn drop(&mut self) {
+        self.slots.release(self.index);
     }
 }
 
 /// L'ultimo frame preso in prestito dal pacer.
 struct Acquired {
+    index: usize,
     tex: ID3D11Texture2D,
     width: u32,
     height: u32,
@@ -165,9 +187,8 @@ impl FrameSlots {
         if !real && g.real {
             return Ok(()); // il segnaposto non copre mai un frame vero
         }
-        let (latest, in_use) = (g.latest, g.in_use);
-        // Con tre slot e al massimo due occupati, uno libero c'è sempre.
-        let i = (0..3).find(|&i| Some(i) != latest && Some(i) != in_use).unwrap_or(0);
+        // Tutti prestati (non dovrebbe succedere): il frame si perde e il pacer ripete l'ultimo.
+        let Some(i) = g.writable() else { return Ok(()) };
         // Mai la superficie di un frame WGC: è del pool, non nostra.
         let reuse = matches!(&g.slots[i], Some(s) if s.width == width && s.height == height && s.frame.is_none());
         if !reuse {
@@ -193,9 +214,14 @@ impl FrameSlots {
         let mut spent: [Option<Slot>; 4] = Default::default();
         {
             let mut g = lock(&self.inner);
-            let (latest, in_use) = (g.latest, g.in_use);
-            let i = (0..3).find(|&i| Some(i) != latest && Some(i) != in_use).unwrap_or(0);
-            spent[3] = g.slots[i].replace(Slot { tex, width, height, captured, frame: Some(frame) });
+            let slot = Slot { tex, width, height, captured, frame: Some(frame) };
+            // Tutti prestati (non dovrebbe succedere): il frame torna subito al pool.
+            let Some(i) = g.writable() else {
+                spent[3] = Some(slot);
+                drop(g);
+                return;
+            };
+            spent[3] = g.slots[i].replace(slot);
             g.latest = Some(i);
             g.seq += 1;
             g.real = true;
@@ -208,25 +234,31 @@ impl FrameSlots {
         lock(&self.inner).real
     }
 
-    /// Prende in prestito l'ultimo frame fino a [`Self::release`].
+    /// Prende in prestito l'ultimo frame fino a [`Self::release`] (di solito con un [`SlotHold`]).
     fn acquire(&self) -> Option<Acquired> {
         let mut g = lock(&self.inner);
         let i = g.latest?;
-        g.in_use = Some(i);
         let seq = g.seq;
-        g.slots[i].as_ref().map(|s| Acquired {
+        let acquired = g.slots[i].as_ref().map(|s| Acquired {
+            index: i,
             tex: s.tex.clone(),
             width: s.width,
             height: s.height,
             seq,
             captured: s.captured,
-        })
+        });
+        if acquired.is_some() {
+            g.holds[i] += 1;
+        }
+        acquired
     }
 
-    /// Il frame consegnato, se nel frattempo ne è arrivato uno nuovo, torna al pool al prossimo
-    /// `publish_frame`, sul thread della cattura: niente chiamate WinRT sul thread del pacer.
-    fn release(&self) {
-        lock(&self.inner).in_use = None;
+    /// Restituisce un prestito. Il frame WGC dello slot, se nel frattempo ne è arrivato uno nuovo,
+    /// torna al pool al prossimo `publish_frame`, sul thread della cattura: niente chiamate WinRT
+    /// su chi restituisce (il pacer o la conversione).
+    fn release(&self, index: usize) {
+        let mut g = lock(&self.inner);
+        g.holds[index] = g.holds[index].saturating_sub(1);
     }
 
     /// Esegue `f` sull'ultimo frame tenendo il lock: la cattura non può riscriverlo finché `f` non
@@ -385,7 +417,7 @@ impl Pacer {
         let flag = running.clone();
         let thread = std::thread::Builder::new()
             .name("cliprec-pacer".into())
-            .spawn(move || run(fps, &slots, &stats, options, on_frame, &flag))
+            .spawn(move || run(fps, slots, &stats, options, on_frame, &flag))
             .map_err(|e| SourceError::Failed(format!("thread del pacer: {e}")))?;
         Ok(Self { running, thread: Some(thread) })
     }
@@ -407,7 +439,7 @@ impl Drop for Pacer {
 
 fn run(
     fps: u32,
-    slots: &FrameSlots,
+    slots: Arc<FrameSlots>,
     stats: &Stats,
     options: PacerOptions,
     mut on_frame: FrameCallback,
@@ -467,7 +499,7 @@ fn run(
         drops.log_if_due();
         let pts = grid_pts(pts_start, tick, fps);
         if let Some(p) = prepare.as_mut() {
-            p(slots, pts, tick);
+            p(&slots, pts, tick);
         }
         let Some(a) = slots.acquire() else {
             stats.dropped.fetch_add(1, Ordering::Relaxed);
@@ -480,12 +512,14 @@ fn run(
             stats.latency.record(pts.hns_since(a.captured));
         }
         let (width, height) = (a.width, a.height);
-        let frame = GpuFrame { texture: a.tex, width, height, pts, index: tick, repeated };
+        // Il prestito dello slot passa al frame: chi lo usa dopo la callback (la conversione su un
+        // altro thread) ne tiene una copia e lo restituisce quando ha finito.
+        let hold = FrameHold::new(SlotHold { slots: slots.clone(), index: a.index });
+        let frame = GpuFrame { texture: a.tex, width, height, pts, index: tick, repeated, hold: Some(hold) };
         let began = Instant::now();
         let result = catch_unwind(AssertUnwindSafe(|| on_frame(&frame)));
         last_callback = began.elapsed();
         drop(frame);
-        slots.release();
         stats.delivered.fetch_add(1, Ordering::Relaxed);
         if repeated {
             stats.repeated.fetch_add(1, Ordering::Relaxed);
@@ -625,7 +659,8 @@ mod tests {
         let slots = FrameSlots::new(GpuDevice::create(None).unwrap());
         slots.publish_placeholder(64, 64).unwrap();
         assert!(!slots.has_real());
-        let held = slots.acquire().unwrap().tex;
+        let held_slot = slots.acquire().unwrap();
+        let held = held_slot.tex.clone();
         for _ in 0..5 {
             slots
                 .publish(64, 64, QpcTime(7), |t| {
@@ -641,7 +676,14 @@ mod tests {
         let a = slots.acquire().unwrap();
         assert_ne!(a.tex, held);
         assert_eq!((a.width, a.height, a.seq, a.captured), (32, 16, 7, QpcTime(9)));
-        slots.release();
+        // Due prestiti (il pacer e la conversione): la cattura ha ancora uno slot libero.
+        slots.publish(32, 16, QpcTime(11), |t| {
+            assert!(t != &held && t != &a.tex, "scritto uno slot prestato");
+            Ok(())
+        })
+        .unwrap();
+        slots.release(a.index);
+        slots.release(held_slot.index);
     }
 
     /// Il pacer aspetta il primo frame vero (fino a `first_frame_wait`) invece di consegnare subito

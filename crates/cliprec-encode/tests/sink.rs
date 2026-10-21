@@ -58,7 +58,7 @@ fn slow_sink_does_not_block_encode() {
     for i in 0..180u64 {
         // SAFETY: vista valida sul device del contesto, protetto per l'uso da più thread.
         unsafe { gpu.context.ClearRenderTargetView(rtv.as_ref().unwrap(), &[(i % 60) as f32 / 60.0, 0.2, 0.4, 1.0]) };
-        let frame = GpuFrame { texture: tex.clone(), width: 1280, height: 720, pts: QpcTime(1_000_000_000).add_hns(i as i64 * HNS_PER_SEC / 60), index: i, repeated: false };
+        let frame = GpuFrame { texture: tex.clone(), width: 1280, height: 720, pts: QpcTime(1_000_000_000).add_hns(i as i64 * HNS_PER_SEC / 60), index: i, repeated: false, hold: None };
         let began = Instant::now();
         enc.encode(&frame).unwrap();
         worst = worst.max(began.elapsed());
@@ -110,7 +110,7 @@ fn full_queue_skips_frames_without_blocking_or_failing() {
     let t0 = Instant::now();
     let (mut worst, mut skipped, mut queued_after) = (std::time::Duration::ZERO, 0, 0);
     for i in 0..90u64 {
-        let frame = GpuFrame { texture: tex.clone(), width: 1280, height: 720, pts: QpcTime(1_000_000_000).add_hns(i as i64 * HNS_PER_SEC / 60), index: i, repeated: false };
+        let frame = GpuFrame { texture: tex.clone(), width: 1280, height: 720, pts: QpcTime(1_000_000_000).add_hns(i as i64 * HNS_PER_SEC / 60), index: i, repeated: false, hold: None };
         let began = Instant::now();
         let outcome = enc.encode(&frame).unwrap();
         worst = worst.max(began.elapsed());
@@ -128,4 +128,59 @@ fn full_queue_skips_frames_without_blocking_or_failing() {
     assert!(skipped > 0, "il test deve riempire la coda");
     assert!(queued_after > 20, "dopo lo sblocco l'encoder deve riprendere: {queued_after}");
     assert!(worst < period, "encode ha aspettato: {worst:?}");
+}
+
+/// Miglioria C: con `hold` la conversione la fa il thread dell'encoder, non chi chiama `encode`
+/// (il pacer). Il prestito della superficie lo rilascia quel thread a conversione accodata, e dopo
+/// il flush nessun prestito resta aperto.
+#[test]
+fn frames_with_hold_are_converted_off_the_caller_thread() {
+    use cliprec_core::FrameHold;
+    use cliprec_encode::Encoded;
+    use std::thread::ThreadId;
+    struct Guard(Arc<Mutex<Vec<ThreadId>>>);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            self.0.lock().unwrap().push(std::thread::current().id());
+        }
+    }
+    let Some(gpu) = GpuDevice::create(None).ok() else { return };
+    let settings = EncoderSettings::from_config(&Default::default(), 1280, 720);
+    let mut enc = cliprec_encode::open_best(&gpu, &settings).unwrap();
+    let packets = Arc::new(Mutex::new(0u32));
+    let seen = packets.clone();
+    enc.set_sink(Box::new(move |_| *seen.lock().unwrap() += 1)).unwrap();
+    let desc = D3D11_TEXTURE2D_DESC {
+        Width: 1280,
+        Height: 720,
+        MipLevels: 1,
+        ArraySize: 1,
+        Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+        Usage: D3D11_USAGE_DEFAULT,
+        BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
+        ..Default::default()
+    };
+    let mut tex = None;
+    // SAFETY: descrittore e puntatore d'uscita locali.
+    unsafe { gpu.device.CreateTexture2D(&desc, None, Some(&mut tex)) }.unwrap();
+    let tex = tex.unwrap();
+    let released = Arc::new(Mutex::new(Vec::new()));
+    let period = std::time::Duration::from_secs(1) / FPS;
+    let mut queued = 0;
+    for i in 0..60u64 {
+        let hold = FrameHold::new(Guard(released.clone()));
+        let frame = GpuFrame { texture: tex.clone(), width: 1280, height: 720, pts: QpcTime(1_000_000_000).add_hns(i as i64 * HNS_PER_SEC / 60), index: i, repeated: false, hold: Some(hold) };
+        queued += u32::from(enc.encode(&frame).unwrap() == Encoded::Queued);
+        drop(frame);
+        std::thread::sleep(period);
+    }
+    enc.flush().unwrap();
+    let released = released.lock().unwrap();
+    let me = std::thread::current().id();
+    let elsewhere = released.iter().filter(|&&t| t != me).count();
+    eprintln!("{queued} frame accodati, {elsewhere} prestiti rilasciati dalla conversione");
+    assert_eq!(released.len(), 60, "prestiti rimasti aperti");
+    assert!(queued > 50 && elsewhere > 0, "{queued} accodati, {elsewhere} rilasciati altrove");
+    assert_eq!(*packets.lock().unwrap(), queued, "pacchetti persi");
 }

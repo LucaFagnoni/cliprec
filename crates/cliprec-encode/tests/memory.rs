@@ -62,7 +62,7 @@ fn stages(gpu: &GpuDevice, name: &str) -> (f64, f64, f64, f64) {
     let t0 = std::time::Instant::now();
     for i in 0..120u64 {
         let pts = QpcTime(1_000_000_000).add_hns(i as i64 * HNS_PER_SEC / 60);
-        let frame = GpuFrame { texture: tex.clone(), width: 1920, height: 1080, pts, index: i, repeated: false };
+        let frame = GpuFrame { texture: tex.clone(), width: 1920, height: 1080, pts, index: i, repeated: false, hold: None };
         while enc.encode(&frame).unwrap() == cliprec_encode::Encoded::Skipped {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }

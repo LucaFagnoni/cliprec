@@ -1,8 +1,7 @@
-//! Modulo FFI: thread dell'encoder. Il pacer converte il frame su una superficie dell'encoder e lo
-//! mette in coda; questo thread lo manda a FFmpeg, raccoglie i pacchetti e li consegna direttamente
-//! al sink (il buffer di replay): sul thread del pacer restano solo conversione e accodamento. Se
-//! l'encoder si ferma un attimo (GPU satura nei caricamenti) la coda assorbe fino a [`QUEUE`] frame
-//! invece di far perdere tick al pacer.
+//! Modulo FFI: thread dell'encoder. Il thread della conversione ([`crate::Encoder`]) converte il
+//! frame su una superficie dell'encoder e lo mette in coda; questo thread lo manda a FFmpeg,
+//! raccoglie i pacchetti e li consegna direttamente al sink (il buffer di replay). Se l'encoder si
+//! ferma un attimo (GPU satura nei caricamenti) la coda assorbe fino a [`QUEUE`] frame.
 //! Con la coda piena il pacer non aspetta: il frame si salta e il buco si riempie ripetendo il
 //! precedente; solo una coda ferma per [`STUCK`] è un guasto dell'encoder.
 //!
@@ -10,7 +9,7 @@
 //! sink in prestito.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, sync_channel};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -64,7 +63,7 @@ pub(crate) struct Stream {
     pub codec: VideoCodec,
 }
 
-/// Posto libero nella coda dell'encoder (un frame vuoto), da [`Worker::try_slot`].
+/// Posto libero nella coda dell'encoder (un frame vuoto), da [`Worker::wait_slot`].
 pub(crate) struct Slot(Ptr<ffi::AVFrame>);
 
 pub(crate) struct Worker {
@@ -74,6 +73,8 @@ pub(crate) struct Worker {
     /// Per restituire un posto non usato.
     free_back: SyncSender<Ptr<ffi::AVFrame>>,
     stop: Arc<AtomicBool>,
+    /// Posti liberi in coda, letti senza aspettare da chi decide se saltare un frame.
+    free_count: Arc<AtomicUsize>,
     thread: Option<JoinHandle<()>>,
     /// Tutti i frame della coda, liberati in Drop dopo la fine del thread.
     frames: Vec<*mut ffi::AVFrame>,
@@ -106,10 +107,12 @@ impl Worker {
         let stop = Arc::new(AtomicBool::new(false));
         let (ctx, pkt, flag) = (Ptr(ctx), Ptr(pkt), stop.clone());
         let free_back = free_tx.clone();
+        let free_count = Arc::new(AtomicUsize::new(QUEUE));
+        let counter = free_count.clone();
         let thread = std::thread::Builder::new().name("cliprec-encode".into()).spawn(move || {
             // SAFETY: pseudo-handle del thread corrente, sempre valida.
             let _ = unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL) };
-            run(ctx, pkt, stream, &jobs, &done_tx, &free_tx, &flag);
+            run(ctx, pkt, stream, &jobs, &done_tx, &free_tx, &counter, &flag);
         });
         let thread = match thread {
             Ok(t) => t,
@@ -121,7 +124,7 @@ impl Worker {
                 return Err(e);
             }
         };
-        Ok(Self { jobs: Some(jobs_tx), done, free, free_back, stop, thread: Some(thread), frames })
+        Ok(Self { jobs: Some(jobs_tx), done, free, free_back, stop, free_count, thread: Some(thread), frames })
     }
 
     /// Da qui i pacchetti vanno a `sink`, chiamato dal thread dell'encoder.
@@ -129,15 +132,24 @@ impl Worker {
         self.send(Job::Sink(sink))
     }
 
-    /// Un posto libero in coda, se c'è subito. Niente attese: con la coda piena (encoder indietro
-    /// perché la GPU è satura) il chiamante salta il frame invece di fermare il pacer.
-    pub fn try_slot(&self) -> Option<Slot> {
-        self.free.try_recv().ok().map(Slot)
+    /// Un posto libero, aspettandolo al più `timeout` (dal thread della conversione, non dal pacer,
+    /// che con la coda piena salta il frame guardando [`Self::free_count`]).
+    pub fn wait_slot(&self, timeout: Duration) -> Option<Slot> {
+        let slot = self.free.recv_timeout(timeout).ok().map(Slot)?;
+        self.free_count.fetch_sub(1, Ordering::Relaxed);
+        Some(slot)
     }
 
-    /// Restituisce un posto preso con [`Self::try_slot`] e non usato (conversione fallita).
+    /// Contatore dei posti liberi in coda, da leggere senza aspettare.
+    pub fn free_count(&self) -> Arc<AtomicUsize> {
+        self.free_count.clone()
+    }
+
+    /// Restituisce un posto preso con [`Self::wait_slot`] e non usato (conversione fallita).
     pub fn give_back(&self, slot: Slot) {
-        let _ = self.free_back.try_send(slot.0);
+        if self.free_back.try_send(slot.0).is_ok() {
+            self.free_count.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     /// Accoda nel posto `slot` un riferimento a `src` con il pts dato (`base` = istante del pts 0).
@@ -217,6 +229,7 @@ impl Drop for Worker {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run(
     ctx: Ptr<ffi::AVCodecContext>,
     pkt: Ptr<ffi::AVPacket>,
@@ -224,6 +237,7 @@ fn run(
     jobs: &Receiver<Job>,
     done: &SyncSender<Done>,
     free: &SyncSender<Ptr<ffi::AVFrame>>,
+    free_count: &AtomicUsize,
     stop: &AtomicBool,
 ) {
     let mut sink: PacketSink = Box::new(|_| {});
@@ -240,7 +254,9 @@ fn run(
                 let ret = if stop.load(Ordering::Acquire) { 0 } else { unsafe { ffi::avcodec_send_frame(ctx.0, f.0) } };
                 // SAFETY: l'encoder ha il suo riferimento; il nostro si toglie prima di restituire il frame.
                 unsafe { ffi::av_frame_unref(f.0) };
-                let _ = free.send(f);
+                if free.send(f).is_ok() {
+                    free_count.fetch_add(1, Ordering::Relaxed);
+                }
                 (ret, false)
             }
             // SAFETY: un frame nullo chiede lo svuotamento.

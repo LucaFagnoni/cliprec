@@ -20,6 +20,7 @@
 //! ```
 
 mod d3d;
+mod encoder;
 mod worker;
 mod ffi;
 mod nal;
@@ -28,7 +29,7 @@ mod yuv;
 use cliprec_core::config::{CodecChoice, ColorFormat, EncoderAdvanced, OutputResolution, VideoConfig, default_max_bitrate_kbps};
 use cliprec_core::{EncodeError, GpuDevice, VideoCodec};
 
-pub use ffi::{Encoded, HwEncoder as Encoder};
+pub use encoder::{Encoded, Encoder};
 pub use worker::PacketSink;
 
 /// Famiglia di encoder.
@@ -193,6 +194,7 @@ pub fn open(device: &GpuDevice, settings: &EncoderSettings, encoder_name: &str) 
             }
             other => Err(other),
         })?;
+    let enc = Encoder::start(enc, device.device.clone())?;
     tracing::info!(
         encoder = encoder_name,
         width = settings.width,
