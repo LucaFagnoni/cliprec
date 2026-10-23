@@ -499,15 +499,17 @@ impl Watch {
         };
         let frames_bad = monitor_bad
             || matches!(state, SourceState::Waiting(ref m) if m == crate::health::BLACK_MSG || m == crate::health::FROZEN_MSG);
-        self.stats.set_state(state);
-        self.exclusive_fullscreen(frames_bad, now);
+        // Se i frame neri o fermi fanno passare a Desktop Duplication (o tornare indietro), niente
+        // avviso: è il rimedio, e la cattura nuova parte subito.
+        let switched = self.exclusive_fullscreen(frames_bad, now);
+        self.stats.set_state(if switched { SourceState::Running } else { state });
         Ok(())
     }
 
     /// Passa a Desktop Duplication del monitor quando il bersaglio è a schermo intero esclusivo, e
-    /// torna alla cattura normale quando non lo è più ([`exclusive_switch`]).
-    fn exclusive_fullscreen(&mut self, frames_bad: bool, now: Instant) {
-        let Some((r, cap)) = &self.current else { return };
+    /// torna alla cattura normale quando non lo è più ([`exclusive_switch`]). `true` se ha cambiato.
+    fn exclusive_fullscreen(&mut self, frames_bad: bool, now: Instant) -> bool {
+        let Some((r, cap)) = &self.current else { return false };
         let (r, on_dda) = (*r, matches!(cap, Capture::Dda(_)));
         let (monitor, fullscreen, switched) = match r {
             Resolved::Window(h) => (window_monitor(h), is_foreground(h) && covers_monitor(h), on_dda),
@@ -521,15 +523,15 @@ impl Watch {
         let signal = fullscreen && d3d_fullscreen();
         let on_monitor = matches!(r, Resolved::Monitor(_));
         let exclusive = looks_exclusive(on_monitor, frames_bad, signal, self.health.failing(now, EXCLUSIVE_AFTER));
-        let Some(to_dda) = exclusive_switch(switched, exclusive, fullscreen) else { return };
+        let Some(to_dda) = exclusive_switch(switched, exclusive, fullscreen) else { return false };
         // Un monitor già su DDA (preferito o ripiego) vede anche lo schermo intero esclusivo.
         if (to_dda && on_dda) || now < self.switch_retry {
-            return;
+            return false;
         }
         let opened = if to_dda {
             match monitor {
                 Some(m) => DdaCapture::start(m, self.slots.clone(), self.stats.clone(), self.cursor).map(Capture::Dda),
-                None => return,
+                None => return false,
             }
         } else {
             self.open(r)
@@ -543,10 +545,12 @@ impl Watch {
                 self.current = Some((r, cap));
                 self.exclusive_dda = to_dda;
                 self.health.reset(now);
+                true
             }
             Err(e) => {
                 tracing::warn!("cambio di cattura per lo schermo intero non riuscito: {e}");
                 self.switch_retry = now + RETRY;
+                false
             }
         }
     }

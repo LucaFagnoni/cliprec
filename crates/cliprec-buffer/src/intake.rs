@@ -2,7 +2,7 @@
 //! traccia, senza allocare; un thread di compressione, non in tempo reale, la svuota nei blocchi
 //! FLAC. Snapshot e statistiche svuotano prima la coda, così non restano buchi.
 
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::thread::{JoinHandle, Thread};
 use std::time::Duration;
@@ -22,6 +22,9 @@ const QUEUE_SECS: usize = 2;
 const QUEUE_CHUNKS: usize = 2048;
 /// Attesa massima del compressore tra un risveglio e l'altro.
 const IDLE: Duration = Duration::from_millis(50);
+/// Al più un avviso del compressore in ritardo ogni 10 s: con il PC bloccato per un attimo ogni
+/// pezzo di ogni traccia lo ripeterebbe (centinaia di righe in un decimo di secondo).
+const LAG_WARN_HNS: i64 = 10 * cliprec_core::HNS_PER_SEC;
 
 struct QueueIn {
     samples: Producer<f32>,
@@ -64,6 +67,9 @@ pub(crate) struct Intake {
     keep_video_max_hns: i64,
     stop: AtomicBool,
     compressor: OnceLock<Thread>,
+    /// Pezzi compressi sul thread di cattura dall'ultimo avviso, e istante QPC dell'avviso.
+    lagged: AtomicU64,
+    lag_warned: AtomicI64,
 }
 
 impl Intake {
@@ -77,7 +83,25 @@ impl Intake {
             keep_video_max_hns,
             stop: AtomicBool::new(false),
             compressor: OnceLock::new(),
+            lagged: AtomicU64::new(0),
+            lag_warned: AtomicI64::new(i64::MIN),
         }
+    }
+
+    /// Avviso del compressore in ritardo, al più ogni [`LAG_WARN_HNS`] con il numero di pezzi.
+    /// Restituisce `true` se ha scritto.
+    fn warn_lag(&self) -> bool {
+        let pieces = self.lagged.fetch_add(1, Ordering::Relaxed) + 1;
+        let now = QpcTime::now().0;
+        let last = self.lag_warned.load(Ordering::Relaxed);
+        if now.saturating_sub(last) < LAG_WARN_HNS
+            || self.lag_warned.compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed).is_err()
+        {
+            return false;
+        }
+        self.lagged.store(0, Ordering::Relaxed);
+        tracing::warn!(pezzi = pieces, "compressore FLAC in ritardo: compressione sul thread di cattura");
+        true
     }
 
     pub fn flac_ok(&self) -> bool {
@@ -134,7 +158,7 @@ impl Intake {
                 }
             }
             if attempt == 0 {
-                tracing::warn!("compressore FLAC in ritardo: compressione sul thread di cattura");
+                self.warn_lag();
                 self.drain(slot);
             } else {
                 tracing::error!("coda audio piena: {frames} campioni persi");
@@ -188,4 +212,21 @@ impl Intake {
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Il PC bloccato per un attimo: centinaia di pezzi in ritardo, un solo avviso ogni 10 s.
+    #[test]
+    fn lag_warning_once_per_interval() {
+        let intake = Intake::new(None, 0, 0);
+        assert!(intake.warn_lag());
+        assert!((0..300).all(|_| !intake.warn_lag()));
+        assert_eq!(intake.lagged.load(Ordering::Relaxed), 300, "contati per il prossimo avviso");
+        intake.lag_warned.store(QpcTime::now().0 - LAG_WARN_HNS, Ordering::Relaxed);
+        assert!(intake.warn_lag());
+        assert_eq!(intake.lagged.load(Ordering::Relaxed), 0);
+    }
 }

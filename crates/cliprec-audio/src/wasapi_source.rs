@@ -451,8 +451,15 @@ impl Capture {
                     return Err(OpenError::Wait("dispositivo non attivo".into()));
                 }
                 // Un ingresso mono si apre mono e si copia su L e R a guadagno unitario.
-                let channels = match dev.get_device_format() {
-                    Ok(f) if input && f.get_nchannels() == 1 => 1,
+                let format = dev.get_device_format().ok();
+                tracing::info!(
+                    dispositivo = %dev.get_friendlyname().unwrap_or_default(),
+                    canali = format.as_ref().map_or(0, |f| f.get_nchannels()),
+                    hz = format.as_ref().map_or(0, |f| f.get_samplespersec()),
+                    "dispositivo audio aperto"
+                );
+                let channels = match format {
+                    Some(f) if input && f.get_nchannels() == 1 => 1,
                     _ => CHANNELS,
                 };
                 (dev.get_iaudioclient().map_err(classify)?, channels, Direction::Capture, None, MODE_ENDPOINT << 32)
