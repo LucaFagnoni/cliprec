@@ -226,7 +226,7 @@ fn show_levels(ui: &SettingsWindow, levels: &[(cliprec_core::config::AudioSource
                 .map(|(i, r)| {
                     let kind = model::row_kind(&r);
                     let peak = levels.iter().find(|(k, _)| *k == kind).map_or(0.0, |(_, p)| *p);
-                    model::meter_height(peak).max(prev.get(i).copied().unwrap_or(0.0) - 0.03)
+                    model::meter_height(peak).max(prev.get(i).copied().unwrap_or(0.0) - 0.06)
                 })
                 .collect();
             let model = ModelRc::from(Rc::new(VecModel::from(next.clone())));
@@ -650,13 +650,13 @@ fn main() -> anyhow::Result<()> {
     });
 
     // Pannello di stato: una richiesta Status al secondo su un thread, mai sul thread della UI; tra
-    // l'una e l'altra i livelli audio ogni 50 ms per gli indicatori di volume.
+    // l'una e l'altra i livelli audio ogni 100 ms per gli indicatori di volume.
     LAST_POLL_MS.store(now_ms(), Ordering::Relaxed);
     ui.set_status_text(pipe::offline_text(lang).into());
     let weak = ui.as_weak();
     std::thread::spawn(move || {
         loop {
-            for _ in 0..20 {
+            for _ in 0..10 {
                 let levels = match pipe::request(&IpcRequest::AudioLevels) {
                     Ok(IpcResponse::AudioLevels(l)) => l,
                     _ => Vec::new(),
@@ -664,7 +664,7 @@ fn main() -> anyhow::Result<()> {
                 if weak.upgrade_in_event_loop(move |ui| show_levels(&ui, &levels)).is_err() {
                     return;
                 }
-                std::thread::sleep(Duration::from_millis(50));
+                std::thread::sleep(Duration::from_millis(100));
             }
             let res = pipe::request(&IpcRequest::Status);
             let update = match pipe::request(&IpcRequest::UpdateStatus) {

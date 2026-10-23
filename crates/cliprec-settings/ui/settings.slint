@@ -471,7 +471,7 @@ component SourceList inherits VerticalLayout {
         HorizontalLayout {
             padding: 14px;
             spacing: 12px;
-            // Indicatore di volume: picco della sorgente negli ultimi 50 ms (0-1, scala in dB).
+            // Indicatore di volume: picco della sorgente negli ultimi 100 ms (0-1, scala in dB).
             Rectangle {
                 width: 6px;
                 border-radius: 3px;
@@ -480,8 +480,8 @@ component SourceList inherits VerticalLayout {
                     y: parent.height - self.height;
                     width: parent.width;
                     height: parent.height * root.levels[i];
-                    // Tra una lettura e l'altra (50 ms) la barra scorre invece di saltare.
-                    animate height { duration: 50ms; }
+                    // Tra una lettura e l'altra (100 ms) la barra scorre invece di saltare.
+                    animate height { duration: 100ms; }
                     border-radius: 3px;
                     background: root.levels[i] > 0.97 ? Theme.error : Theme.meter;
                 }
