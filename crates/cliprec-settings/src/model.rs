@@ -83,6 +83,23 @@ pub fn router_channels(outputs: &[(&str, &str)], default_output: Option<&str>, r
         .collect()
 }
 
+/// Cosa cattura una riga dell'elenco delle sorgenti.
+pub fn row_kind(r: &SourceRow) -> AudioSourceKind {
+    let t = trimmed(&r.target);
+    let device = (!t.is_empty()).then(|| t.clone());
+    match r.kind {
+        1 => AudioSourceKind::Input { device },
+        2 => AudioSourceKind::Output { device },
+        3 => AudioSourceKind::Except { exe: t },
+        _ => AudioSourceKind::App { exe: t },
+    }
+}
+
+/// Altezza dell'indicatore di volume (0-1) per un picco lineare: scala in dB da −60 a 0.
+pub fn meter_height(peak: f32) -> f32 {
+    if peak <= 0.0 { 0.0 } else { ((20.0 * peak.log10() + 60.0) / 60.0).clamp(0.0, 1.0) }
+}
+
 /// Sorgenti dall'elenco `list` (0 = clip video, 1 = clip audio) della finestra.
 fn parse_sources(list: u8, rows: &[SourceRow], problems: &mut Vec<Problem>) -> Vec<AudioSourceConfig> {
     if rows.len() > MAX_AUDIO_SOURCES {
@@ -97,23 +114,10 @@ fn parse_sources(list: u8, rows: &[SourceRow], problems: &mut Vec<Problem>) -> V
             if name.is_empty() {
                 problems.push(Problem::EmptySourceName(list, i));
             }
-            let device = (!t.is_empty()).then(|| t.clone());
-            let kind = match r.kind {
-                1 => AudioSourceKind::Input { device },
-                2 => AudioSourceKind::Output { device },
-                3 => {
-                    if t.is_empty() {
-                        problems.push(Problem::EmptyAppExe(list, i));
-                    }
-                    AudioSourceKind::Except { exe: t }
-                }
-                _ => {
-                    if t.is_empty() {
-                        problems.push(Problem::EmptyAppExe(list, i));
-                    }
-                    AudioSourceKind::App { exe: t }
-                }
-            };
+            let kind = row_kind(r);
+            if matches!(r.kind, 0 | 3) && t.is_empty() {
+                problems.push(Problem::EmptyAppExe(list, i));
+            }
             if !(-1000..=1000).contains(&r.delay) {
                 problems.push(Problem::BadDelay(list, i));
             }

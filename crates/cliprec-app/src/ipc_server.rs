@@ -62,6 +62,7 @@ pub fn handle_request(ctx: &Context, req: IpcRequest) -> IpcResponse {
             r
         }
         IpcRequest::UpdateStatus => IpcResponse::Update(ctx.updater.info()),
+        IpcRequest::AudioLevels => IpcResponse::AudioLevels(cliprec_audio::take_levels()),
         IpcRequest::CheckUpdate => {
             ctx.updater.check(false);
             IpcResponse::Ok

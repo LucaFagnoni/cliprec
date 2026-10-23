@@ -31,6 +31,8 @@ pub enum IpcRequest {
     CheckUpdate,
     /// Scarica e installa la versione trovata, poi riavvia ClipRec.
     InstallUpdate,
+    /// Picco di ogni sorgente audio dall'ultima richiesta ([`IpcResponse::AudioLevels`]).
+    AudioLevels,
 }
 
 /// Fase dell'aggiornamento automatico.
@@ -67,6 +69,8 @@ pub struct UpdateInfo {
 pub enum IpcResponse {
     Status(EngineStatus),
     Update(UpdateInfo),
+    /// Sorgente catturata e picco (0 = silenzio, 1 = fondo scala), per l'indicatore di volume.
+    AudioLevels(Vec<(crate::config::AudioSourceKind, f32)>),
     Ok,
     Error(String),
 }

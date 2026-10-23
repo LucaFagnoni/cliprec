@@ -6,12 +6,12 @@
 //!   produce blocchi da 10 ms su una griglia ancorata al QPC, con un ritardo fisso.
 
 use std::panic::AssertUnwindSafe;
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex, Weak};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use cliprec_core::config::{AudioConfig, PlannedTrack, TrackMode};
+use cliprec_core::config::{AudioConfig, AudioSourceKind, PlannedTrack, TrackMode};
 use cliprec_core::time::{frames_to_hns, hns_to_frames};
 use cliprec_core::{AudioChunk, AudioSource, AudioTrackSink, CHANNELS, HNS_PER_SEC, QpcTime, SAMPLE_RATE, SourceError, SourceState};
 
@@ -31,8 +31,27 @@ pub const MAX_DELAY_MS: i32 = 1_000;
 /// Nome della traccia con la somma di tutte le sorgenti.
 pub const MIX_TRACK_NAME: &str = "Mix";
 
+/// Picco di ogni sorgente dall'ultima lettura (bit di un f32 ≥ 0, che come u32 si ordinano allo
+/// stesso modo), per l'indicatore di volume delle impostazioni.
+struct Levels(Vec<AtomicU32>);
+
+/// Sorgenti del motore avviato con [`AudioEngine::start`] e i loro picchi.
+static CURRENT: Mutex<Option<(Vec<AudioSourceKind>, Weak<Levels>)>> = Mutex::new(None);
+
+/// Picco (0 = silenzio, 1 = fondo scala) di ogni sorgente del motore in esecuzione dall'ultima
+/// chiamata, dopo volume e mono; vuoto senza motore audio. La lettura azzera i picchi.
+pub fn take_levels() -> Vec<(AudioSourceKind, f32)> {
+    let current = CURRENT.lock().unwrap_or_else(|e| e.into_inner());
+    let Some((kinds, levels)) = current.as_ref() else { return Vec::new() };
+    let Some(levels) = levels.upgrade() else { return Vec::new() };
+    kinds.iter().cloned().zip(levels.0.iter().map(|l| f32::from_bits(l.swap(0, Ordering::Relaxed)))).collect()
+}
+
 /// Instradamento di una sorgente, eseguito sul suo thread di cattura.
 struct Route {
+    /// Picco della sorgente (`levels.0[index]`).
+    levels: Arc<Levels>,
+    index: usize,
     track: Option<usize>,
     sink: Arc<dyn AudioTrackSink>,
     volume: f32,
@@ -61,6 +80,8 @@ impl Route {
             }
         }
         let samples: &[f32] = if self.mono { &self.mono_buf[..n] } else { c.samples };
+        let peak = samples.iter().fold(0.0f32, |m, s| m.max(s.abs())) * self.volume;
+        self.levels.0[self.index].fetch_max(peak.to_bits(), Ordering::Relaxed);
         if let Some(track) = self.track {
             if self.volume == 1.0 {
                 self.sink.push(track, qpc, samples);
@@ -90,6 +111,7 @@ pub struct AudioEngine {
     mixer_thread: Option<JoinHandle<()>>,
     mix_latency: Arc<AtomicI64>,
     mixer_error: Arc<Mutex<Option<String>>>,
+    levels: Arc<Levels>,
 }
 
 impl AudioEngine {
@@ -106,7 +128,10 @@ impl AudioEngine {
         let volumes: Vec<f32> = specs.iter().map(|s| s.volume).collect();
         let delays: Vec<i32> = specs.iter().map(|s| s.delay_ms).collect();
         let monos: Vec<bool> = specs.iter().map(|s| s.mono).collect();
-        Self::with_plan(sources, &volumes, &delays, &monos, &plan.tracks, sink)
+        let engine = Self::with_plan(sources, &volumes, &delays, &monos, &plan.tracks, sink)?;
+        let kinds = specs.iter().map(|s| s.kind.clone()).collect();
+        *CURRENT.lock().unwrap_or_else(|e| e.into_inner()) = Some((kinds, Arc::downgrade(&engine.levels)));
+        Ok(engine)
     }
 
     /// Come [`Self::with_plan`] con un solo elenco: in modalità separata le sorgenti nell'ordine dato,
@@ -183,8 +208,11 @@ impl AudioEngine {
             (0..n).map(|i| tracks.iter().position(|t| matches!(t, PlannedTrack::Source(s) if *s == i))).collect();
 
         let mut errors = vec![None; n];
+        let levels = Arc::new(Levels((0..n).map(|_| AtomicU32::new(0)).collect()));
         for (i, (src, mix)) in sources.iter_mut().zip(inputs).enumerate() {
             let mut route = Route {
+                levels: levels.clone(),
+                index: i,
                 track: own[i],
                 sink: sink.clone(),
                 volume: volume(i),
@@ -216,7 +244,7 @@ impl AudioEngine {
         } else {
             None
         };
-        Ok(Self { sources, errors, stop, mixer_thread, mix_latency, mixer_error })
+        Ok(Self { sources, errors, stop, mixer_thread, mix_latency, mixer_error, levels })
     }
 
     /// Ultimo panic del thread del mixer (il mixer prosegue col blocco successivo), se c'è stato.
@@ -319,7 +347,10 @@ mod tests {
     fn mono_source_puts_the_same_signal_on_both_channels() {
         let sink = Arc::new(TestSink::default());
         sink.set_tracks(&["Mic".into()]);
+        let levels = Arc::new(Levels(vec![AtomicU32::new(0)]));
         let mut route = Route {
+            levels: levels.clone(),
+            index: 0,
             track: Some(0),
             sink: sink.clone(),
             volume: 2.0,
@@ -332,6 +363,8 @@ mod tests {
         // Solo il canale destro ha segnale, come un microfono sull'ingresso 2.
         route.push(AudioChunk { qpc: QpcTime(0), samples: &[0.0, 0.5, 0.0, 0.5] });
         assert_eq!(sink.data.lock().unwrap()[0], vec![0.5; 4]);
+        // Il picco per l'indicatore di volume è quello registrato, dopo mono e volume.
+        assert_eq!(f32::from_bits(levels.0[0].load(Ordering::Relaxed)), 0.5);
     }
 
     #[derive(Default)]

@@ -11,7 +11,7 @@ pub mod procwatch;
 mod wasapi_source;
 
 pub use exclusive::forbid_exclusive_mode;
-pub use engine::{AudioEngine, MAX_DELAY_MS, MAX_MIX_LATENCY_HNS, MIX_LATENCY_HNS, MIX_TRACK_NAME};
+pub use engine::{AudioEngine, take_levels, MAX_DELAY_MS, MAX_MIX_LATENCY_HNS, MIX_LATENCY_HNS, MIX_TRACK_NAME};
 pub use mixer::{MIX_BLOCK_FRAMES, MixInput, Mixer};
 pub use wasapi_source::{CaptureMode, NOT_RUNNING, OPENING, WasapiSource, find_root_pid, list_devices};
 

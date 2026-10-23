@@ -210,6 +210,32 @@ fn set_lang(ui: &SettingsWindow, lang: Lang) {
     i18n::apply(ui, lang);
 }
 
+/// Indicatori di volume dei due elenchi: ogni riga prende il picco della sorgente che cattura
+/// (righe uguali nei due elenchi, stesso picco) e scende piano invece di sparire tra due letture.
+fn show_levels(ui: &SettingsWindow, levels: &[(cliprec_core::config::AudioSourceKind, f32)]) {
+    thread_local! {
+        static SHOWN: RefCell<[Vec<f32>; 2]> = const { RefCell::new([Vec::new(), Vec::new()]) };
+    }
+    SHOWN.with(|shown| {
+        let mut shown = shown.borrow_mut();
+        for (list, rows) in [ui.get_sources(), ui.get_audio_sources()].iter().enumerate() {
+            let prev = &shown[list];
+            let next: Vec<f32> = rows
+                .iter()
+                .enumerate()
+                .map(|(i, r)| {
+                    let kind = model::row_kind(&r);
+                    let peak = levels.iter().find(|(k, _)| *k == kind).map_or(0.0, |(_, p)| *p);
+                    model::meter_height(peak).max(prev.get(i).copied().unwrap_or(0.0) - 0.06)
+                })
+                .collect();
+            let model = ModelRc::from(Rc::new(VecModel::from(next.clone())));
+            if list == 0 { ui.set_levels_video(model) } else { ui.set_levels_audio(model) }
+            shown[list] = next;
+        }
+    });
+}
+
 fn current_sources(rows: &VecModel<SourceRow>) -> Vec<SourceRow> {
     rows.iter().collect()
 }
@@ -623,12 +649,23 @@ fn main() -> anyhow::Result<()> {
         }
     });
 
-    // Pannello di stato: una richiesta Status al secondo su un thread, mai sul thread della UI.
+    // Pannello di stato: una richiesta Status al secondo su un thread, mai sul thread della UI; tra
+    // l'una e l'altra i livelli audio ogni 100 ms per gli indicatori di volume.
     LAST_POLL_MS.store(now_ms(), Ordering::Relaxed);
     ui.set_status_text(pipe::offline_text(lang).into());
     let weak = ui.as_weak();
     std::thread::spawn(move || {
         loop {
+            for _ in 0..10 {
+                let levels = match pipe::request(&IpcRequest::AudioLevels) {
+                    Ok(IpcResponse::AudioLevels(l)) => l,
+                    _ => Vec::new(),
+                };
+                if weak.upgrade_in_event_loop(move |ui| show_levels(&ui, &levels)).is_err() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
             let res = pipe::request(&IpcRequest::Status);
             let update = match pipe::request(&IpcRequest::UpdateStatus) {
                 Ok(IpcResponse::Update(u)) => Some(u),
@@ -661,7 +698,6 @@ fn main() -> anyhow::Result<()> {
             if !alive {
                 break;
             }
-            std::thread::sleep(Duration::from_secs(1));
         }
     });
 
