@@ -880,7 +880,7 @@ dependencies = [
 
 [[package]]
 name = "cliprec-app"
-version = "0.1.16"
+version = "0.1.17"
 dependencies = [
  "anyhow",
  "cliprec-audio",
@@ -901,7 +901,7 @@ dependencies = [
 
 [[package]]
 name = "cliprec-audio"
-version = "0.1.16"
+version = "0.1.17"
 dependencies = [
  "cliprec-core",
  "rtrb",
@@ -914,7 +914,7 @@ dependencies = [
 
 [[package]]
 name = "cliprec-buffer"
-version = "0.1.16"
+version = "0.1.17"
 dependencies = [
  "claxon",
  "cliprec-core",
@@ -928,7 +928,7 @@ dependencies = [
 
 [[package]]
 name = "cliprec-capture"
-version = "0.1.16"
+version = "0.1.17"
 dependencies = [
  "cliprec-core",
  "thiserror 2.0.21",
@@ -938,7 +938,7 @@ dependencies = [
 
 [[package]]
 name = "cliprec-core"
-version = "0.1.16"
+version = "0.1.17"
 dependencies = [
  "serde",
  "serde_json",
@@ -949,7 +949,7 @@ dependencies = [
 
 [[package]]
 name = "cliprec-encode"
-version = "0.1.16"
+version = "0.1.17"
 dependencies = [
  "cliprec-core",
  "ffmpeg-the-third",
@@ -961,7 +961,7 @@ dependencies = [
 
 [[package]]
 name = "cliprec-mux"
-version = "0.1.16"
+version = "0.1.17"
 dependencies = [
  "cliprec-buffer",
  "cliprec-core",
@@ -974,7 +974,7 @@ dependencies = [
 
 [[package]]
 name = "cliprec-settings"
-version = "0.1.16"
+version = "0.1.17"
 dependencies = [
  "anyhow",
  "cliprec-core",
@@ -985,7 +985,7 @@ dependencies = [
 
 [[package]]
 name = "cliprec-tests"
-version = "0.1.16"
+version = "0.1.17"
 dependencies = [
  "anyhow",
  "cliprec-core",
@@ -6765,7 +6765,7 @@ checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
 
 [[package]]
 name = "xtask"
-version = "0.1.16"
+version = "0.1.17"
 dependencies = [
  "anyhow",
  "cliprec-tests",
