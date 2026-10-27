@@ -363,3 +363,12 @@ Le voci [DEFAULT] e [PROPOSTA] di SPEC.md valgono come decise; qui ci sono quell
     picco di bitrate). I blocchi dell'arena liberi e mai riusati da 2 minuti si sbloccano
     (VirtualUnlock) e si liberano, tranne due tenuti pronti; se il bitrate risale si riallocano sul
     thread dell'encoder. Test: `idle_free_chunks_are_given_back`.
+58. **L'attività di avvio si legge dall'Utilità di pianificazione e si sostituisce se avvia un altro
+    programma** (27 ottobre, Luca: ClipRec non partiva più all'accesso). L'attività «ClipRec» puntava
+    a `target\dist`, cancellato: il segnaposto `avvio-amministratore` diceva che c'era, quindi non
+    veniva mai ricreata (risultato 0x80070002, file non trovato). Ora a ogni avvio ClipRec legge con
+    l'API COM dell'Utilità di pianificazione (senza privilegi; `schtasks` scrive nella code page della
+    console e storpierebbe i percorsi accentati) quale programma l'attività avvia: se è un altro, la
+    ricrea (una conferma UAC); se l'avvio come amministratore è spento e l'attività c'è, la toglie. Il
+    segnaposto sparisce. L'attività resta invisibile in Gestione attività → App di avvio, che mostra
+    solo il valore `Run` e la cartella Esecuzione automatica.

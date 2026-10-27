@@ -3,7 +3,7 @@
 //! AppUserModelID, necessario ai toast. Scrive nel registro, nel menu Start e nell'Utilità di
 //! pianificazione: non va chiamato in test né di notte (la shell lo salta con `CLIPREC_HEADLESS`).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use cliprec_core::Config;
 use windows::Win32::Foundation::{ERROR_MORE_DATA, ERROR_SUCCESS};
@@ -11,13 +11,15 @@ use windows::Win32::Storage::EnhancedStorage::PKEY_AppUserModel_ID;
 use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize, IPersistFile,
 };
+use windows::Win32::System::TaskScheduler::{IExecAction, ITaskService, TaskScheduler};
+use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, REG_BINARY, REG_SZ, RRF_RT_ANY, RegDeleteKeyValueW, RegGetValueW,
     RegSetKeyValueW,
 };
 use windows::Win32::UI::Shell::PropertiesSystem::IPropertyStore;
 use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
-use windows::core::{Interface, PCWSTR, w};
+use windows::core::{BSTR, Interface, PCWSTR, w};
 
 use crate::notify::APP_ID;
 use crate::sys::wide;
@@ -35,29 +37,39 @@ struct Plan {
     delete_task: bool,
 }
 
-/// L'attività si crea o si toglie solo quando cambia: `task_present` viene dal segnaposto scritto
-/// dopo l'ultima modifica riuscita, così non si chiede il permesso a ogni avvio.
-fn plan(start_with_windows: bool, start_as_admin: bool, task_present: bool) -> Plan {
+/// L'attività si crea o si toglie solo quando serve, così non si chiede il permesso a ogni avvio:
+/// `task` è il programma che l'attività «ClipRec» avvia adesso, se esiste. Se avvia un altro
+/// programma (ClipRec spostato o reinstallato altrove, una copia cancellata) la si sostituisce.
+fn plan(start_with_windows: bool, start_as_admin: bool, task: Option<&str>, exe: &Path) -> Plan {
     let admin = start_with_windows && start_as_admin;
-    Plan { run: start_with_windows && !admin, create_task: admin && !task_present, delete_task: !admin && task_present }
+    let ours = task.is_some_and(|t| t.trim_matches('"').eq_ignore_ascii_case(&exe.to_string_lossy()));
+    Plan { run: start_with_windows && !admin, create_task: admin && !ours, delete_task: !admin && task.is_some() }
 }
 
 /// Allinea l'avvio automatico alla configurazione e crea il collegamento del menu Start se manca.
 /// Restituisce un problema da mostrare all'utente (es. conferma di amministratore rifiutata).
 pub fn apply(config: &Config) -> Option<String> {
     let g = &config.general;
-    let marker = task_marker();
-    let p = plan(g.start_with_windows, g.start_as_admin, marker.as_ref().is_some_and(|m| m.exists()));
+    // Segnaposto delle versioni fino alla 0.1.17: l'attività ora si legge dall'Utilità di pianificazione.
+    if let Some(dir) = Config::default_path().parent() {
+        let _ = std::fs::remove_file(dir.join("avvio-amministratore"));
+    }
+    let exe = std::env::current_exe().unwrap_or_default();
+    let task = task_command();
+    let p = plan(g.start_with_windows, g.start_as_admin, task.as_deref(), &exe);
     if let Err(e) = apply_autostart(p.run) {
         tracing::warn!("avvio con Windows: {e}");
     }
     if let Err(e) = ensure_start_menu_shortcut() {
         tracing::warn!("collegamento menu Start: {e}");
     }
+    if p.create_task && task.is_some() {
+        tracing::info!(attività = ?task, programma = %exe.display(), "l'attività di avvio avvia un altro programma: la sostituisco");
+    }
     let result = if p.create_task {
-        create_task().map(|()| marker.as_ref().map(|m| std::fs::write(m, TASK)))
+        create_task()
     } else if p.delete_task {
-        delete_task().map(|()| marker.as_ref().map(std::fs::remove_file))
+        delete_task()
     } else {
         return None;
     };
@@ -73,9 +85,31 @@ pub fn apply(config: &Config) -> Option<String> {
     }
 }
 
-/// Segnaposto accanto a config.toml: c'è finché esiste l'attività pianificata creata da ClipRec.
-fn task_marker() -> Option<PathBuf> {
-    Config::default_path().parent().map(|d| d.join("avvio-amministratore"))
+/// Programma avviato dall'attività «ClipRec», se esiste. Sola lettura, senza privilegi: COM
+/// dell'Utilità di pianificazione invece dell'uscita di `schtasks`, che usa la code page della
+/// console e storpierebbe i percorsi con lettere accentate.
+fn task_command() -> Option<String> {
+    // SAFETY: inizializzazione COM del thread corrente, bilanciata sotto se riesce (anche S_FALSE).
+    let init = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+    // SAFETY: chiamate COM su interfacce valide create qui; i VARIANT vuoti chiedono il computer e
+    // l'utente correnti; `path` è un BSTR nostro che l'azione riempie.
+    let command = unsafe {
+        (|| -> windows::core::Result<String> {
+            let service: ITaskService = CoCreateInstance(&TaskScheduler, None, CLSCTX_INPROC_SERVER)?;
+            let none = VARIANT::default();
+            service.Connect(&none, &none, &none, &none)?;
+            let task = service.GetFolder(&BSTR::from("\\"))?.GetTask(&BSTR::from(TASK))?;
+            let action: IExecAction = task.Definition()?.Actions()?.get_Item(1)?.cast()?;
+            let mut path = BSTR::new();
+            action.Path(&mut path)?;
+            Ok(path.to_string())
+        })()
+    };
+    if init.is_ok() {
+        // SAFETY: bilancia il CoInitializeEx riuscito sopra, sullo stesso thread.
+        unsafe { CoUninitialize() };
+    }
+    command.ok()
 }
 
 /// Attività all'accesso dell'utente, con privilegi massimi, priorità normale, senza limite di
@@ -245,15 +279,26 @@ mod tests {
 
     #[test]
     fn admin_start_uses_the_task_and_asks_only_on_change() {
+        let exe = Path::new(r"D:\Programmi\ClipRec\cliprec-app.exe");
+        let ours = Some(r"d:\programmi\clipREC\cliprec-app.exe");
+        let moved = Some(r"D:\Repositories\cliprec\target\dist\ClipRec\cliprec-app.exe");
         // Normale: valore Run, nessuna attività.
-        assert_eq!(plan(true, false, false), Plan { run: true, create_task: false, delete_task: false });
+        assert_eq!(plan(true, false, None, exe), Plan { run: true, create_task: false, delete_task: false });
         // Come amministratore: niente Run, l'attività si crea una volta sola.
-        assert_eq!(plan(true, true, false), Plan { run: false, create_task: true, delete_task: false });
-        assert_eq!(plan(true, true, true), Plan { run: false, create_task: false, delete_task: false });
+        assert_eq!(plan(true, true, None, exe), Plan { run: false, create_task: true, delete_task: false });
+        assert_eq!(plan(true, true, ours, exe), Plan { run: false, create_task: false, delete_task: false });
+        // L'attività avvia una copia spostata o cancellata: si sostituisce.
+        assert_eq!(plan(true, true, moved, exe), Plan { run: false, create_task: true, delete_task: false });
         // «Avvia con Windows» spento: l'amministratore non conta e l'attività si toglie.
-        assert_eq!(plan(false, true, true), Plan { run: false, create_task: false, delete_task: true });
-        assert_eq!(plan(false, true, false), Plan { run: false, create_task: false, delete_task: false });
-        assert_eq!(plan(true, false, true), Plan { run: true, create_task: false, delete_task: true });
+        assert_eq!(plan(false, true, ours, exe), Plan { run: false, create_task: false, delete_task: true });
+        assert_eq!(plan(false, true, None, exe), Plan { run: false, create_task: false, delete_task: false });
+        assert_eq!(plan(true, false, moved, exe), Plan { run: true, create_task: false, delete_task: true });
+    }
+
+    /// Lettura dell'attività vera, se c'è: sola lettura, non deve andare in panic.
+    #[test]
+    fn task_command_reads_without_privileges() {
+        println!("attività ClipRec: {:?}", task_command());
     }
 
     #[test]
